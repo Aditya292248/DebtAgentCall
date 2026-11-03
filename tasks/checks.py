@@ -62,3 +62,36 @@ def _demo_part01() -> None:
 
 ACCEPTANCE["part-01"] = _accept_part01
 DEMOS["part-01"] = _demo_part01
+
+
+# ----------------------------------------------------------------------------
+# agent: keep the conversation and resend it every turn
+# ----------------------------------------------------------------------------
+
+
+def _accept_part02() -> bool:
+    from harness import Agent
+
+    agent = Agent()
+    agent.send("My name is Sam Doe. Just say OK.")
+    reply = agent.send("What is my name? Reply with only the name.")
+    print("reply:", repr(reply))
+    print("history length:", len(agent.messages))
+    return "sam doe" in reply.lower() and len(agent.messages) == 4
+
+
+def _demo_part02() -> None:
+    from harness import Agent
+
+    agent = Agent()
+    print("A1:", agent.send("My name is Sam Doe. Remember it."))
+    print("A2:", agent.send("What is my name?"))
+    print("   # it remembers: send() resent the earlier turns\n")
+
+    print("-- what the model actually received on the last call --")
+    for m in agent.messages[:-1]:
+        print(f"  {m['role']:>9}: {m['content'][:70]}")
+
+
+ACCEPTANCE["part-02"] = lambda: _accept_part01() and _accept_part02()
+DEMOS["part-02"] = _demo_part02
