@@ -2,7 +2,7 @@
 
 A debt-collection voice agent that puts compliance first, built one small step at a time.
 
-Right now the project can send messages to a language model and get a reply back, and it has an agent that remembers the conversation. The call flow and the compliance rules come later, each in its own step.
+Right now the project can send messages to a language model and get a reply back, and it has an agent that remembers the conversation and follows a system prompt kept in a file. The call flow and the compliance rules come later, each in its own step.
 
 ## What is here
 
@@ -14,6 +14,9 @@ model/
   fake.py               a fake provider, so tests run offline and give the same answer every time
 harness/
   agent.py              Agent, which keeps the conversation and resends it every turn
+  instructions.py       load_system_prompt(path), which reads the system prompt from a file
+instructions/
+  system.md             the system prompt the agent sends first on every call
 tasks/
   verify.py             offline checks: format, lint, types, tests, import
   accept.py             live check against a real model
@@ -82,6 +85,18 @@ print(agent.messages)  # user, assistant, user, assistant
 
 `Agent` takes the same optional `provider` and `model` as `chat`, so `Agent(provider=fake(...))` works offline. If the model call fails, the user message is taken back out of `agent.messages`, so the history never ends on a message with no reply.
 
+## The system prompt
+
+The agent's standing instructions live in `instructions/system.md`. On every call, `Agent` reads that file with `load_system_prompt()` and sends its text first, as a `system` message, ahead of the conversation. The prompt is not stored in `agent.messages`, so if you edit the file, the next turn uses the new text.
+
+To use a different file, pass its path:
+
+```python
+agent = Agent(system_prompt_path="my_prompt.md")
+```
+
+If the file is missing or empty, no system message is sent and the agent still works.
+
 ## Commands
 
 | Command                   | Needs a model? | What it does                                                    |
@@ -92,6 +107,8 @@ print(agent.messages)  # user, assistant, user, assistant
 | `uv run demo part-01`     | Yes            | Asks the model for a short, polite greeting to "Sam Doe"        |
 | `uv run accept part-02`   | Yes            | Checks that the agent remembers a name from the turn before     |
 | `uv run demo part-02`     | Yes            | A two-turn chat where the model remembers "Sam Doe"             |
+| `uv run accept part-03`   | Yes            | Checks that the model follows a system prompt from a file       |
+| `uv run demo part-03`     | Yes            | One turn with the system prompt, then shows what was sent       |
 
 ## Credits
 
