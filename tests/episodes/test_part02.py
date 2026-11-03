@@ -30,9 +30,9 @@ def test_history_grows_user_assistant_user_assistant():
     ]
 
 
-def test_second_call_sends_the_first_exchange():
+def test_second_call_sends_the_first_exchange(no_instructions):
     provider = fake(scripted=["r1", "r2"])
-    agent = Agent(provider=provider)
+    agent = Agent(provider=provider, system_prompt_path=no_instructions)
     agent.send("u1")
     agent.send("u2")
     responder = provider.responder
