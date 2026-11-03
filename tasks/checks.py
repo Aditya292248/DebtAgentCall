@@ -95,3 +95,39 @@ def _demo_part02() -> None:
 
 ACCEPTANCE["part-02"] = lambda: _accept_part01() and _accept_part02()
 DEMOS["part-02"] = _demo_part02
+
+
+# ----------------------------------------------------------------------------
+# system prompt: loaded from a file, sent first on every call
+# ----------------------------------------------------------------------------
+
+
+def _accept_part03() -> bool:
+    import tempfile
+    from pathlib import Path
+
+    from harness import Agent
+
+    with tempfile.TemporaryDirectory() as d:
+        prompt = Path(d) / "system.md"
+        prompt.write_text("End every reply with the exact word PINEAPPLE.", encoding="utf-8")
+        reply = Agent(system_prompt_path=prompt).send("Say hi in three words.")
+    print("reply:", repr(reply))
+    return "pineapple" in reply.lower()
+
+
+def _demo_part03() -> None:
+    from harness import Agent
+
+    agent = Agent()
+    print("system prompt file:", agent.system_prompt_path, "\n")
+    print("A:", agent.send("Hi, who is this?"), "\n")
+
+    print("-- the payload the model received --")
+    for m in agent._payload()[:-1]:
+        print(f"  {m['role']:>9}: {m['content'][:70]!r}")
+    print("   # system comes first, but agent.messages never stores it")
+
+
+ACCEPTANCE["part-03"] = lambda: _accept_part01() and _accept_part02() and _accept_part03()
+DEMOS["part-03"] = _demo_part03
