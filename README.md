@@ -2,7 +2,7 @@
 
 A debt-collection voice agent that puts compliance first, built one small step at a time.
 
-Right now the project does one thing: it sends messages to a language model and gets a reply back. The agent, the call flow and the compliance rules come later, each in its own step.
+Right now the project can send messages to a language model and get a reply back, and it has an agent that remembers the conversation. The call flow and the compliance rules come later, each in its own step.
 
 ## What is here
 
@@ -12,6 +12,8 @@ model/
   provider.py           Provider (base URL, model, API key) and LLMResponse
   openai_compatible.py  the HTTP call to an OpenAI-style /chat/completions endpoint
   fake.py               a fake provider, so tests run offline and give the same answer every time
+harness/
+  agent.py              Agent, which keeps the conversation and resends it every turn
 tasks/
   verify.py             offline checks: format, lint, types, tests, import
   accept.py             live check against a real model
@@ -65,6 +67,21 @@ assert reply.content == "hello"
 
 If `LLM_BASE_URL` is empty or missing `http://` / `https://`, `chat` raises a `ValueError` that says so, before it sends any request.
 
+## The agent
+
+The model forgets everything between calls. `Agent` fixes that by keeping the whole conversation in `agent.messages` and sending all of it every turn:
+
+```python
+from harness import Agent
+
+agent = Agent()
+agent.send("My name is Sam Doe.")
+print(agent.send("What is my name?"))  # the model can answer, because turn 1 was resent
+print(agent.messages)  # user, assistant, user, assistant
+```
+
+`Agent` takes the same optional `provider` and `model` as `chat`, so `Agent(provider=fake(...))` works offline. If the model call fails, the user message is taken back out of `agent.messages`, so the history never ends on a message with no reply.
+
 ## Commands
 
 | Command                   | Needs a model? | What it does                                                    |
@@ -73,7 +90,9 @@ If `LLM_BASE_URL` is empty or missing `http://` / `https://`, `chat` raises a `V
 | `uv run pytest -q`        | No             | Only the tests                                                  |
 | `uv run accept part-01`   | Yes            | Asks the real model two simple questions and checks the answers |
 | `uv run demo part-01`     | Yes            | Asks the model for a short, polite greeting to "Sam Doe"        |
+| `uv run accept part-02`   | Yes            | Checks that the agent remembers a name from the turn before     |
+| `uv run demo part-02`     | Yes            | A two-turn chat where the model remembers "Sam Doe"             |
 
 ## Credits
 
-The `model/` code is adapted from codingHarness, keeping only what a single model call needs.
+The `model/` and `harness/` code is adapted from codingHarness, keeping only what each step needs.
