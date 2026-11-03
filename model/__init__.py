@@ -15,7 +15,7 @@ Adapted from codingHarness, keeping only what a single model call needs.
 from __future__ import annotations
 
 from model.client import chat
-from model.fake import FakeProvider, fake
+from model.fake import FakeProvider, fake, tool_call, tool_reply
 from model.openai_compatible import complete_openai
 from model.provider import (
     DEFAULT_API_KEY,
@@ -35,4 +35,6 @@ __all__ = [
     "chat",
     "complete_openai",
     "fake",
+    "tool_call",
+    "tool_reply",
 ]

@@ -16,6 +16,7 @@ def chat(
     messages: list[dict],
     *,
     model: str | None = None,
+    tools: list | None = None,
     temperature: float = 0.0,
     max_tokens: int = 1024,
     timeout: float = 180.0,
@@ -28,6 +29,7 @@ def chat(
         return provider.responder(
             messages,
             model=model,
+            tools=tools,
             temperature=temperature,
             max_tokens=max_tokens,
         )
@@ -35,6 +37,7 @@ def chat(
         provider,
         messages,
         model=model,
+        tools=tools,
         temperature=temperature,
         max_tokens=max_tokens,
         timeout=timeout,

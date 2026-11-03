@@ -31,6 +31,7 @@ class LLMResponse:
 
     content: str
     reasoning: str | None = None
+    tool_calls: list[dict] = field(default_factory=list)
     usage: dict = field(default_factory=dict)
     finish_reason: str | None = None
     raw: dict = field(default_factory=dict)
