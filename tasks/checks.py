@@ -131,3 +131,52 @@ def _demo_part03() -> None:
 
 ACCEPTANCE["part-03"] = lambda: _accept_part01() and _accept_part02() and _accept_part03()
 DEMOS["part-03"] = _demo_part03
+
+
+# ----------------------------------------------------------------------------
+# tools and the loop: the model asks, the harness runs the tool, the model answers
+# ----------------------------------------------------------------------------
+
+
+def _print_trace(messages: list[dict]) -> None:
+    """Print each tool call the model made, and the start of its result."""
+    for m in messages:
+        for call in m.get("tool_calls", []):
+            fn = call.get("function") or {}
+            print(f"  tool> {fn.get('name')}({fn.get('arguments')})")
+        if m["role"] == "tool":
+            print(f"   ...> {m['content'][:80]!r}")
+
+
+def _accept_part04() -> bool:
+    from harness import Agent
+
+    agent = Agent()
+    reply = agent.run(
+        "Use lookup_account to find the balance for Sam Doe. "
+        "Reply with only the balance as a number."
+    )
+    _print_trace(agent.messages)
+    print("reply:", repr(reply))
+    looked_up = any(
+        (c.get("function") or {}).get("name") == "lookup_account"
+        for m in agent.messages
+        for c in m.get("tool_calls", [])
+    )
+    return looked_up and "1250" in reply.replace(",", "")
+
+
+def _demo_part04() -> None:
+    from harness import Agent
+
+    agent = Agent()
+    question = "Hi, this is Sam Doe. How much do I owe, and to whom?"
+    print("you>", question)
+    reply = agent.run(question)
+    _print_trace(agent.messages)
+    print("bot>", reply)
+    print("   # the balance came from data/accounts.json, through the tool, not from memory")
+
+
+ACCEPTANCE["part-04"] = lambda: ACCEPTANCE["part-03"]() and _accept_part04()
+DEMOS["part-04"] = _demo_part04

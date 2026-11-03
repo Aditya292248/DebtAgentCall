@@ -20,6 +20,7 @@ def complete_openai(
     messages: list[dict],
     *,
     model: str | None = None,
+    tools: list | None = None,
     temperature: float = 0.0,
     max_tokens: int = 1024,
     timeout: float = 180.0,
@@ -36,6 +37,8 @@ def complete_openai(
         "temperature": temperature,
         "max_tokens": max_tokens,
     }
+    if tools:
+        payload["tools"] = tools
 
     resp = httpx.post(
         f"{base_url.rstrip('/')}/chat/completions",
@@ -52,6 +55,7 @@ def complete_openai(
         content=msg.get("content") or "",
         # Reasoning models (Gemma, DeepSeek, ...) put their thinking here.
         reasoning=msg.get("reasoning_content"),
+        tool_calls=msg.get("tool_calls") or [],
         usage=data.get("usage") or {},
         finish_reason=choice.get("finish_reason"),
         raw=data,
