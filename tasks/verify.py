@@ -9,7 +9,7 @@ import importlib
 import subprocess
 import sys
 
-SMOKE_MODULES = ["model", "harness", "tasks.checks"]
+SMOKE_MODULES = ["model", "harness", "compliance", "tasks.checks"]
 
 
 def _run(cmd: list[str]) -> int:
@@ -24,7 +24,7 @@ def main(argv: list[str] | None = None) -> int:
         failed.append("ruff-format")
     if _run(["ruff", "check", "."]) != 0:
         failed.append("ruff-check")
-    if _run(["mypy", "model", "harness", "tasks"]) != 0:
+    if _run(["mypy", "model", "harness", "compliance", "tasks"]) != 0:
         failed.append("mypy")
     if _run(["pytest", "-q"]) != 0:
         failed.append("pytest")

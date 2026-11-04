@@ -2,7 +2,7 @@
 
 A debt-collection voice agent that puts compliance first, built one small step at a time.
 
-Right now the project can send messages to a language model and get a reply back, and it has an agent that remembers the conversation, follows a system prompt kept in a file, and can look up an account with a tool. The call flow and the compliance rules come later, each in its own step.
+Right now the project can send messages to a language model and get a reply back, and it has an agent that remembers the conversation, follows a system prompt kept in a file, and can look up an account with a tool. The first compliance rule, calling hours, is here as a plain Python check; it is not wired into the agent yet. The call flow and the other rules come later, each in its own step.
 
 ## What is here
 
@@ -16,6 +16,10 @@ harness/
   agent.py              Agent, which keeps the conversation and resends it every turn
   instructions.py       load_system_prompt(path), which reads the system prompt from a file
   tools.py              Tool, ToolRegistry, run_tool() and the first tool, lookup_account
+compliance/
+  decision.py           Decision (allow, rule_id, reason, evidence), the answer every rule gives
+  timezones.py          zones_for(zip, phone), the time zones a debtor might be in
+  hours.py              Contact and check_calling_hours(contact, when)
 instructions/
   system.md             the system prompt the agent sends first on every call
 data/
@@ -123,6 +127,30 @@ A bad tool request never crashes the loop. An unknown tool, broken JSON, a missi
 
 If the model keeps asking for tools, `run()` stops after `max_steps` model calls (10 by default) and returns `stopped: used all N steps without a final answer`. `send()` still makes exactly one call and runs no tools.
 
+## Calling hours
+
+The law (FDCPA 805(a)(1), Reg F 1006.6(b)(1)(i)) says a collector shouldn't call before 8am or after 9pm in the debtor's local time. That rule lives in plain Python, not in the prompt, so the model can't talk its way past it.
+
+```python
+from datetime import datetime, timezone
+from compliance import Contact, check_calling_hours
+
+sam = Contact(zip="90012", phone_e164="+12135550101")
+d = check_calling_hours(sam, datetime.now(timezone.utc))
+print(d.allow, d.reason)  # e.g. False  outside 08:00-21:00: 21:05 America/Los_Angeles
+```
+
+How it decides:
+
+- It finds every time zone the debtor might be in, from the ZIP code and from the phone's area code. People move and keep their number, so if the two disagree, both zones count.
+- The call is allowed only if it is from 08:00 up to 21:00 in every one of those zones. 21:00 itself is blocked.
+- If neither the ZIP nor the area code is known, we don't know their local time, so the call is blocked.
+- Any time the debtor said is bad for them (`Contact.inconvenient`, such as 12:00-13:00) is blocked too, in every zone.
+
+`when` must include a time zone, or the check raises a `ValueError`. It can be a future time, so a later tool that books a callback can use the same check. Every rule returns a `Decision` with `allow`, `rule_id` (here `"calling_hours"`), a short `reason`, and the `evidence` it looked at.
+
+The ZIP and area-code tables in `compliance/timezones.py` are small and hand-made; a real data source comes later, and so do state rules that are stricter than the federal hours. This is not legal advice.
+
 ## Commands
 
 | Command                   | Needs a model? | What it does                                                    |
@@ -137,6 +165,8 @@ If the model keeps asking for tools, `run()` stops after `max_steps` model calls
 | `uv run demo part-03`     | Yes            | One turn with the system prompt, then shows what was sent       |
 | `uv run accept part-04`   | Yes            | Checks that the model looks up Sam Doe's balance with the tool  |
 | `uv run demo part-04`     | Yes            | Sam Doe asks what they owe; shows the tool call and the answer  |
+| `uv run accept part-05`   | Yes            | Runs the earlier checks, then the calling-hours gate on examples |
+| `uv run demo part-05`     | No             | Prints allow/block for the example debtors at several times     |
 
 ## Credits
 
