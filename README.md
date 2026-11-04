@@ -2,7 +2,7 @@
 
 A debt-collection voice agent that puts compliance first, built one small step at a time.
 
-Right now the project can send messages to a language model and get a reply back, and it has an agent that remembers the conversation, follows a system prompt kept in a file, and can look up an account with a tool. The first compliance rule, calling hours, is here as a plain Python check; it is not wired into the agent yet. The call flow and the other rules come later, each in its own step.
+Right now the project can send messages to a language model and get a reply back, and it has an agent that remembers the conversation, follows a system prompt kept in a file, and can look up an account with a tool. The made-up debtors live in a local Postgres database run by Supabase. The first compliance rule, calling hours, is here as a plain Python check; it is not wired into the agent yet. The call flow and the other rules come later, each in its own step.
 
 ## What is here
 
@@ -16,14 +16,17 @@ harness/
   agent.py              Agent, which keeps the conversation and resends it every turn
   instructions.py       load_system_prompt(path), which reads the system prompt from a file
   tools.py              Tool, ToolRegistry, run_tool() and the first tool, lookup_account
+  db.py                 connect() and find_account(name), which read Postgres
 compliance/
   decision.py           Decision (allow, rule_id, reason, evidence), the answer every rule gives
   timezones.py          zones_for(zip, phone), the time zones a debtor might be in
   hours.py              Contact and check_calling_hours(contact, when)
 instructions/
   system.md             the system prompt the agent sends first on every call
-data/
-  accounts.json         a few made-up accounts that lookup_account reads
+supabase/
+  config.toml           local Supabase settings (database on port 54322)
+  migrations/           the debtor, phone and debt tables
+  seed.sql              three made-up debtors: Sam Doe, Alex Rivera, Jordan Lee
 tasks/
   verify.py             offline checks: format, lint, types, tests, import
   accept.py             live check against a real model
@@ -118,14 +121,50 @@ The model can't look anything up by itself. It can only ask. `Agent` sends it a 
 from harness import Agent
 
 agent = Agent()
-print(agent.run("I'm Sam Doe. How much do I owe?"))  # the balance comes from data/accounts.json
+print(agent.run("I'm Sam Doe. How much do I owe?"))  # the balance comes from the database
 ```
 
-There is one tool so far, `lookup_account(name)`. It reads `data/accounts.json`, a small file of made-up accounts, and returns the matching one, or says that none was found.
+There is one tool so far, `lookup_account(name)`. It reads the database (see below) and returns the matching account, or `error: no account found for '...'`.
 
 A bad tool request never crashes the loop. An unknown tool, broken JSON, a missing or extra argument, or an error inside the tool all come back to the model as an `error: ...` message, so it can try again. Every tool request gets a result.
 
 If the model keeps asking for tools, `run()` stops after `max_steps` model calls (10 by default) and returns `stopped: used all N steps without a final answer`. `send()` still makes exactly one call and runs no tools.
+
+## The database
+
+The made-up debtors live in Postgres, run locally by [Supabase](https://supabase.com/docs/guides/local-development). You need the Supabase CLI and Docker Desktop (running).
+
+```bash
+supabase start
+```
+
+This starts a local database on port 54322 and creates the tables in `supabase/migrations/`. The first time, it also loads `supabase/seed.sql`. To wipe the database and load the seed again:
+
+```bash
+supabase db reset
+```
+
+There are three tables:
+
+- `debtor`: name, date of birth, address, ZIP and state
+- `phone`: the debtor's numbers, whether each is a cell or a landline, and when consent was given or taken back
+- `debt`: the creditor, the balance in cents, and a status (`active`, `disputed`, `paused` or `closed`)
+
+The app connects with `DATABASE_URL` (see `.env.example`). It defaults to the local database, `postgresql://postgres:postgres@127.0.0.1:54322/postgres`. Row level security is on for every table, with only a read rule for signed-in Supabase users. The app's own direct connection is not limited by it.
+
+`harness/db.py` has `find_account(name)`, which `lookup_account` uses. It matches the full name, ignoring case and extra spaces. If the database is down, the tool returns an `error: lookup_account failed: ...` message instead of crashing.
+
+The tests in `tests/episodes/test_part06.py` that need the database are marked `db`. They run against the real local database. When it isn't running, they are skipped with "run `supabase start`", so `uv run verify` still works offline.
+
+```bash
+uv run pytest -m db -v
+```
+
+```bash
+uv run demo part-06
+```
+
+The demo prints the debt table, then looks up Sam Doe and a name that isn't there.
 
 ## Calling hours
 
@@ -167,6 +206,8 @@ The ZIP and area-code tables in `compliance/timezones.py` are small and hand-mad
 | `uv run demo part-04`     | Yes            | Sam Doe asks what they owe; shows the tool call and the answer  |
 | `uv run accept part-05`   | Yes            | Runs the earlier checks, then the calling-hours gate on examples |
 | `uv run demo part-05`     | No             | Prints allow/block for the example debtors at several times     |
+| `uv run accept part-06`   | Yes            | Runs the earlier checks, then looks up Sam Doe in the database  |
+| `uv run demo part-06`     | No (needs DB)  | Prints the debt table and two lookups, one for an unknown name  |
 
 ## Credits
 

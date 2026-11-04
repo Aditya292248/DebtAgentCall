@@ -12,7 +12,7 @@ can read what went wrong and try again instead of the loop crashing.
 
 A ``ToolRegistry`` is the set of tools one agent may use. ``default_tools()``
 holds the one tool so far, ``lookup_account``, which reads made-up accounts from
-``data/accounts.json``.
+Postgres through ``harness.db.find_account``.
 
 Adapted from codingHarness.
 """
@@ -22,9 +22,8 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
-from pathlib import Path
 
-ACCOUNTS_PATH = Path(__file__).resolve().parent.parent / "data" / "accounts.json"
+from harness.db import find_account
 
 
 @dataclass(frozen=True)
@@ -126,14 +125,15 @@ def run_tool(registry: ToolRegistry, name: str, arguments: str | dict | None) ->
 # ----------------------------------------------------------------------------
 
 
-def lookup_account(name: str, path: str | Path = ACCOUNTS_PATH) -> str:
-    """The account for ``name`` as JSON, or a plain "no account" line. Case-insensitive."""
-    accounts = json.loads(Path(path).read_text(encoding="utf-8"))
-    wanted = name.strip().lower()
-    for account in accounts:
-        if account["name"].lower() == wanted:
-            return json.dumps(account)
-    return f"no account found for {name!r}"
+def lookup_account(name: str, find: Callable[[str], dict | None] | None = None) -> str:
+    """The account for ``name`` as JSON, or an ``error: no account found`` line.
+
+    ``find`` defaults to the database; tests that run offline pass their own.
+    """
+    account = (find or find_account)(name)
+    if account is None:
+        return f"error: no account found for {name!r}"
+    return json.dumps(account)
 
 
 LOOKUP_ACCOUNT = Tool(

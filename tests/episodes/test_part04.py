@@ -5,6 +5,10 @@ the result back as a ``tool`` message, and keeps calling the model until it answ
 in plain text, or stops after ``max_steps``. Bad tool calls come back as ``error:``
 strings instead of crashing. Runs against the fake provider, so it is offline and
 deterministic; the live-model version is ``uv run accept part-04``.
+
+``lookup_account`` reads Postgres now. These tests swap in the same made-up
+accounts held in memory, so they still run without a database; the database
+itself is tested in ``test_part06.py``.
 """
 
 from __future__ import annotations
@@ -17,6 +21,33 @@ import pytest
 from harness import Agent
 from harness.tools import Tool, ToolRegistry, default_tools, lookup_account, run_tool
 from model import FakeProvider, LLMResponse, fake, tool_call, tool_reply
+
+ACCOUNTS = [
+    {
+        "account_id": "ACC-1001",
+        "name": "Sam Doe",
+        "creditor": "Northwind Furniture",
+        "balance": "1250.00",
+        "currency": "USD",
+    },
+    {
+        "account_id": "ACC-1002",
+        "name": "Alex Rivera",
+        "creditor": "Bluebird Dental",
+        "balance": "310.45",
+        "currency": "USD",
+    },
+]
+
+
+def _find_in_memory(name: str) -> dict | None:
+    wanted = " ".join(name.split()).lower()
+    return next((a for a in ACCOUNTS if a["name"].lower() == wanted), None)
+
+
+@pytest.fixture(autouse=True)
+def _accounts_in_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("harness.tools.find_account", _find_in_memory)
 
 
 def _responder(agent: Agent) -> FakeProvider:
@@ -65,13 +96,12 @@ def test_lookup_account_finds_sam_doe_case_insensitively():
 
 
 def test_lookup_account_unknown_name():
-    assert lookup_account("Nobody Here") == "no account found for 'Nobody Here'"
+    assert lookup_account("Nobody Here") == "error: no account found for 'Nobody Here'"
 
 
-def test_lookup_account_reads_any_fixture(tmp_path: Path):
-    f = tmp_path / "accounts.json"
-    f.write_text(json.dumps([{"name": "Test Person", "balance": "1.00"}]), encoding="utf-8")
-    assert json.loads(lookup_account("Test Person", f))["balance"] == "1.00"
+def test_lookup_account_uses_the_finder_it_is_given():
+    account = {"name": "Test Person", "balance": "1.00"}
+    assert json.loads(lookup_account("Test Person", lambda name: account))["balance"] == "1.00"
 
 
 # --- run_tool -----------------------------------------------------------------
