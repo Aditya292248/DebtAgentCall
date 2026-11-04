@@ -10,6 +10,10 @@ proven can silently regress.
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from compliance import Contact
 
 ACCEPTANCE: dict[str, Callable[[], bool]] = {}
 DEMOS: dict[str, Callable[[], None]] = {}
@@ -180,3 +184,79 @@ def _demo_part04() -> None:
 
 ACCEPTANCE["part-04"] = lambda: ACCEPTANCE["part-03"]() and _accept_part04()
 DEMOS["part-04"] = _demo_part04
+
+
+# ----------------------------------------------------------------------------
+# calling hours: no calls before 8am or from 9pm on, in every zone the debtor may be in
+# ----------------------------------------------------------------------------
+
+
+def _example_contacts() -> dict[str, Contact]:
+    """Made-up contact details for the made-up debtors, for the gate to check."""
+    from datetime import time
+
+    from compliance import Contact
+
+    return {
+        "Sam Doe (Los Angeles)": Contact(zip="90012", phone_e164="+12135550101"),
+        # Lives in New York but kept a San Francisco phone number: two zones.
+        "Alex Rivera (NY ZIP, 415 phone)": Contact(zip="10001", phone_e164="+14155550102"),
+        "Jordan Lee (Chicago, no calls 12-1)": Contact(
+            zip="60601", phone_e164="+13125550103", inconvenient=[(time(12), time(13))]
+        ),
+        "Unknown (no known ZIP or area code)": Contact(zip="00000", phone_e164="+19995550000"),
+    }
+
+
+def _accept_part05() -> bool:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from compliance import check_calling_hours
+
+    contacts = _example_contacts()
+    eastern = ZoneInfo("America/New_York")
+
+    def at(day: int, hour: int, minute: int = 0) -> datetime:
+        return datetime(2026, 11, day, hour, minute, tzinfo=eastern)
+
+    sam, alex = "Sam Doe (Los Angeles)", "Alex Rivera (NY ZIP, 415 phone)"
+    jordan, unknown = "Jordan Lee (Chicago, no calls 12-1)", "Unknown (no known ZIP or area code)"
+    cases = [
+        # (contact, time in New York, expected allow)
+        (sam, at(3, 14), True),
+        (sam, at(4, 0, 5), False),  # 21:05 in Los Angeles
+        (alex, at(3, 8, 30), False),  # 05:30 in San Francisco
+        (alex, at(3, 12), True),
+        (jordan, at(3, 13, 30), False),  # 12:30 in Chicago, inside their window
+        (unknown, at(3, 12), False),
+    ]
+    ok = True
+    for name, when, expected in cases:
+        d = check_calling_hours(contacts[name], when)
+        good = d.allow is expected and d.rule_id == "calling_hours"
+        ok = ok and good
+        verdict = "allow" if d.allow else "block"
+        print(f"  {'ok ' if good else 'BAD'} {name:<38} {verdict:<5} {d.reason}")
+    return ok
+
+
+def _demo_part05() -> None:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from compliance import check_calling_hours
+
+    eastern = ZoneInfo("America/New_York")
+    for hour in (8, 11, 13, 20, 23):
+        when = datetime(2026, 11, 3, hour, 30, tzinfo=eastern)
+        print(f"-- calling at {when:%H:%M} New York time --")
+        for name, contact in _example_contacts().items():
+            d = check_calling_hours(contact, when)
+            print(f"  {'ALLOW' if d.allow else 'BLOCK'}  {name:<38} {d.reason}")
+        print()
+    print("   # plain Python decides; the model is never asked")
+
+
+ACCEPTANCE["part-05"] = lambda: ACCEPTANCE["part-04"]() and _accept_part05()
+DEMOS["part-05"] = _demo_part05
