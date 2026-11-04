@@ -5,8 +5,13 @@ back to a local ``.env`` file and then to the local Supabase default. The server
 talks to Postgres directly like this; row level security only limits users who
 come in through Supabase's API.
 
-``find_account(name)`` is the one query so far: the debt for a person, matched
-on their full name without caring about case or extra spaces, or ``None``.
+``find_account(name)`` is the debt for a person, matched on their full name
+without caring about case or extra spaces, or ``None``.
+
+The pre-call loaders read what ``compliance.check_before_call`` needs for one
+debt: ``load_attempts``, ``load_phone`` and ``load_flags`` each read one thing,
+and ``load_call_facts(account_number)`` puts them together as ``CallFacts``.
+They only load; all the deciding stays in ``compliance/``.
 
 The tables and seed data live in ``supabase/``. Run ``supabase start`` to get a
 local database, and ``supabase db reset`` to reload the seed.
@@ -18,6 +23,7 @@ import os
 
 import psycopg
 
+from compliance import Attempt, CallFacts, Flag, PhoneConsent
 from model.provider import _load_dotenv
 
 DEFAULT_DATABASE_URL = "postgresql://postgres:postgres@127.0.0.1:54322/postgres"
@@ -58,3 +64,91 @@ def find_account(name: str) -> dict | None:
         "balance": f"{balance_cents // 100}.{balance_cents % 100:02d}",
         "currency": "USD",
     }
+
+
+# --- pre-call loaders ----------------------------------------------------------
+
+DEBT_SQL = """
+    select d.id::text, p.zip
+    from public.debt d
+    join public.debtor p on p.id = d.debtor_id
+    where d.account_number = %s
+"""
+
+ATTEMPTS_SQL = """
+    select debt_id::text, placed_at, connected, conversation_with_debtor, outcome
+    from public.call_attempt
+    where debt_id = %s
+    order by placed_at
+"""
+
+# One number per debtor for now: the first by number, so the choice is stable.
+PHONE_SQL = """
+    select ph.e164, ph.consent_at, ph.consent_source, ph.revoked_at, ph.line_type
+    from public.debt d
+    join public.phone ph on ph.debtor_id = d.debtor_id
+    where d.id = %s
+    order by ph.e164
+    limit 1
+"""
+
+# Flags for the debt's debtor: the ones for every debt, and the ones for this one.
+FLAGS_SQL = """
+    select f.kind, f.debt_id::text, f.data, f.set_at, f.source
+    from public.debt d
+    join public.flags f on f.debtor_id = d.debtor_id
+    where d.id = %s and (f.debt_id is null or f.debt_id = d.id)
+    order by f.set_at, f.kind
+"""
+
+
+def load_attempts(conn: psycopg.Connection, debt_id: str) -> list[Attempt]:
+    rows = conn.execute(ATTEMPTS_SQL, (debt_id,)).fetchall()
+    return [
+        Attempt(
+            debt_id=d,
+            placed_at=placed_at,
+            connected=connected,
+            conversation_with_debtor=talked,
+            outcome=outcome,
+        )
+        for d, placed_at, connected, talked, outcome in rows
+    ]
+
+
+def load_phone(conn: psycopg.Connection, debt_id: str) -> PhoneConsent | None:
+    row = conn.execute(PHONE_SQL, (debt_id,)).fetchone()
+    if row is None:
+        return None
+    e164, consent_at, consent_source, revoked_at, line_type = row
+    return PhoneConsent(
+        e164=e164,
+        consent_at=consent_at,
+        consent_source=consent_source,
+        revoked_at=revoked_at,
+        line_type=line_type,
+    )
+
+
+def load_flags(conn: psycopg.Connection, debt_id: str) -> list[Flag]:
+    rows = conn.execute(FLAGS_SQL, (debt_id,)).fetchall()
+    return [
+        Flag(kind=kind, debt_id=d, data=dict(data or {}), set_at=set_at, source=source)
+        for kind, d, data, set_at, source in rows
+    ]
+
+
+def load_call_facts(account_number: str) -> CallFacts | None:
+    """Everything the pre-call checks need for one debt, or None if there's no such debt."""
+    with connect() as conn:
+        row = conn.execute(DEBT_SQL, (account_number,)).fetchone()
+        if row is None:
+            return None
+        debt_id, zip_code = row
+        return CallFacts(
+            debt_id=debt_id,
+            zip=zip_code,
+            phone=load_phone(conn, debt_id),
+            attempts=load_attempts(conn, debt_id),
+            flags=load_flags(conn, debt_id),
+        )

@@ -306,3 +306,66 @@ def _demo_part06() -> None:
 
 ACCEPTANCE["part-06"] = lambda: ACCEPTANCE["part-05"]() and _accept_part06()
 DEMOS["part-06"] = _demo_part06
+
+
+# ----------------------------------------------------------------------------
+# pre-call checks: call limits, consent, stop requests, lawyers, bankruptcy
+# ----------------------------------------------------------------------------
+
+# A fixed time so the seeded call history always gives the same answers:
+# 2026-11-05 14:00 in New York, 11:00 in Los Angeles.
+_PART07_WHEN = "2026-11-05T19:00:00+00:00"
+
+# account -> (who, the rules expected to block at _PART07_WHEN)
+_PART07_EXPECTED: dict[str, tuple[str, list[str]]] = {
+    "ACC-1001": ("Sam Doe", []),
+    "ACC-1002": ("Alex Rivera", []),
+    "ACC-1003": ("Jordan Lee", ["call_frequency"]),
+    "ACC-1004": ("Casey Morgan", ["call_frequency"]),
+    "ACC-1005": ("Riley Chen", ["tcpa_consent"]),
+    "ACC-1006": ("Taylor Brooks", ["tcpa_consent"]),
+    "ACC-1007": ("Morgan Patel", ["cease"]),
+    "ACC-1008": ("Parker Reed", ["cease"]),
+    "ACC-1009": ("Avery Ortiz", ["dnc"]),
+    "ACC-1010": ("Robin Hale", ["attorney"]),
+    "ACC-1011": ("Drew Kim", ["bankruptcy"]),
+    "ACC-1012": ("Quinn Walsh", ["deceased"]),
+}
+
+
+def _accept_part07() -> bool:
+    from datetime import datetime
+
+    from compliance import check_before_call, may_call
+    from harness.db import load_call_facts
+
+    when = datetime.fromisoformat(_PART07_WHEN)
+    ok = True
+    for account, (who, expected) in _PART07_EXPECTED.items():
+        decisions = check_before_call(load_call_facts(account), when)
+        blocked = [d.rule_id for d in decisions if not d.allow]
+        good = blocked == expected and may_call(decisions) is (not expected)
+        ok = ok and good
+        print(f"  {'ok ' if good else 'BAD'} {account} {who:<14} blocked by {blocked or 'nothing'}")
+    return ok
+
+
+def _demo_part07() -> None:
+    from datetime import datetime
+
+    from compliance import check_before_call, may_call
+    from harness.db import load_call_facts
+
+    when = datetime.fromisoformat(_PART07_WHEN)
+    print(f"checking every made-up debtor for a call at {when:%Y-%m-%d %H:%M} UTC\n")
+    for account, (who, _) in _PART07_EXPECTED.items():
+        decisions = check_before_call(load_call_facts(account), when)
+        print(f"{account} {who}: {'MAY CALL' if may_call(decisions) else 'DO NOT CALL'}")
+        for d in decisions:
+            print(f"  {'allow' if d.allow else 'BLOCK'}  {d.rule_id:<14} {d.reason}")
+        print()
+    print("   # one BLOCK is enough to stop the call; the model is never asked")
+
+
+ACCEPTANCE["part-07"] = lambda: ACCEPTANCE["part-06"]() and _accept_part07()
+DEMOS["part-07"] = _demo_part07
