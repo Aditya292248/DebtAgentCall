@@ -2,7 +2,7 @@
 
 A debt-collection voice agent that puts compliance first, built one small step at a time.
 
-Right now the project can send messages to a language model and get a reply back, and it has an agent that remembers the conversation, follows a system prompt kept in a file, and can look up an account with a tool. The made-up debtors live in a local Postgres database run by Supabase. The first compliance rule, calling hours, is here as a plain Python check; it is not wired into the agent yet. The call flow and the other rules come later, each in its own step.
+Right now the project can send messages to a language model and get a reply back, and it has an agent that remembers the conversation, follows a system prompt kept in a file, and can look up an account with a tool. The made-up debtors live in a local Postgres database run by Supabase. The pre-call compliance rules (calling hours, the 7-in-7 call limit, consent, stop requests, do-not-call, lawyers, bankruptcy and death) are here as plain Python checks; they are not wired into the agent yet. The call flow and the other rules come later, each in its own step.
 
 ## What is here
 
@@ -16,17 +16,21 @@ harness/
   agent.py              Agent, which keeps the conversation and resends it every turn
   instructions.py       load_system_prompt(path), which reads the system prompt from a file
   tools.py              Tool, ToolRegistry, run_tool() and the first tool, lookup_account
-  db.py                 connect() and find_account(name), which read Postgres
+  db.py                 connect(), find_account(name) and the pre-call loaders, which read Postgres
 compliance/
   decision.py           Decision (allow, rule_id, reason, evidence), the answer every rule gives
   timezones.py          zones_for(zip, phone), the time zones a debtor might be in
   hours.py              Contact and check_calling_hours(contact, when)
+  attempts.py           Attempt and check_call_frequency, the 7-calls-in-7-days limit
+  consent.py            PhoneConsent and check_consent
+  flags.py              Flag and the checks for stop requests, do-not-call, lawyers, bankruptcy, death
+  precall.py            CallFacts, check_before_call(facts, when) and may_call(decisions)
 instructions/
   system.md             the system prompt the agent sends first on every call
 supabase/
   config.toml           local Supabase settings (database on port 54322)
-  migrations/           the debtor, phone and debt tables
-  seed.sql              three made-up debtors: Sam Doe, Alex Rivera, Jordan Lee
+  migrations/           the debtor, phone, debt, call_attempt and flags tables
+  seed.sql              made-up debtors, with call history and flags for each pre-call check
 tasks/
   verify.py             offline checks: format, lint, types, tests, import
   accept.py             live check against a real model
@@ -190,6 +194,40 @@ How it decides:
 
 The ZIP and area-code tables in `compliance/timezones.py` are small and hand-made; a real data source comes later, and so do state rules that are stricter than the federal hours. This is not legal advice.
 
+## Pre-call checks
+
+Before any call, `check_before_call(facts, when)` runs every check and returns all their decisions. `may_call(decisions)` is True only if every one allows. Like calling hours, each check is plain Python that looks at facts from the database, never at the model's words.
+
+| Rule id          | Blocks the call when                                                                 |
+| ---------------- | ------------------------------------------------------------------------------------ |
+| `calling_hours`  | it is outside 08:00-21:00 in any zone the debtor may be in (see above)                |
+| `call_frequency` | this debt already had 7 calls in the last 7 days, answered or not, or a conversation with the debtor in the last 7 days (Reg F 1006.14(b)(2)) |
+| `tcpa_consent`   | the number has no consent on file, or the consent was revoked                         |
+| `cease`          | the debtor asked us to stop (`cease`), or to stop calling this number (`opt_out_phone`) |
+| `dnc`            | the number is on a do-not-call list                                                   |
+| `attorney`       | a lawyer represents the debtor on this debt                                           |
+| `bankruptcy`     | the debtor filed for bankruptcy                                                       |
+| `deceased`       | the debtor has died                                                                   |
+
+Missing data blocks too: no phone record, no call history or no flags loaded each turn into a blocked decision.
+
+```python
+from datetime import datetime, timezone
+from compliance import check_before_call, may_call
+from harness.db import load_call_facts
+
+decisions = check_before_call(load_call_facts("ACC-1004"), datetime.now(timezone.utc))
+print(may_call(decisions), [d.reason for d in decisions if not d.allow])
+```
+
+The facts come from two new tables: `call_attempt` (one row per call placed) and `flags` (stop requests, lawyers, bankruptcy and the rest). The seed adds one made-up debtor for each way a call can be blocked. `harness/db.py` only loads; the checks in `compliance/` do all the deciding, so they can be tested without a database.
+
+```bash
+uv run demo part-07
+```
+
+The demo checks every made-up debtor at a fixed time (2026-11-05, 14:00 in New York), so the seeded call history always gives the same answers. This is not legal advice.
+
 ## Commands
 
 | Command                   | Needs a model? | What it does                                                    |
@@ -208,6 +246,8 @@ The ZIP and area-code tables in `compliance/timezones.py` are small and hand-mad
 | `uv run demo part-05`     | No             | Prints allow/block for the example debtors at several times     |
 | `uv run accept part-06`   | Yes            | Runs the earlier checks, then looks up Sam Doe in the database  |
 | `uv run demo part-06`     | No (needs DB)  | Prints the debt table and two lookups, one for an unknown name  |
+| `uv run accept part-07`   | Yes            | Runs the earlier checks, then the pre-call checks on every seeded debtor |
+| `uv run demo part-07`     | No (needs DB)  | Prints every pre-call decision for each made-up debtor          |
 
 ## Credits
 
