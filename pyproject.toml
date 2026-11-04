@@ -14,6 +14,7 @@ dependencies = [
 verify = "tasks.verify:main"
 accept = "tasks.accept:main"
 demo = "tasks.demo:main"
+audit-verify = "tasks.audit_verify:main"
 
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11"]

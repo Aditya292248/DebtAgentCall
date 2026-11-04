@@ -9,7 +9,15 @@ import importlib
 import subprocess
 import sys
 
-SMOKE_MODULES = ["model", "harness", "compliance", "tasks.checks"]
+SMOKE_MODULES = [
+    "model",
+    "harness",
+    "compliance",
+    "compliance.audit",
+    "harness.precall",
+    "tasks.checks",
+    "tasks.audit_verify",
+]
 
 
 def _run(cmd: list[str]) -> int:

@@ -138,17 +138,24 @@ def load_flags(conn: psycopg.Connection, debt_id: str) -> list[Flag]:
     ]
 
 
-def load_call_facts(account_number: str) -> CallFacts | None:
-    """Everything the pre-call checks need for one debt, or None if there's no such debt."""
-    with connect() as conn:
-        row = conn.execute(DEBT_SQL, (account_number,)).fetchone()
-        if row is None:
-            return None
-        debt_id, zip_code = row
-        return CallFacts(
-            debt_id=debt_id,
-            zip=zip_code,
-            phone=load_phone(conn, debt_id),
-            attempts=load_attempts(conn, debt_id),
-            flags=load_flags(conn, debt_id),
-        )
+def load_call_facts(
+    account_number: str, conn: psycopg.Connection | None = None
+) -> CallFacts | None:
+    """Everything the pre-call checks need for one debt, or None if there's no such debt.
+
+    Pass ``conn`` to read inside a transaction you already have open.
+    """
+    if conn is None:
+        with connect() as own:
+            return load_call_facts(account_number, own)
+    row = conn.execute(DEBT_SQL, (account_number,)).fetchone()
+    if row is None:
+        return None
+    debt_id, zip_code = row
+    return CallFacts(
+        debt_id=debt_id,
+        zip=zip_code,
+        phone=load_phone(conn, debt_id),
+        attempts=load_attempts(conn, debt_id),
+        flags=load_flags(conn, debt_id),
+    )
