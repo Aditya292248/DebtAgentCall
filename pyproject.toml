@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "httpx>=0.27",
+    "psycopg[binary]>=3.3.7",
     "tzdata>=2026.6",
 ]
 
@@ -38,3 +39,4 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = ["db: needs the local Supabase database (`supabase start`); skipped without it"]

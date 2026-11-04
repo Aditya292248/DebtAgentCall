@@ -1,0 +1,21 @@
+# Local Supabase for development: `supabase start`, then `supabase db reset`.
+# Only the settings this project relies on; the CLI fills in the rest.
+project_id = "DebtAgentCall"
+
+[api]
+enabled = true
+port = 54321
+
+[db]
+# The app connects here directly (DATABASE_URL in .env.example).
+port = 54322
+shadow_port = 54320
+major_version = 17
+
+[db.seed]
+enabled = true
+sql_paths = ["./seed.sql"]
+
+[studio]
+enabled = true
+port = 54323

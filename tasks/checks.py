@@ -179,7 +179,7 @@ def _demo_part04() -> None:
     reply = agent.run(question)
     _print_trace(agent.messages)
     print("bot>", reply)
-    print("   # the balance came from data/accounts.json, through the tool, not from memory")
+    print("   # the balance came from the database, through the tool, not from memory")
 
 
 ACCEPTANCE["part-04"] = lambda: ACCEPTANCE["part-03"]() and _accept_part04()
@@ -260,3 +260,49 @@ def _demo_part05() -> None:
 
 ACCEPTANCE["part-05"] = lambda: ACCEPTANCE["part-04"]() and _accept_part05()
 DEMOS["part-05"] = _demo_part05
+
+
+# ----------------------------------------------------------------------------
+# supabase: the made-up debtors live in a real Postgres database
+# ----------------------------------------------------------------------------
+
+
+def _accept_part06() -> bool:
+    from harness.db import database_url, find_account
+    from harness.tools import lookup_account
+
+    print("database:", database_url())
+    sam = find_account("Sam Doe")
+    print("Sam Doe:", sam)
+    unknown = lookup_account("Nobody Here")
+    print("unknown:", repr(unknown))
+    return (
+        sam is not None
+        and sam["balance"] == "1250.00"
+        and unknown.startswith("error: no account found")
+    )
+
+
+def _demo_part06() -> None:
+    from harness.db import connect, database_url
+    from harness.tools import lookup_account
+
+    print("database:", database_url(), "\n")
+    print("-- what is in the debt table --")
+    with connect() as conn:
+        rows = conn.execute(
+            "select d.account_number, p.first_name || ' ' || p.last_name, d.creditor, "
+            "d.balance_cents, d.status from public.debt d "
+            "join public.debtor p on p.id = d.debtor_id order by d.account_number"
+        ).fetchall()
+    for number, name, creditor, cents, status in rows:
+        print(f"  {number}  {name:<12} {creditor:<20} {cents:>7} cents  {status}")
+    print()
+    for name in ("Sam Doe", "Nobody Here"):
+        print(f"lookup_account({name!r})")
+        print("  ->", lookup_account(name))
+    print("   # the tool reads Postgres now; an unknown name is an error string, not a crash")
+
+
+ACCEPTANCE["part-06"] = lambda: ACCEPTANCE["part-05"]() and _accept_part06()
+DEMOS["part-06"] = _demo_part06
