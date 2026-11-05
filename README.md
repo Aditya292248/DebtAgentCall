@@ -2,7 +2,7 @@
 
 A debt-collection voice agent that puts compliance first, built one small step at a time.
 
-Right now the project can send messages to a language model and get a reply back, and it has an agent that remembers the conversation, follows a system prompt kept in a file, and can look up an account with a tool. The made-up debtors live in a local Postgres database run by Supabase. The pre-call compliance rules (calling hours, the 7-in-7 call limit, consent, stop requests, do-not-call, lawyers, bankruptcy and death) are here as plain Python checks; they are not wired into the agent yet. The call flow and the other rules come later, each in its own step.
+Right now the project can send messages to a language model and get a reply back, and it has an agent that remembers the conversation, follows a system prompt kept in a file, and can look up an account with a tool. The made-up debtors live in a local Postgres database run by Supabase. The pre-call compliance rules (calling hours, the 7-in-7 call limit, consent, stop requests, do-not-call, lawyers, bankruptcy and death) are here as plain Python checks; they are not wired into the agent yet. Every decision they make can be written to an append-only audit log that the database won't let anyone edit. The call flow and the other rules come later, each in its own step.
 
 ## What is here
 
@@ -17,6 +17,7 @@ harness/
   instructions.py       load_system_prompt(path), which reads the system prompt from a file
   tools.py              Tool, ToolRegistry, run_tool() and the first tool, lookup_account
   db.py                 connect(), find_account(name) and the pre-call loaders, which read Postgres
+  precall.py            check_and_record(conn, account, when): run the pre-call checks, log every decision
 compliance/
   decision.py           Decision (allow, rule_id, reason, evidence), the answer every rule gives
   timezones.py          zones_for(zip, phone), the time zones a debtor might be in
@@ -25,17 +26,19 @@ compliance/
   consent.py            PhoneConsent and check_consent
   flags.py              Flag and the checks for stop requests, do-not-call, lawyers, bankruptcy, death
   precall.py            CallFacts, check_before_call(facts, when) and may_call(decisions)
+  audit.py              record(conn, decision) and verify_chain(conn), the audit log's hash chain
 instructions/
   system.md             the system prompt the agent sends first on every call
 supabase/
   config.toml           local Supabase settings (database on port 54322)
-  migrations/           the debtor, phone, debt, call_attempt and flags tables
+  migrations/           the debtor, phone, debt, call_attempt, flags and audit_event tables
   seed.sql              made-up debtors, with call history and flags for each pre-call check
 tasks/
   verify.py             offline checks: format, lint, types, tests, import
   accept.py             live check against a real model
   demo.py               a short live demo
   checks.py             the live checks and demos the two scripts above run
+  audit_verify.py       `uv run audit-verify`, which checks every hash in the audit log
 tests/
   episodes/             offline tests that use the fake provider
 ```
@@ -228,6 +231,45 @@ uv run demo part-07
 
 The demo checks every made-up debtor at a fixed time (2026-11-05, 14:00 in New York), so the seeded call history always gives the same answers. This is not legal advice.
 
+## The audit log
+
+Regulators can ask why a call was or wasn't placed, so every check's decision is kept in the `audit_event` table: when, which debt, which rule, allow or block, the reason and the evidence. `check_and_record` runs the pre-call checks and writes one row per decision, allowed and blocked alike:
+
+```python
+from datetime import datetime, timezone
+from compliance import may_call
+from harness.db import connect
+from harness.precall import check_and_record
+
+with connect() as conn:
+    decisions = check_and_record(conn, "ACC-1011", datetime.now(timezone.utc))
+    print(may_call(decisions))  # False: Drew filed for bankruptcy, and that row is in the log
+```
+
+The log can only grow. The database itself enforces this, so it doesn't depend on our code behaving:
+
+- `update`, `delete` and `truncate` are refused by triggers, and revoked from every role, the app's own login included. A correction is a new row.
+- Each row stores the hash of the row before it (`prev_hash`) and its own `hash`, which covers that link plus all of its fields. The insert trigger fills these in (and the row number and time) under a lock, so two inserts at once can't fork the chain.
+- Row level security is on, with read access for signed-in users only.
+
+`uv run audit-verify` recomputes every hash in Python and exits 1 with the problems if a row was changed, or removed from before the newest one. If someone with full database access switches the triggers off and edits an old row, that row's hash stops matching, and the check catches it.
+
+What the chain can't prove on its own: the hash method is public and uses no secret key, so someone with full database access who also recomputes every later hash leaves a chain that checks out. Cutting rows off the end does the same. Both are caught only by comparing against a copy of the newest `seq` and `hash` kept outside the database, which is planned for later (a regular export to Supabase Storage). Until then, treat the log as protection against mistakes and casual edits, not against someone who controls the database.
+
+```bash
+uv run audit-verify
+```
+
+If Windows blocks the generated `audit-verify.exe`, `uv run python -m tasks.audit_verify` runs the same check.
+
+`compliance/audit.py` explains exactly how a hash is made, so anyone can check the log with their own code. The tests in `tests/episodes/test_part08.py` run inside transactions that are rolled back, so they never leave rows behind.
+
+```bash
+uv run demo part-08
+```
+
+The demo runs the pre-call checks for every made-up debtor, prints the rows it added and then the `audit-verify` result. These rows are kept; `supabase db reset` clears them.
+
 ## Commands
 
 | Command                   | Needs a model? | What it does                                                    |
@@ -248,6 +290,9 @@ The demo checks every made-up debtor at a fixed time (2026-11-05, 14:00 in New Y
 | `uv run demo part-06`     | No (needs DB)  | Prints the debt table and two lookups, one for an unknown name  |
 | `uv run accept part-07`   | Yes            | Runs the earlier checks, then the pre-call checks on every seeded debtor |
 | `uv run demo part-07`     | No (needs DB)  | Prints every pre-call decision for each made-up debtor          |
+| `uv run accept part-08`   | Yes            | Runs the earlier checks, then records every debtor's decisions and checks the chain |
+| `uv run demo part-08`     | No (needs DB)  | Records the pre-call decisions, prints the audit rows and the chain check |
+| `uv run audit-verify`     | No (needs DB)  | Recomputes every audit hash; exits 1 if any row was changed or removed |
 
 ## Credits
 

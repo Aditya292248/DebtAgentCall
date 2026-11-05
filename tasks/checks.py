@@ -369,3 +369,71 @@ def _demo_part07() -> None:
 
 ACCEPTANCE["part-07"] = lambda: ACCEPTANCE["part-06"]() and _accept_part07()
 DEMOS["part-07"] = _demo_part07
+
+
+# ----------------------------------------------------------------------------
+# audit log: every pre-call decision, in a hash chain nobody can edit
+# ----------------------------------------------------------------------------
+
+
+def _accept_part08() -> bool:
+    from datetime import datetime
+
+    from compliance.audit import verify_chain
+    from harness.db import connect
+    from harness.precall import check_and_record
+
+    when = datetime.fromisoformat(_PART07_WHEN)
+    ok = True
+    # Rolled back, so checking doesn't add rows to the real log.
+    with connect() as conn, conn.transaction(force_rollback=True):
+        for account, (who, expected) in _PART07_EXPECTED.items():
+            before = conn.execute("select coalesce(max(seq), 0) from public.audit_event")
+            start = before.fetchone()
+            decisions = check_and_record(conn, account, when)
+            recorded = conn.execute(
+                "select rule_id from public.audit_event where seq > %s and decision = 'block' "
+                "order by seq",
+                start,
+            ).fetchall()
+            good = len(decisions) == 8 and [r[0] for r in recorded] == expected
+            ok = ok and good
+            print(f"  {'ok ' if good else 'BAD'} {account} {who:<14} recorded blocks {expected}")
+        problems = verify_chain(conn)
+    print("chain problems:", problems or "none")
+    return ok and not problems
+
+
+def _demo_part08() -> None:
+    from datetime import datetime
+
+    from compliance import may_call
+    from compliance.audit import rows
+    from harness.db import connect
+    from harness.precall import check_and_record
+    from tasks.audit_verify import run
+
+    when = datetime.fromisoformat(_PART07_WHEN)
+    with connect() as conn:
+        start_row = conn.execute("select coalesce(max(seq), 0) from public.audit_event").fetchone()
+        start = start_row[0] if start_row else 0
+        for account, (who, _) in _PART07_EXPECTED.items():
+            decisions = check_and_record(conn, account, when)
+            print(f"{account} {who:<14} {'MAY CALL' if may_call(decisions) else 'DO NOT CALL'}")
+        conn.commit()
+
+        print(f"\n-- the audit rows this run added (from seq {start + 1}) --")
+        for r in rows(conn, after_seq=start):
+            if r["decision"] == "block" or r["rule_id"] == "calling_hours":
+                print(
+                    f"  {r['seq']:>4} {r['decision']:<5} {r['rule_id']:<14} "
+                    f"{r['reason'][:44]:<44} {r['prev_hash'][:8]} -> {r['hash'][:8]}"
+                )
+        print("  (allows other than calling_hours are recorded too, just not shown)\n")
+        print("$ uv run audit-verify")
+        run(conn)
+    print("   # each hash covers the row before it; try `update public.audit_event ...` and see")
+
+
+ACCEPTANCE["part-08"] = lambda: ACCEPTANCE["part-07"]() and _accept_part08()
+DEMOS["part-08"] = _demo_part08
