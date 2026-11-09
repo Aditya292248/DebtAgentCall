@@ -1,0 +1,9 @@
+# Sam Doe picks up and asks what they owe.
+# Each turn reaches a fresh agent for now, so the balance line says who is asking.
+name: sam_balance
+from: "+12135550101"
+lines:
+  - "Hello?"
+  - "Yes, this is Sam Doe speaking."
+  - "This is Sam Doe. How much do I owe, and to whom?"
+  - "Okay, thank you. Goodbye."

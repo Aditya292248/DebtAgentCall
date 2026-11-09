@@ -13,7 +13,10 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from fastapi.testclient import TestClient
+
     from compliance import Contact
+    from model import Provider
 
 ACCEPTANCE: dict[str, Callable[[], bool]] = {}
 DEMOS: dict[str, Callable[[], None]] = {}
@@ -437,3 +440,79 @@ def _demo_part08() -> None:
 
 ACCEPTANCE["part-08"] = lambda: ACCEPTANCE["part-07"]() and _accept_part08()
 DEMOS["part-08"] = _demo_part08
+
+
+# ----------------------------------------------------------------------------
+# webhook: AgentPhone sends the caller's words, we answer with text
+# ----------------------------------------------------------------------------
+
+
+def _sim_client(provider: Provider | None = None) -> tuple[TestClient, str]:
+    """The webhook app in-process, with a one-off secret the simulator shares."""
+    import secrets
+    import warnings
+
+    with warnings.catch_warnings():  # starlette's notice about httpx, not ours to fix
+        warnings.simplefilter("ignore")
+        from fastapi.testclient import TestClient
+
+    from phone.webhook import create_app
+
+    secret = secrets.token_hex(16)
+    return TestClient(create_app(provider=provider, secret=secret)), secret
+
+
+def _accept_part09() -> bool:
+    from sim.agentphone_sim import load_script, run_script
+
+    client, secret = _sim_client()
+    turns = run_script(load_script("sam_balance"), client, secret)
+    for caller, agent in turns:
+        print(f"  caller> {caller}\n   agent> {agent}")
+    balance_reply = turns[2][1].replace(",", "")
+    return all(reply.strip() for _, reply in turns) and "1250" in balance_reply
+
+
+def _llm_configured() -> bool:
+    import os
+
+    from model.provider import _load_dotenv
+
+    _load_dotenv()
+    return bool(os.environ.get("LLM_BASE_URL"))
+
+
+def _demo_fake_reply(messages: list[dict]) -> str:
+    """Stand-in answers when no model is set up, so the demo still runs."""
+    said = messages[-1]["content"].lower()
+    if "owe" in said:
+        return "I can help with that. Let me look up your account."
+    if "wrong number" in said or "nobody" in said:
+        return "Sorry to bother you. I'll update our records. Goodbye."
+    if "bye" in said or "call me back" in said:
+        return "Thank you for your time. Goodbye."
+    if "good time" in said:
+        return "No problem. When would be a better time to call?"
+    if "this is" in said:
+        return "Thank you. What can I help you with today?"
+    return "Hello, may I please speak with the account holder?"
+
+
+def _demo_part09() -> None:
+    from model import fake
+    from sim.agentphone_sim import SCRIPTS_DIR, load_script, print_conversation, run_script
+
+    real = _llm_configured()
+    provider = None if real else fake(scripted=_demo_fake_reply)
+    print("model:", "the real one from LLM_BASE_URL" if real else "fake (set LLM_BASE_URL)", "\n")
+    client, secret = _sim_client(provider)
+    for path in sorted(SCRIPTS_DIR.glob("*.yaml")):
+        script = load_script(path)
+        print(f"-- {script.name} --")
+        print_conversation(run_script(script, client, secret))
+        print()
+    print("   # every line went through a signed webhook; a bad signature gets a 401")
+
+
+ACCEPTANCE["part-09"] = lambda: ACCEPTANCE["part-08"]() and _accept_part09()
+DEMOS["part-09"] = _demo_part09
