@@ -5,9 +5,12 @@ description = "A compliance-first debt-collection voice agent, built one part at
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "fastapi>=0.162.0",
     "httpx>=0.27",
     "psycopg[binary]>=3.3.7",
+    "pyyaml>=6.0.3",
     "tzdata>=2026.6",
+    "uvicorn>=0.54.0",
 ]
 
 [project.scripts]
@@ -15,6 +18,7 @@ verify = "tasks.verify:main"
 accept = "tasks.accept:main"
 demo = "tasks.demo:main"
 audit-verify = "tasks.audit_verify:main"
+serve = "tasks.serve:main"
 
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11"]
@@ -24,7 +28,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["model", "harness", "compliance", "tasks"]
+packages = ["model", "harness", "compliance", "phone", "sim", "tasks"]
 
 [tool.ruff]
 line-length = 100
@@ -40,4 +44,6 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+# starlette's notice about its TestClient using httpx; nothing for us to change.
+filterwarnings = ["ignore:Using `httpx` with `starlette.testclient`"]
 markers = ["db: needs the local Supabase database (`supabase start`); skipped without it"]

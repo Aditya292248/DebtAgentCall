@@ -1,0 +1,6 @@
+# Someone else answers: the agent must not talk about the debt with them.
+name: wrong_number
+from: "+13125550103"
+lines:
+  - "Hello?"
+  - "No, there's nobody here by that name. You have the wrong number."

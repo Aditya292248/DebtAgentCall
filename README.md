@@ -2,7 +2,7 @@
 
 A debt-collection voice agent that puts compliance first, built one small step at a time.
 
-Right now the project can send messages to a language model and get a reply back, and it has an agent that remembers the conversation, follows a system prompt kept in a file, and can look up an account with a tool. The made-up debtors live in a local Postgres database run by Supabase. The pre-call compliance rules (calling hours, the 7-in-7 call limit, consent, stop requests, do-not-call, lawyers, bankruptcy and death) are here as plain Python checks; they are not wired into the agent yet. Every decision they make can be written to an append-only audit log that the database won't let anyone edit. The call flow and the other rules come later, each in its own step.
+Right now the project can send messages to a language model and get a reply back, and it has an agent that remembers the conversation, follows a system prompt kept in a file, and can look up an account with a tool. The made-up debtors live in a local Postgres database run by Supabase. The pre-call compliance rules (calling hours, the 7-in-7 call limit, consent, stop requests, do-not-call, lawyers, bankruptcy and death) are here as plain Python checks; they are not wired into the agent yet. Every decision they make can be written to an append-only audit log that the database won't let anyone edit. There is a webhook that AgentPhone can call during a phone call, and a fake caller to test it without a phone. The call flow and the other rules come later, each in its own step.
 
 ## What is here
 
@@ -27,6 +27,13 @@ compliance/
   flags.py              Flag and the checks for stop requests, do-not-call, lawyers, bankruptcy, death
   precall.py            CallFacts, check_before_call(facts, when) and may_call(decisions)
   audit.py              record(conn, decision) and verify_chain(conn), the audit log's hash chain
+phone/
+  signing.py            sign() and verify(), the HMAC check on every AgentPhone webhook
+  webhook.py            create_app(), the FastAPI app with POST /webhooks/agentphone
+  replies.py            say(), say_and_hangup() and transfer(), the replies AgentPhone understands
+sim/
+  agentphone_sim.py     a fake AgentPhone that plays a scripted caller against the webhook
+  scripts/              the caller scripts, as YAML
 instructions/
   system.md             the system prompt the agent sends first on every call
 supabase/
@@ -39,6 +46,7 @@ tasks/
   demo.py               a short live demo
   checks.py             the live checks and demos the two scripts above run
   audit_verify.py       `uv run audit-verify`, which checks every hash in the audit log
+  serve.py              `uv run serve`, which runs the webhook on this machine
 tests/
   episodes/             offline tests that use the fake provider
 ```
@@ -64,6 +72,7 @@ Then edit `.env` to point at your model server. Any server that speaks the OpenA
 | `LLM_BASE_URL` | Server URL, ending in `/v1`         | `http://localhost:1234/v1` |
 | `LLM_MODEL`    | Model name the server knows         | `google/gemma-3-12b`       |
 | `LLM_API_KEY`  | API key (local servers accept any)  | `lm-studio`                |
+| `AGENTPHONE_WEBHOOK_SECRET` | The secret AgentPhone signs webhooks with | none (every webhook gets a 401) |
 
 Real environment variables take priority over `.env`.
 
@@ -270,6 +279,44 @@ uv run demo part-08
 
 The demo runs the pre-call checks for every made-up debtor, prints the rows it added and then the `audit-verify` result. These rows are kept; `supabase db reset` clears them.
 
+## The phone webhook
+
+[AgentPhone](https://docs.agentphone.ai) handles the speech on a call. It turns what the caller says into text, sends that text to our webhook, and speaks the text we send back. So our server only ever deals with text:
+
+```
+caller speaks -> AgentPhone (speech to text) -> POST /webhooks/agentphone -> Agent.run -> {"text": reply} -> AgentPhone (text to speech)
+```
+
+Every request is checked before anything else happens:
+
+- AgentPhone signs each webhook with a shared secret (`AGENTPHONE_WEBHOOK_SECRET`). The signature is an HMAC-SHA256 over `"{timestamp}.{raw body}"`. A wrong or missing signature gets a 401, and the model is never called. If the secret isn't set at all, every request gets a 401.
+- A request whose timestamp is more than five minutes off is refused too, so an old request can't be replayed.
+- Each webhook has an `X-Webhook-ID`. If the same id comes again, it gets the same reply as the first time, and the model isn't asked twice.
+
+Then the event decides what happens. `agent.message` on the voice channel runs one turn of the agent with the caller's words and replies `{"text": ...}`. `agent.call_ended` is accepted, but nothing is stored yet. Any other event gets `{}`. `phone/replies.py` also has `say_and_hangup()` and `transfer()`, for ending the call or handing it to a person; nothing uses them yet.
+
+For now each turn starts a fresh agent, so it doesn't remember what was said earlier in the same call. Memory per call comes next.
+
+To run it:
+
+```bash
+uv run serve
+```
+
+It listens on `http://127.0.0.1:8000/webhooks/agentphone` (`--host` and `--port` change that). There is no real AgentPhone account set up yet, so the way to try it is the fake caller in `sim/`. It reads a script of caller lines from `sim/scripts/`, sends each one as a correctly signed webhook, prints the replies and ends with `agent.call_ended`. With the server running and the same secret set in both terminals:
+
+```bash
+uv run python -m sim.agentphone_sim sam_balance --url http://127.0.0.1:8000
+```
+
+The tests use the same simulator in-process, through FastAPI's `TestClient`, with the fake model.
+
+```bash
+uv run demo part-09
+```
+
+The demo plays every script in `sim/scripts/` through the webhook in-process. It uses the real model if `LLM_BASE_URL` is set, and otherwise the fake one.
+
 ## Commands
 
 | Command                   | Needs a model? | What it does                                                    |
@@ -293,6 +340,9 @@ The demo runs the pre-call checks for every made-up debtor, prints the rows it a
 | `uv run accept part-08`   | Yes            | Runs the earlier checks, then records every debtor's decisions and checks the chain |
 | `uv run demo part-08`     | No (needs DB)  | Records the pre-call decisions, prints the audit rows and the chain check |
 | `uv run audit-verify`     | No (needs DB)  | Recomputes every audit hash; exits 1 if any row was changed or removed |
+| `uv run accept part-09`   | Yes            | Runs the earlier checks, then plays Sam Doe's call through the webhook and checks the balance |
+| `uv run demo part-09`     | No             | Plays every caller script through the webhook (real model if set, else the fake) |
+| `uv run serve`            | Yes            | Runs the webhook on `127.0.0.1:8000` for AgentPhone to call       |
 
 ## Credits
 
