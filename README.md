@@ -2,7 +2,7 @@
 
 A debt-collection voice agent that puts compliance first, built one small step at a time.
 
-Right now the project can send messages to a language model and get a reply back, and it has an agent that remembers the conversation, follows a system prompt kept in a file, and can look up an account with a tool. The made-up debtors live in a local Postgres database run by Supabase. The pre-call compliance rules (calling hours, the 7-in-7 call limit, consent, stop requests, do-not-call, lawyers, bankruptcy and death) are here as plain Python checks; they are not wired into the agent yet. Every decision they make can be written to an append-only audit log that the database won't let anyone edit. There is a webhook that AgentPhone can call during a phone call, and a fake caller to test it without a phone. The call flow and the other rules come later, each in its own step.
+Right now the project can send messages to a language model and get a reply back, and it has an agent that remembers the conversation, follows a system prompt kept in a file, and can look up an account with a tool. The made-up debtors live in a local Postgres database run by Supabase. The pre-call compliance rules (calling hours, the 7-in-7 call limit, consent, stop requests, do-not-call, lawyers, bankruptcy and death) are here as plain Python checks; they are not wired into the agent yet. Every decision they make can be written to an append-only audit log that the database won't let anyone edit. There is a webhook that AgentPhone can call during a phone call, and a fake caller to test it without a phone. Each call's conversation is saved as it happens, so every turn of a call sees the turns before it. The call flow and the other rules come later, each in its own step.
 
 ## What is here
 
@@ -18,6 +18,7 @@ harness/
   tools.py              Tool, ToolRegistry, run_tool() and the first tool, lookup_account
   db.py                 connect(), find_account(name) and the pre-call loaders, which read Postgres
   precall.py            check_and_record(conn, account, when): run the pre-call checks, log every decision
+  memory.py             Session, JsonlSession and PostgresSession: each call's saved history
 compliance/
   decision.py           Decision (allow, rule_id, reason, evidence), the answer every rule gives
   timezones.py          zones_for(zip, phone), the time zones a debtor might be in
@@ -39,7 +40,7 @@ instructions/
   system.md             the system prompt the agent sends first on every call
 supabase/
   config.toml           local Supabase settings (database on port 54322)
-  migrations/           the debtor, phone, debt, call_attempt, flags and audit_event tables
+  migrations/           the debtor, phone, debt, call_attempt, flags, audit_event and call_message tables
   seed.sql              made-up debtors, with call history and flags for each pre-call check
 tasks/
   verify.py             offline checks: format, lint, types, tests, import
@@ -294,9 +295,9 @@ Every request is checked before anything else happens:
 - A request whose timestamp is more than five minutes off is refused too, so an old request can't be replayed.
 - Each webhook has an `X-Webhook-ID`. If the same id comes again, it gets the same reply as the first time, and the model isn't asked twice.
 
-Then the event decides what happens. `agent.message` on the voice channel runs one turn of the agent with the caller's words and replies `{"text": ...}`. `agent.call_ended` is accepted, but nothing is stored yet. Any other event gets `{}`. `phone/replies.py` also has `say_and_hangup()` and `transfer()`, for ending the call or handing it to a person; nothing uses them yet.
+Then the event decides what happens. `agent.message` on the voice channel runs one turn of the agent with the caller's words and replies `{"text": ...}`. `agent.call_ended` is accepted, but nothing more is stored for it yet. Any other event gets `{}`. `phone/replies.py` also has `say_and_hangup()` and `transfer()`, for ending the call or handing it to a person; nothing uses them yet.
 
-For now each turn starts a fresh agent, so it doesn't remember what was said earlier in the same call. Memory per call comes next.
+Each turn builds a new agent, but on that call's saved session, so it remembers what was said earlier in the same call (see [Sessions](#sessions)).
 
 To run it:
 
@@ -317,6 +318,38 @@ uv run demo part-09
 ```
 
 The demo plays every script in `sim/scripts/` through the webhook in-process. It uses the real model if `LLM_BASE_URL` is set, and otherwise the fake one.
+
+## Sessions
+
+AgentPhone sends each caller turn as its own webhook, and each webhook builds a new `Agent`. To remember the call, every message is saved the moment it is added, under the call's `data.callId`. The next turn's agent loads that call's messages first, so the model sees the whole call so far. Two different calls never share messages.
+
+A session is a list of records that are only ever added to: a `session` header, then one `message` record per message, and a `compaction` record whenever the history is replaced by a shorter one. Loading replays them in order. There are two places to keep them, with the same behaviour:
+
+- `PostgresSession` keeps them as rows of the `call_message` table. The webhook uses this by default.
+- `JsonlSession` keeps them as lines in a file. The tests and the demos use it, so they need no database.
+
+```python
+from harness import Agent
+from harness.memory import JsonlSession
+
+session = JsonlSession.for_call("sessions", "call_123")
+Agent(session=session).run("Hi, this is Sam Doe.")
+Agent(session=JsonlSession.for_call("sessions", "call_123")).run("What name did I give?")
+```
+
+A crash can leave a few kinds of damage, and each one is handled:
+
+- If the process died while writing a line, that half line is skipped on load and cut off before the next write. A broken line anywhere else is treated as corruption and raises an error.
+- If a turn died after the model asked for a tool but before the result was saved, the next load adds a placeholder result. Without it, the model API would reject the history.
+- If a model call fails, the turn is taken back out of the saved history too, so a retry doesn't send the caller's words twice.
+
+The `call_message` table needs the new migration. Run `supabase migration up` on an existing local database, or `supabase db reset` to rebuild it.
+
+```bash
+uv run demo part-10
+```
+
+The demo plays Sam Doe's call through the webhook. With the fake model, each reply says how many earlier messages of the call the model was sent.
 
 ## The sentence filter
 
@@ -373,6 +406,8 @@ The demo prints allow or block, with the rule, for a list of sample sentences at
 | `uv run audit-verify`     | No (needs DB)  | Recomputes every audit hash; exits 1 if any row was changed or removed |
 | `uv run accept part-09`   | Yes            | Runs the earlier checks, then plays Sam Doe's call through the webhook and checks the balance |
 | `uv run demo part-09`     | No             | Plays every caller script through the webhook (real model if set, else the fake) |
+| `uv run accept part-10`   | Yes            | Runs the earlier checks, then checks the agent remembers a name from an earlier turn, and that another call doesn't |
+| `uv run demo part-10`     | No             | Plays a call through the webhook; each reply shows how much of the call the model saw |
 | `uv run accept part-11`   | Yes            | Runs the earlier checks, then the sentence filter on sample sentences |
 | `uv run demo part-11`     | No             | Prints allow/block for sample sentences at each stage of a call |
 | `uv run serve`            | Yes            | Runs the webhook on `127.0.0.1:8000` for AgentPhone to call       |

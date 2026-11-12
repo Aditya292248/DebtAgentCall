@@ -9,16 +9,18 @@ here, and speaks whatever text we answer with. Each request goes through:
 2. If this ``X-Webhook-ID`` was seen before, send back the same reply as the
    first time without calling the model again.
 3. Act on the event:
-   - ``agent.message`` on the voice channel: one turn of ``Agent.run`` with the
-     caller's words, answered as ``{"text": reply}``.
+   - ``agent.message`` on the voice channel: open the session for
+     ``data.callId``, build an ``Agent`` on it, run one turn with the caller's
+     words, and answer ``{"text": reply}``.
    - ``agent.call_ended``: accepted with ``{}``. Nothing is stored yet.
    - anything else: ``{}``.
 
-Each turn uses a fresh ``Agent``, so the agent doesn't yet remember earlier
-turns of the same call. Keeping memory per call comes next.
+Each turn builds a new ``Agent``, but on that call's saved session, so it sees
+every earlier turn of the same call and nothing from any other call. Sessions
+are kept in Postgres (``call_message``) unless ``open_session`` says otherwise.
 
 Run it with ``uv run serve``. Tests build their own app with ``create_app``,
-passing a fake model and a test secret.
+passing a fake model, a test secret and JSONL sessions in a temp folder.
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
 from harness import Agent
+from harness.memory import PostgresSession, Session
 from model import Provider
 from model.provider import _load_dotenv
 from phone.replies import say
@@ -69,7 +72,8 @@ def create_app(
     *,
     provider: Provider | None = None,
     secret: str | None = None,
-    agent_factory: Callable[[], Agent] | None = None,
+    agent_factory: Callable[[Session | None], Agent] | None = None,
+    open_session: Callable[[str], Session] = PostgresSession.for_call,
     clock: Callable[[], float] = time.time,
 ) -> FastAPI:
     """The webhook app.
@@ -77,12 +81,14 @@ def create_app(
     ``secret`` defaults to ``AGENTPHONE_WEBHOOK_SECRET`` (``.env`` is a fallback).
     Without one every request is refused, so a missing setting fails closed.
     ``provider`` is the model to use (the real one from the environment if not
-    given), and ``agent_factory`` replaces how each turn's ``Agent`` is built.
+    given), and ``agent_factory(session)`` replaces how each turn's ``Agent`` is
+    built. ``open_session(call_id)`` returns the saved history for a call:
+    Postgres by default, or e.g. ``partial(JsonlSession.for_call, folder)``.
     """
     if secret is None:
         _load_dotenv()
         secret = os.environ.get(SECRET_ENV) or None
-    make_agent = agent_factory or (lambda: Agent(provider=provider))
+    make_agent = agent_factory or (lambda session: Agent(provider=provider, session=session))
     seen = _SeenIds()
     app = FastAPI(title="DebtAgentCall webhook")
     app.state.seen = seen
@@ -105,7 +111,7 @@ def create_app(
         if not isinstance(envelope, dict):
             return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
 
-        reply = await _handle(envelope, make_agent)
+        reply = await _handle(envelope, make_agent, open_session)
         if webhook_id:
             seen.remember(webhook_id, reply)
         return JSONResponse(reply)
@@ -113,7 +119,11 @@ def create_app(
     return app
 
 
-async def _handle(envelope: dict, make_agent: Callable[[], Agent]) -> dict:
+async def _handle(
+    envelope: dict,
+    make_agent: Callable[[Session | None], Agent],
+    open_session: Callable[[str], Session],
+) -> dict:
     """The reply for one verified webhook."""
     event = envelope.get("event")
     data = envelope.get("data") or {}
@@ -121,8 +131,13 @@ async def _handle(envelope: dict, make_agent: Callable[[], Agent]) -> dict:
         transcript = data.get("transcript") if isinstance(data, dict) else None
         if not isinstance(transcript, str) or not transcript.strip():
             return say(DIDNT_CATCH)
-        agent = make_agent()
-        # Agent.run is blocking (it waits on the model), so keep it off the event loop.
+        call_id = data.get("callId")
+        # Opening a session and Agent.run both block (database, model), so keep them
+        # off the event loop. A turn with no callId has nothing to remember.
+        session = None
+        if isinstance(call_id, str) and call_id:
+            session = await run_in_threadpool(open_session, call_id)
+        agent = await run_in_threadpool(make_agent, session)
         reply = await run_in_threadpool(agent.run, transcript)
         return say(reply)
     # agent.call_ended is accepted; storing the call comes later. Unknown events too.
