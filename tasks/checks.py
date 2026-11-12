@@ -450,16 +450,23 @@ DEMOS["part-08"] = _demo_part08
 def _sim_client(provider: Provider | None = None) -> tuple[TestClient, str]:
     """The webhook app in-process, with a one-off secret the simulator shares."""
     import secrets
+    import tempfile
     import warnings
+    from functools import partial
 
     with warnings.catch_warnings():  # starlette's notice about httpx, not ours to fix
         warnings.simplefilter("ignore")
         from fastapi.testclient import TestClient
 
+    from harness.memory import JsonlSession
     from phone.webhook import create_app
 
+    # Sessions go to a temp folder, so this needs no database.
+    folder = tempfile.mkdtemp(prefix="debtagent-sessions-")
+    open_session = partial(JsonlSession.for_call, folder)
     secret = secrets.token_hex(16)
-    return TestClient(create_app(provider=provider, secret=secret)), secret
+    app = create_app(provider=provider, secret=secret, open_session=open_session)
+    return TestClient(app), secret
 
 
 def _accept_part09() -> bool:
@@ -516,6 +523,65 @@ def _demo_part09() -> None:
 
 ACCEPTANCE["part-09"] = lambda: ACCEPTANCE["part-08"]() and _accept_part09()
 DEMOS["part-09"] = _demo_part09
+
+
+# ----------------------------------------------------------------------------
+# sessions: each call remembers its earlier turns between webhooks
+# ----------------------------------------------------------------------------
+
+
+def _sim_turn(client: TestClient, secret: str, call_id: str, text: str) -> str:
+    """One signed caller turn on ``call_id``; the agent's reply."""
+    import json
+    import time
+    import uuid
+
+    from phone.signing import signed_headers
+    from phone.webhook import WEBHOOK_PATH
+
+    body = json.dumps(
+        {
+            "event": "agent.message",
+            "channel": "voice",
+            "data": {"callId": call_id, "transcript": text, "direction": "outbound"},
+        }
+    ).encode()
+    headers = signed_headers(body, secret, time.time(), f"wh_{uuid.uuid4().hex}", "agent.message")
+    return str(client.post(WEBHOOK_PATH, content=body, headers=headers).json().get("text", ""))
+
+
+def _accept_part10() -> bool:
+    import uuid
+
+    client, secret = _sim_client()
+    call_id = f"call_accept_{uuid.uuid4().hex[:8]}"
+    first = _sim_turn(client, secret, call_id, "Hi, this is Sam Doe speaking.")
+    second = _sim_turn(client, secret, call_id, "Sorry, what name did I just give you?")
+    other = _sim_turn(client, secret, f"{call_id}_other", "What name did I just give you?")
+    print(f"  call 1> {first}\n  call 1> {second}\n  call 2> {other}")
+    return "sam" in second.lower() and "sam" not in other.lower()
+
+
+def _demo_seen(messages: list[dict]) -> str:
+    """Fake answer that says how much of the call it was sent."""
+    history = [m for m in messages if m.get("role") != "system"]
+    return f"(the model was sent {len(history) - 1} earlier messages from this call)"
+
+
+def _demo_part10() -> None:
+    from model import fake
+    from sim.agentphone_sim import load_script, print_conversation, run_script
+
+    real = _llm_configured()
+    provider = None if real else fake(scripted=_demo_seen)
+    print("model:", "the real one from LLM_BASE_URL" if real else "fake (set LLM_BASE_URL)", "\n")
+    client, secret = _sim_client(provider)
+    print_conversation(run_script(load_script("sam_balance"), client, secret))
+    print("\n   # each line was its own webhook; the saved session carried the call between them")
+
+
+ACCEPTANCE["part-10"] = lambda: ACCEPTANCE["part-09"]() and _accept_part10()
+DEMOS["part-10"] = _demo_part10
 
 
 # ----------------------------------------------------------------------------

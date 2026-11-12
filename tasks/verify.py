@@ -15,6 +15,7 @@ SMOKE_MODULES = [
     "compliance",
     "compliance.audit",
     "compliance.utterance",
+    "harness.memory",
     "harness.precall",
     "tasks.checks",
     "tasks.audit_verify",

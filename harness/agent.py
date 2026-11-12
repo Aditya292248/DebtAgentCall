@@ -21,6 +21,13 @@ calls ``send()`` again so the model can see them. It stops when the model
 answers in plain text or ``max_steps`` model calls have been used up. If any
 model call in the loop fails, the whole turn is taken back out, as with ``send()``.
 
+Memory. Give the agent a ``Session`` (``harness/memory.py``) and every message
+is saved the moment it joins the history (``_add``). A new ``Agent`` on the same
+session starts from what was saved, so each webhook turn of a call sees the
+turns before it. If the last turn died between a tool request and its result,
+the missing result is filled in with a placeholder first. When a turn is taken
+back out after a failure, the session records the shorter history too.
+
 Adapted from codingHarness.
 """
 
@@ -29,6 +36,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from harness.instructions import load_system_prompt
+from harness.memory import Session, unanswered_tool_calls
 from harness.tools import ToolRegistry, default_tools, run_tool
 from model import Provider, chat
 
@@ -44,6 +52,7 @@ class Agent:
         system_prompt_path: str | Path = DEFAULT_SYSTEM_PROMPT_PATH,
         tools: ToolRegistry | None = None,
         max_steps: int = MAX_STEPS,
+        session: Session | None = None,
     ) -> None:
         if max_steps < 1:
             raise ValueError("max_steps must allow at least one model call")
@@ -53,6 +62,27 @@ class Agent:
         self.tools = default_tools() if tools is None else tools
         self.max_steps = max_steps
         self.messages: list[dict] = []
+
+        # Memory: start from what this call already said, then save everything new.
+        self.session = session
+        if session is not None:
+            self.messages = session.load()
+            for placeholder in unanswered_tool_calls(self.messages):
+                self._add(placeholder)  # the last turn died mid-tool: close the gap
+
+    def _add(self, message: dict) -> None:
+        """Append to the history and, if there's a session, save it there too."""
+        self.messages.append(message)
+        if self.session is not None:
+            self.session.append(message)
+
+    def _undo_to(self, length: int) -> None:
+        """Take back everything after the first ``length`` messages, saved copy included."""
+        if len(self.messages) == length:
+            return
+        del self.messages[length:]
+        if self.session is not None:
+            self.session.replace(self.messages)
 
     def _payload(self) -> list[dict]:
         """What the model receives: the system prompt (if any), then the history."""
@@ -65,8 +95,9 @@ class Agent:
         """One model call. Adds ``user_text`` first if given, then records the reply.
         Tool requests are recorded, not run: that's ``run()``'s job.
         """
+        start = len(self.messages)
         if user_text is not None:
-            self.messages.append({"role": "user", "content": user_text})
+            self._add({"role": "user", "content": user_text})
         try:
             resp = chat(
                 self._payload(),
@@ -76,17 +107,14 @@ class Agent:
             )
         except Exception:
             # Undo the user turn so a failed call leaves the history as it was.
-            if user_text is not None:
-                self.messages.pop()
+            self._undo_to(start)
             raise
         if resp.tool_calls:
             # Every tool result must name the call it answers; fill in ids a server left out.
             calls = [{**c, "id": c.get("id") or f"call_{i}"} for i, c in enumerate(resp.tool_calls)]
-            self.messages.append(
-                {"role": "assistant", "content": resp.content, "tool_calls": calls}
-            )
+            self._add({"role": "assistant", "content": resp.content, "tool_calls": calls})
         else:
-            self.messages.append({"role": "assistant", "content": resp.content})
+            self._add({"role": "assistant", "content": resp.content})
         return resp.content
 
     def run(self, user_text: str) -> str:
@@ -106,7 +134,7 @@ class Agent:
                 steps += 1
         except Exception:
             # Undo the whole turn, so a retry doesn't send the question twice.
-            del self.messages[start:]
+            self._undo_to(start)
             raise
         return reply
 
@@ -114,4 +142,4 @@ class Agent:
         for call in calls:
             fn = call.get("function") or {}
             result = run_tool(self.tools, fn.get("name", ""), fn.get("arguments"))
-            self.messages.append({"role": "tool", "tool_call_id": call["id"], "content": result})
+            self._add({"role": "tool", "tool_call_id": call["id"], "content": result})

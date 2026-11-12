@@ -11,6 +11,7 @@ call. All offline, with the fake provider and a test secret.
 from __future__ import annotations
 
 import json
+from functools import partial
 
 import pytest
 from fastapi.testclient import TestClient
@@ -34,13 +35,17 @@ def responder() -> FakeProvider:
 
 
 @pytest.fixture
-def client(responder: FakeProvider, no_instructions) -> TestClient:
+def client(responder: FakeProvider, no_instructions, tmp_path) -> TestClient:
     from harness import Agent
+    from harness.memory import JsonlSession
 
     provider = Provider(base_url="fake://local", model="fake", responder=responder)
     app = create_app(
         secret=SECRET,
-        agent_factory=lambda: Agent(provider=provider, system_prompt_path=no_instructions),
+        agent_factory=lambda session: Agent(
+            provider=provider, system_prompt_path=no_instructions, session=session
+        ),
+        open_session=partial(JsonlSession.for_call, tmp_path / "sessions"),
         clock=lambda: NOW,
     )
     return TestClient(app)
