@@ -19,6 +19,7 @@ accept = "tasks.accept:main"
 demo = "tasks.demo:main"
 audit-verify = "tasks.audit_verify:main"
 serve = "tasks.serve:main"
+api = "harness.api:main"
 
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11"]

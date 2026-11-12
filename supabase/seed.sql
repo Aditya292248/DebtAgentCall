@@ -119,3 +119,17 @@ from (values
 ) as f (debtor_id, account_number, kind, data, set_at, source)
 join public.debtor p on p.id = f.debtor_id::uuid
 left join public.debt d on d.account_number = f.account_number;
+
+-- Read-only access for the local web UI (web/), which signs in as nobody and uses
+-- the anon key. This lives in the seed, not in a migration, on purpose: the seed
+-- only runs on a local `supabase db reset`, and `supabase db push` never sends it
+-- to a hosted project, where anon read access would expose every debtor.
+-- Only `select` on the four tables the UI reads; anon still can't write anything.
+create policy "anon can read debtors (local dev)" on public.debtor
+    for select to anon using (true);
+create policy "anon can read phones (local dev)" on public.phone
+    for select to anon using (true);
+create policy "anon can read debts (local dev)" on public.debt
+    for select to anon using (true);
+create policy "anon can read audit events (local dev)" on public.audit_event
+    for select to anon using (true);

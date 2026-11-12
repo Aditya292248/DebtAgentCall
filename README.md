@@ -2,7 +2,7 @@
 
 A debt-collection voice agent that puts compliance first, built one small step at a time.
 
-Right now the project can send messages to a language model and get a reply back, and it has an agent that remembers the conversation, follows a system prompt kept in a file, and can look up an account with a tool. The made-up debtors live in a local Postgres database run by Supabase. The pre-call compliance rules (calling hours, the 7-in-7 call limit, consent, stop requests, do-not-call, lawyers, bankruptcy and death) are here as plain Python checks; they are not wired into the agent yet. Every decision they make can be written to an append-only audit log that the database won't let anyone edit. There is a webhook that AgentPhone can call during a phone call, and a fake caller to test it without a phone. Each call's conversation is saved as it happens, so every turn of a call sees the turns before it. The call flow and the other rules come later, each in its own step.
+Right now the project can send messages to a language model and get a reply back, and it has an agent that remembers the conversation, follows a system prompt kept in a file, and can look up an account with a tool. The made-up debtors live in a local Postgres database run by Supabase. The pre-call compliance rules (calling hours, the 7-in-7 call limit, consent, stop requests, do-not-call, lawyers, bankruptcy and death) are here as plain Python checks; they are not wired into the agent yet. Every decision they make can be written to an append-only audit log that the database won't let anyone edit. There is a webhook that AgentPhone can call during a phone call, and a fake caller to test it without a phone. Each call's conversation is saved as it happens, so every turn of a call sees the turns before it. A first read-only web page shows the debtors with their pre-call result and the audit log. The call flow and the other rules come later, each in its own step.
 
 ## What is here
 
@@ -19,6 +19,7 @@ harness/
   db.py                 connect(), find_account(name) and the pre-call loaders, which read Postgres
   precall.py            check_and_record(conn, account, when): run the pre-call checks, log every decision
   memory.py             Session, JsonlSession and PostgresSession: each call's saved history
+  api.py                `uv run api`: a small read-only web API for the UI (pre-call decisions, chain check)
 compliance/
   decision.py           Decision (allow, rule_id, reason, evidence), the answer every rule gives
   timezones.py          zones_for(zip, phone), the time zones a debtor might be in
@@ -49,6 +50,7 @@ tasks/
   checks.py             the live checks and demos the two scripts above run
   audit_verify.py       `uv run audit-verify`, which checks every hash in the audit log
   serve.py              `uv run serve`, which runs the webhook on this machine
+web/                    the browser UI (Vite, React, TypeScript, Tailwind, shadcn/ui), read-only for now
 tests/
   episodes/             offline tests that use the fake provider
 ```
@@ -381,6 +383,49 @@ uv run demo part-11
 
 The demo prints allow or block, with the rule, for a list of sample sentences at each stage of a call. This is not legal advice.
 
+## The UI
+
+A first, read-only page in the browser, laid out like Cursor: three panes you can resize, dark by default (the sun button switches to light).
+
+![The UI: debtors on the left, the overview in the middle, the audit log on the right](docs/ui-part1.png)
+<!-- screenshot placeholder: add docs/ui-part1.png -->
+
+- **Top bar:** "Check at" picks the time every check is run for, so you can see who would be blocked at, say, 9:30pm. "Now" goes back to the current time.
+- **Left, debtors:** every made-up debt with its balance, creditor and a status: green "Ready to call", or red "Blocked" with the rule (such as `attorney`) and its reason. Tabs show All, Ready or Blocked, and the search box matches name, account, creditor or state.
+- **Middle:** with nothing picked, an overview: how many debts are ready or blocked, the total owed, and a bar chart of how many debts each rule blocks. Click a debtor to see all eight checks for them, passed and blocked. "Simulate call" stays disabled until the call view comes in a later step.
+- **Right, audit log:** the `audit_event` rows, newest first (rule, allow or block, reason, account and time), with a "chain OK" or "chain broken" badge and a "Blocks only" tab.
+
+Nothing on the page is made up in the browser: every number and badge comes from the database or from the Python checks, so it changes when the data does.
+
+Where the data comes from:
+
+- Debtors, phones, debts and the audit rows are read straight from Supabase by the browser, with the anon key. The end of `supabase/seed.sql` lets `anon` read those four tables, and nothing else: no writes, and no other tables. It is in the seed rather than a migration on purpose: the seed only runs on a local `supabase db reset`, so `supabase db push` never gives a hosted project with real data this open read access. If your local database predates it, run `supabase db reset`.
+- The badges and the chain check come from the Python code itself, through `harness/api.py` (`GET /api/precall?at=...` and `GET /api/audit/verify`), so the page never repeats the rules in JavaScript. Looking at the page doesn't write to the audit log.
+
+To run it, start the database, the API and the web app, each in its own terminal:
+
+```bash
+npx supabase start
+```
+
+```bash
+uv run api
+```
+
+```bash
+cd web && npm install && npm run dev
+```
+
+Before the first run, copy `web/.env.example` to `web/.env.local` and paste in the anon key that `npx supabase status` prints. Then open http://localhost:5173. The dev server forwards `/api` to the API on port 8000. If Windows blocks `api.exe`, `uv run python -m harness.api` starts the same thing.
+
+You need Node.js 18 or newer for `web/`. `npm run build` and `npm run lint` check it. The API's tests are in `tests/episodes/test_part12.py`; one checks that Robin Hale, who has a lawyer, comes back blocked by `attorney`.
+
+```bash
+uv run demo part-12
+```
+
+The demo prints what the API answers at 2pm New York time and at 9:30pm Los Angeles time, then the chain check.
+
 ## Commands
 
 | Command                   | Needs a model? | What it does                                                    |
@@ -411,6 +456,10 @@ The demo prints allow or block, with the rule, for a list of sample sentences at
 | `uv run accept part-11`   | Yes            | Runs the earlier checks, then the sentence filter on sample sentences |
 | `uv run demo part-11`     | No             | Prints allow/block for sample sentences at each stage of a call |
 | `uv run serve`            | Yes            | Runs the webhook on `127.0.0.1:8000` for AgentPhone to call       |
+| `uv run accept part-12`   | Yes            | Runs the earlier checks, then the UI API's tests against the database |
+| `uv run demo part-12`     | No (needs DB)  | Prints the API's pre-call answers at two times, and the chain check |
+| `uv run api`              | No (needs DB)  | Starts the read-only API for the UI on http://127.0.0.1:8000    |
+| `npm run dev` (in `web/`) | No (needs DB and API) | Starts the UI on http://localhost:5173                   |
 
 ## Credits
 
