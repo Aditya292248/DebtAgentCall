@@ -24,6 +24,7 @@ from compliance.flags import (
 from compliance.hours import Contact, check_calling_hours
 from compliance.precall import CallFacts, check_before_call, may_call
 from compliance.timezones import zones_for
+from compliance.utterance import SpeechState, check_sentence, split_sentences
 
 __all__ = [
     "Attempt",
@@ -32,6 +33,7 @@ __all__ = [
     "Decision",
     "Flag",
     "PhoneConsent",
+    "SpeechState",
     "allow",
     "block",
     "check_attorney",
@@ -43,6 +45,8 @@ __all__ = [
     "check_consent",
     "check_deceased",
     "check_dnc",
+    "check_sentence",
     "may_call",
+    "split_sentences",
     "zones_for",
 ]

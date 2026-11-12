@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from fastapi.testclient import TestClient
 
-    from compliance import Contact
+    from compliance import Contact, SpeechState
     from model import Provider
 
 ACCEPTANCE: dict[str, Callable[[], bool]] = {}
@@ -516,3 +516,84 @@ def _demo_part09() -> None:
 
 ACCEPTANCE["part-09"] = lambda: ACCEPTANCE["part-08"]() and _accept_part09()
 DEMOS["part-09"] = _demo_part09
+
+
+# ----------------------------------------------------------------------------
+# sentence filter: every sentence is checked before the agent may say it
+# ----------------------------------------------------------------------------
+
+
+def _part11_samples() -> list[tuple[str, str, str | None]]:
+    """(stage, sentence, the rule expected to block it or None)."""
+    return [
+        ("before verify", "Hi, this is Maya. May I speak with Sam Doe?", None),
+        ("before verify", "May I speak with Sue?", None),
+        ("before verify", "Your balance is $1,240.", "third_party_disclosure"),
+        ("before verify", "I'm calling from Acme Bank.", "third_party_disclosure"),
+        ("verified", "Thanks Sam, I'm calling about a debt.", "mini_miranda_first"),
+        ("disclosed", "Your balance with Acme Bank is $1,240.", None),
+        ("disclosed", "Your balance is $1,250.", "amount_mismatch"),
+        ("disclosed", "We will garnish your wages.", "threat"),
+        ("disclosed", "You could be arrested.", "threat"),
+        ("disclosed", "I'm an attorney.", "false_identity"),
+        ("disclosed", "What the hell is going on?", "profanity"),
+        ("time-barred", "We may file a lawsuit.", "time_barred"),
+        ("validation", "You must pay today.", "overshadowing"),
+        ("validation", "You can dispute this within 30 days.", None),
+    ]
+
+
+def _part11_states() -> dict[str, SpeechState]:
+    from dataclasses import replace
+
+    from compliance import SpeechState
+
+    base = SpeechState(
+        known_amounts_cents={124000},
+        creditor="Acme Bank",
+        in_validation_period=False,
+    )
+    disclosed = replace(base, verified=True, disclosed=True)
+    return {
+        "before verify": base,
+        "verified": replace(base, verified=True),
+        "disclosed": disclosed,
+        "time-barred": replace(disclosed, legal_action_authorized=True, time_barred=True),
+        "validation": replace(disclosed, in_validation_period=True),
+    }
+
+
+def _accept_part11_filter() -> bool:
+    from compliance import check_sentence
+
+    states = _part11_states()
+    ok = True
+    for stage, sentence, expected in _part11_samples():
+        d = check_sentence(sentence, states[stage])
+        got = None if d.allow else d.rule_id
+        good = got == expected
+        ok = ok and good
+        print(f"  {'ok ' if good else 'BAD'} {stage:<13} {got or 'allow':<22} {sentence}")
+    return ok
+
+
+def _demo_part11() -> None:
+    from compliance import check_sentence, split_sentences
+
+    states = _part11_states()
+    print("on file: $1,240.00 owed to Acme Bank\n")
+    for stage, sentence, _ in _part11_samples():
+        d = check_sentence(sentence, states[stage])
+        verdict = "allow" if d.allow else f"BLOCK {d.rule_id}"
+        print(f"  [{stage:<13}] {verdict:<28} {sentence}")
+    print()
+    reply = "Thanks, Sam. Your balance is $1,240. We will sue you if you don't pay."
+    print("one model reply, split and checked sentence by sentence:")
+    for sentence in split_sentences(reply):
+        d = check_sentence(sentence, states["disclosed"])
+        print(f"  {'allow' if d.allow else 'BLOCK ' + d.rule_id:<28} {sentence}")
+    print("   # a blocked sentence is never spoken; the model is never asked")
+
+
+ACCEPTANCE["part-11"] = lambda: ACCEPTANCE["part-09"]() and _accept_part11_filter()
+DEMOS["part-11"] = _demo_part11
