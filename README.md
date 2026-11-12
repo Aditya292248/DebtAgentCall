@@ -27,6 +27,7 @@ compliance/
   flags.py              Flag and the checks for stop requests, do-not-call, lawyers, bankruptcy, death
   precall.py            CallFacts, check_before_call(facts, when) and may_call(decisions)
   audit.py              record(conn, decision) and verify_chain(conn), the audit log's hash chain
+  utterance.py          SpeechState, check_sentence(sentence, state) and split_sentences(text)
 phone/
   signing.py            sign() and verify(), the HMAC check on every AgentPhone webhook
   webhook.py            create_app(), the FastAPI app with POST /webhooks/agentphone
@@ -317,6 +318,36 @@ uv run demo part-09
 
 The demo plays every script in `sim/scripts/` through the webhook in-process. It uses the real model if `LLM_BASE_URL` is set, and otherwise the fake one.
 
+## The sentence filter
+
+Once a sentence is spoken on a call, it can't be taken back. So every sentence the agent wants to say goes through `check_sentence(sentence, state)` first, and a blocked one is never sent. `state` is a `SpeechState`: whether the person is verified, whether the debt collector disclosure was said, the amounts on file, the creditor's name, whether legal action is authorized, whether the debt is time-barred, and whether we are in the validation period.
+
+| Rule id                  | Blocks a sentence that                                                         |
+| ------------------------ | ------------------------------------------------------------------------------ |
+| `third_party_disclosure` | mentions the debt, the creditor or money before the person is verified (FDCPA 805(b)) |
+| `mini_miranda_first`     | does the same after verifying but before the disclosure (FDCPA 807(11))        |
+| `false_identity`         | claims to be, or call from, a lawyer, court, the IRS or government (807)        |
+| `threat`                 | threatens arrest, jail or police, or legal action that isn't authorized (806, 807) |
+| `time_barred`            | mentions suing or garnishing on a time-barred debt (Reg F 1006.26(b))          |
+| `profanity`              | swears                                                                         |
+| `amount_mismatch`        | says an amount that isn't on file, or talks money without a checkable amount   |
+| `overshadowing`          | pushes to pay now ("must pay today", "final notice") during the validation period |
+
+```python
+from compliance import SpeechState, check_sentence
+
+state = SpeechState(verified=False, known_amounts_cents={124000}, creditor="Acme Bank")
+print(check_sentence("Your balance is $1,240.", state).rule_id)  # third_party_disclosure
+```
+
+Words match whole words, ignoring case, and the lists sit at the top of `compliance/utterance.py`. So "indebted" and "Owen" don't trip the debt check, but "debtor" does, because it is listed. "Sue" is only a threat as a verb ("we will sue", "sued"), so a person named Sue can be greeted. The filter doesn't understand "not": "we will not sue you" is blocked too. When unsure, it blocks. `split_sentences(text)` cuts model output into sentences without breaking "$1,240.50" or "Mr. Doe"; the later streaming step will use it. Nothing is wired into calls yet.
+
+```bash
+uv run demo part-11
+```
+
+The demo prints allow or block, with the rule, for a list of sample sentences at each stage of a call. This is not legal advice.
+
 ## Commands
 
 | Command                   | Needs a model? | What it does                                                    |
@@ -342,6 +373,8 @@ The demo plays every script in `sim/scripts/` through the webhook in-process. It
 | `uv run audit-verify`     | No (needs DB)  | Recomputes every audit hash; exits 1 if any row was changed or removed |
 | `uv run accept part-09`   | Yes            | Runs the earlier checks, then plays Sam Doe's call through the webhook and checks the balance |
 | `uv run demo part-09`     | No             | Plays every caller script through the webhook (real model if set, else the fake) |
+| `uv run accept part-11`   | Yes            | Runs the earlier checks, then the sentence filter on sample sentences |
+| `uv run demo part-11`     | No             | Prints allow/block for sample sentences at each stage of a call |
 | `uv run serve`            | Yes            | Runs the webhook on `127.0.0.1:8000` for AgentPhone to call       |
 
 ## Credits
