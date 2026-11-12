@@ -22,6 +22,7 @@ SMOKE_MODULES = [
     "phone.webhook",
     "sim.agentphone_sim",
     "tasks.serve",
+    "harness.api",
 ]
 
 

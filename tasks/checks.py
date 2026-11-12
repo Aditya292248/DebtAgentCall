@@ -663,3 +663,63 @@ def _demo_part11() -> None:
 
 ACCEPTANCE["part-11"] = lambda: ACCEPTANCE["part-09"]() and _accept_part11_filter()
 DEMOS["part-11"] = _demo_part11
+
+
+# ----------------------------------------------------------------------------
+# UI: the debtor list with pre-call badges, and the audit log, in the browser
+# ----------------------------------------------------------------------------
+
+
+def _accept_part12() -> bool:
+    from fastapi.testclient import TestClient
+
+    from harness.api import app
+
+    # Calls the API directly rather than running pytest: without a database the
+    # pytest `db` tests are skipped and pytest still exits 0, which would pass here.
+    client = TestClient(app)
+    res = client.get("/api/precall", params={"at": _PART07_WHEN})
+    if res.status_code != 200:
+        print("GET /api/precall failed:", res.status_code, res.json().get("detail"))
+        return False
+    ok = True
+    for debt in res.json()["debts"]:
+        expected = _PART07_EXPECTED.get(debt["account_number"])
+        if expected is None:
+            continue
+        blocked = [d["rule_id"] for d in debt["decisions"] if not d["allow"]]
+        good = blocked == expected[1] and debt["may_call"] is (not expected[1])
+        ok = ok and good
+        print(f"  {'ok ' if good else 'BAD'} {debt['account_number']} {debt['name']:<14} {blocked}")
+    seen = {d["account_number"] for d in res.json()["debts"]}
+    missing = sorted(set(_PART07_EXPECTED) - seen)
+    if missing:
+        print("missing from the API:", missing)
+    chain = client.get("/api/audit/verify").json()
+    print("chain:", chain)
+    return ok and not missing and chain.get("ok") is True
+
+
+def _demo_part12() -> None:
+    from fastapi.testclient import TestClient
+
+    from harness.api import app
+
+    client = TestClient(app)
+    for label, at in (
+        ("2pm New York", _PART07_WHEN),
+        ("9:30pm Los Angeles", "2026-11-06T05:30:00+00:00"),
+    ):
+        print(f"-- GET /api/precall?at={at}  ({label}) --")
+        for debt in client.get("/api/precall", params={"at": at}).json()["debts"]:
+            blocks = [f"{d['rule_id']}: {d['reason']}" for d in debt["decisions"] if not d["allow"]]
+            badge = "ready" if debt["may_call"] else "; ".join(blocks)
+            print(f"  {debt['account_number']} {debt['name']:<14} {badge}")
+        print()
+    print("-- GET /api/audit/verify --")
+    print(" ", client.get("/api/audit/verify").json())
+    print("\n   # the same answers the UI shows: `uv run api`, then `npm run dev` in web/")
+
+
+ACCEPTANCE["part-12"] = lambda: ACCEPTANCE["part-11"]() and _accept_part10() and _accept_part12()
+DEMOS["part-12"] = _demo_part12
