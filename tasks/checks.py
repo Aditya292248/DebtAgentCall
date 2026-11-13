@@ -723,3 +723,68 @@ def _demo_part12() -> None:
 
 ACCEPTANCE["part-12"] = lambda: ACCEPTANCE["part-11"]() and _accept_part10() and _accept_part12()
 DEMOS["part-12"] = _demo_part12
+
+
+# ----------------------------------------------------------------------------
+# subagents: after a call, reviewers read the transcript in parallel
+# ----------------------------------------------------------------------------
+
+_PART15_ACCOUNT = {
+    "account_id": "ACC-1001",
+    "name": "Sam Doe",
+    "creditor": "Acme Bank",
+    "balance": "1250.00",
+    "currency": "USD",
+}
+# A made-up call that breaks one rule: the agent threatens arrest at the end.
+_PART15_CALL = [
+    ("Hello?", "Hi, this is Maya. May I speak with Sam Doe?"),
+    (
+        "Yes, this is Sam.",
+        "Thanks, Sam. I'm a debt collector trying to collect a debt, and any information "
+        "I get will be used for that purpose.",
+    ),
+    ("How much do I owe?", "Your balance with Acme Bank is $1,250.00."),
+    ("I can't pay that right now.", "If you don't pay this week, we will have you arrested."),
+]
+
+
+def _demo_review_reply(messages: list[dict]) -> str:
+    """Stand-in reviewer answers when no model is set up, so the demo still runs."""
+    task = messages[-1]["content"]
+    if "Area: threats" in task:
+        return 'FLAG: the agent said "we will have you arrested"'
+    return "OK: nothing wrong in this area"
+
+
+def _accept_part15() -> bool:
+    from harness.review import review_transcript
+
+    findings = {f.area: f for f in review_transcript(_PART15_CALL, _PART15_ACCOUNT)}
+    for f in findings.values():
+        print(f"  {'ok  ' if f.ok else 'FLAG'} {f.area:<12} {f.note}")
+    return not findings["threats"].ok and findings["amounts"].ok
+
+
+def _demo_part15() -> None:
+    import time
+
+    from harness.review import format_transcript, review_transcript
+    from model import fake
+
+    real = _llm_configured()
+    provider = None if real else fake(scripted=_demo_review_reply)
+    print("model:", "the real one from LLM_BASE_URL" if real else "fake (set LLM_BASE_URL)", "\n")
+    print("-- the call --")
+    print(format_transcript(_PART15_CALL), "\n")
+    print("-- one reviewer subagent per area, all at once --")
+    start = time.perf_counter()
+    findings = review_transcript(_PART15_CALL, _PART15_ACCOUNT, provider=provider)
+    for f in findings:
+        print(f"  {'ok  ' if f.ok else 'FLAG'} {f.area:<12} {f.note}")
+    print(f"  ({len(findings)} reviewers in {time.perf_counter() - start:.1f}s)")
+    print("\n   # a second check after the call, for a person to look at; never on a live call")
+
+
+ACCEPTANCE["part-15"] = lambda: ACCEPTANCE["part-12"]() and _accept_part15()
+DEMOS["part-15"] = _demo_part15

@@ -20,6 +20,8 @@ harness/
   precall.py            check_and_record(conn, account, when): run the pre-call checks, log every decision
   memory.py             Session, JsonlSession and PostgresSession: each call's saved history
   api.py                `uv run api`: a small read-only web API for the UI (pre-call decisions, chain check)
+  subagents.py          run_subagent, fan_out and the delegate / fan_out tools (after calls only)
+  review.py             review_transcript(transcript, account): reviewer subagents check a finished call
 compliance/
   decision.py           Decision (allow, rule_id, reason, evidence), the answer every rule gives
   timezones.py          zones_for(zip, phone), the time zones a debtor might be in
@@ -39,6 +41,7 @@ sim/
   scripts/              the caller scripts, as YAML
 instructions/
   system.md             the system prompt the agent sends first on every call
+  subagent.md           the short prompt every subagent starts with
 supabase/
   config.toml           local Supabase settings (database on port 54322)
   migrations/           the debtor, phone, debt, call_attempt, flags, audit_event and call_message tables
@@ -426,6 +429,25 @@ uv run demo part-12
 
 The demo prints what the API answers at 2pm New York time and at 9:30pm Los Angeles time, then the chain check.
 
+## Subagents
+
+A subagent is a fresh `Agent` with its own short prompt (`instructions/subagent.md`) and an empty history. It gets one task and only its final reply comes back. `run_subagent(task)` runs one; `fan_out([task, ...])` runs up to 8 at once (4 in parallel) and returns the replies in task order. `delegate_tool()` and `fan_out_tool()` let a model do the same.
+
+- A subagent never gets `delegate` or `fan_out` itself, so it can't start more subagents.
+- A subagent that crashes comes back as an `error: subagent failed: ...` string. The others keep going.
+- More than 8 tasks is refused, not cut short, so no task is silently dropped.
+- Live calls never get these tools: a subagent is a whole extra model conversation, too slow for someone waiting on the phone. `LIVE_CALL_EXCLUDED` names them and a test checks that the webhook's agent doesn't offer them.
+
+The first use is after a call. `review_transcript(transcript, account)` in `harness/review.py` starts one reviewer per area, in parallel: was the debt collector disclosure given, were there threats or false statements, do the amounts match the account, and was the debt mentioned to anyone before they were verified. Each reviewer answers `OK: ...` or `FLAG: ...`, which becomes a `Finding(area, ok, note)`. An answer that is neither counts as a flag.
+
+This is a second check only. The rules are enforced by code before and during the call; a reviewer can miss things or be wrong, so a finding is something for a person to look at, never a decision.
+
+```bash
+uv run demo part-15
+```
+
+The demo reviews a made-up call where the agent threatens arrest. With the fake model (no `LLM_BASE_URL`), the threats reviewer flags it and the other three pass.
+
 ## Commands
 
 | Command                   | Needs a model? | What it does                                                    |
@@ -459,6 +481,8 @@ The demo prints what the API answers at 2pm New York time and at 9:30pm Los Ange
 | `uv run accept part-12`   | Yes            | Runs the earlier checks, then the UI API's tests against the database |
 | `uv run demo part-12`     | No (needs DB)  | Prints the API's pre-call answers at two times, and the chain check |
 | `uv run api`              | No (needs DB)  | Starts the read-only API for the UI on http://127.0.0.1:8000    |
+| `uv run accept part-15`   | Yes            | Runs the earlier checks, then has reviewer subagents flag the threat in a sample call |
+| `uv run demo part-15`     | No             | Reviews a sample call with four reviewer subagents in parallel (real model if set, else the fake) |
 | `npm run dev` (in `web/`) | No (needs DB and API) | Starts the UI on http://localhost:5173                   |
 
 ## Credits
