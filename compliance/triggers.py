@@ -85,16 +85,22 @@ _PATTERNS: dict[str, list[str]] = {
     ],
     "deceased": [
         r"\bpassed (?:away|on)\b",
-        # A person who "passed", not a deadline that "has passed".
+        # A person who "passed", not a deadline that "has passed", and not
+        # someone who passed something ("passed me the phone", "passed the exam").
         r"\b(?:he|she|they|husband|wife|mother|father|mom|mum|dad|son|daughter|brother"
-        r"|sister|partner|grandmother|grandfather)(?:'s| has| have| had| just)? passed\b",
+        r"|sister|partner|grandmother|grandfather)(?:'s| has| have| had| just)? passed\b"
+        r"(?!\s+(?:the|his|her|their|my|me|it|that|this|your|him|them|us)\b)",
         r"\b(?:died|deceased)\b",
         r"\b(?:is|was|'s) dead\b",
-        r"\bno longer with us\b",
+        r"\bno longer (?:with us|alive|living)\b",
     ],
     "cease": [
         rf"\b(?:stop|quit|cease)\s+(?:all\s+)?{_CALL}\b",
         rf"\b{_NOT}\s+(?:ever\s+)?{_CALL}\b",
+        rf"\bnot to (?:ever )?{_CALL}\b",
+        r"\bno more contact\b",
+        r"\bstop with (?:the|these|all the) calls\b",
+        r"\blose my (?:number|name)\b",
         r"\b(?:take|remove|put)\s+(?:me|my (?:name|number))\s+(?:off|from|on)\s+"
         r"(?:your|the|this)\s+(?:\w+\s+)?list\b",
         r"\bdo[- ]not[- ]call list\b",
@@ -111,19 +117,26 @@ _PATTERNS: dict[str, list[str]] = {
         r"\bnot (?:my|our) (?:debt|bill|account|loan|card|balance)\b",
         r"(?:\bisn'?t|\bis not|\bain'?t|'s not|\bwasn'?t|\bwas not) (?:mine|my debt)\b",
         r"\b(?:i|we)\s+(?:don'?t|do not|never|didn'?t|did not)\s+owed?\b",
-        r"\b(?:don'?t|do not|didn'?t|did not) recogni[sz]e\b",
+        # Needs a debt word: "I don't recognize your number" is just a greeting.
+        r"\b(?:don'?t|do not|didn'?t|did not) recogni[sz]e (?:this|that|the|these|those|any)"
+        r" (?:debts?|accounts?|charges?|bills?|balances?|amounts?|loans?|cards?|company"
+        r"|creditor)\b",
         r"\bowe (?:you |them |anybody |anyone )?nothing\b",
         r"\bdisput(?:e|es|ed|ing)\b",
         r"\bnever had (?:an?|this|that|any) (?:account|loan|card)\b",
         r"\balready paid (?:this|that|it|off)\b",
+        r"\bpaid (?:this|that|it) off\b",
     ],
     "recording_objection": [
+        r"\bobject(?:s|ing)?\b[^.?!]{0,20}\brecord(?:ed|ing)?\b",
         r"\b(?:don'?t|do not|stop|quit|no)\s+record(?:ing)?\b",
         r"\b(?:not|don'?t|do not)\b[^.?!]{0,30}\brecord(?:ed|ing)?\b",
         r"\bturn off (?:the )?record(?:ing|er)\b",
     ],
     "wrong_number": [
         r"\bwrong (?:number|person|house|guy|man|woman|lady|people)\b",
+        r"\bwrong #",
+        r"\bno ?(?:one|body) (?:here )?(?:named|called) \w+ (?:lives|is) here\b",
         r"\b(?:don'?t|do not) know (?:any ?one|anybody|someone|a) (?:named|called|by)\b",
         r"\bno ?(?:one|body) (?:here )?(?:by|with|named|called) (?:that|the|this) name\b",
         r"\b(?:doesn'?t|does not|don'?t|do not) live here\b",
