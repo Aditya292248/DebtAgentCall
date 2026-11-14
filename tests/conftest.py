@@ -34,6 +34,21 @@ def _skip_db_tests_without_a_database(request: pytest.FixtureRequest) -> None:
         pytest.skip(reason)
 
 
+@pytest.fixture(autouse=True)
+def no_default_skills(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Agents in tests see no skills unless a test passes ``skills_dir``.
+
+    Otherwise the repo's skills/ folder would add a menu to the system prompt and
+    a load_skill tool to every exact-payload check. Agent reads DEFAULT_SKILLS_DIR
+    when it is built, so this covers every agent.
+    """
+    import harness.agent
+
+    monkeypatch.setattr(harness.agent, "DEFAULT_SKILLS_DIR", tmp_path_factory.mktemp("no-skills"))
+
+
 @pytest.fixture
 def no_instructions(tmp_path: Path) -> Path:
     """A system-prompt path that doesn't exist, so the payload is history only.
