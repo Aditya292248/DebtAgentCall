@@ -28,6 +28,11 @@ turns before it. If the last turn died between a tool request and its result,
 the missing result is filled in with a placeholder first. When a turn is taken
 back out after a failure, the session records the shorter history too.
 
+Skills. The agent looks in ``skills_dir`` (``skills/`` by default) and adds a
+menu, each skill's name and description only, to the system prompt. When there
+is at least one skill it also gets a ``load_skill`` tool. The folder is re-read
+on every call, like the instructions file.
+
 Adapted from codingHarness.
 """
 
@@ -37,10 +42,12 @@ from pathlib import Path
 
 from harness.instructions import load_system_prompt
 from harness.memory import Session, unanswered_tool_calls
+from harness.skills import Skill, discover, load_skills, skill_tool, skills_prompt
 from harness.tools import ToolRegistry, default_tools, run_tool
 from model import Provider, chat
 
 DEFAULT_SYSTEM_PROMPT_PATH = Path(__file__).resolve().parent.parent / "instructions" / "system.md"
+DEFAULT_SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
 MAX_STEPS = 10  # model calls per run(); stops a confused model looping forever
 
 
@@ -53,6 +60,7 @@ class Agent:
         tools: ToolRegistry | None = None,
         max_steps: int = MAX_STEPS,
         session: Session | None = None,
+        skills_dir: str | Path | None = None,
     ) -> None:
         if max_steps < 1:
             raise ValueError("max_steps must allow at least one model call")
@@ -61,6 +69,9 @@ class Agent:
         self.system_prompt_path = Path(system_prompt_path)
         self.tools = default_tools() if tools is None else tools
         self.max_steps = max_steps
+        # Looked up here, not as a default argument, so tests can point every agent
+        # at an empty folder at once.
+        self.skills_dir = Path(skills_dir) if skills_dir is not None else DEFAULT_SKILLS_DIR
         self.messages: list[dict] = []
 
         # Memory: start from what this call already said, then save everything new.
@@ -84,9 +95,21 @@ class Agent:
         if self.session is not None:
             self.session.replace(self.messages)
 
-    def _payload(self) -> list[dict]:
-        """What the model receives: the system prompt (if any), then the history."""
-        system_prompt = load_system_prompt(self.system_prompt_path)
+    def skills(self) -> list[Skill]:
+        """Name and description of every skill in ``skills_dir``, read fresh."""
+        return load_skills(discover(self.skills_dir))
+
+    def _tools(self, skills: list[Skill]) -> ToolRegistry:
+        """This call's tools: the registry, plus load_skill if there are skills."""
+        if not skills or self.tools.get("load_skill"):
+            return self.tools
+        return ToolRegistry([*self.tools, skill_tool(skills)])
+
+    def _payload(self, skills: list[Skill] | None = None) -> list[dict]:
+        """What the model receives: system prompt + skills menu (if any), then history."""
+        skills = self.skills() if skills is None else skills
+        parts = [load_system_prompt(self.system_prompt_path), skills_prompt(skills)]
+        system_prompt = "\n\n".join(p for p in parts if p)
         system = [{"role": "system", "content": system_prompt}] if system_prompt else []
         # A new list, so whatever the provider holds onto doesn't change under it later.
         return system + list(self.messages)
@@ -99,10 +122,11 @@ class Agent:
         if user_text is not None:
             self._add({"role": "user", "content": user_text})
         try:
+            skills = self.skills()
             resp = chat(
-                self._payload(),
+                self._payload(skills),
                 model=self.model,
-                tools=self.tools.schemas() or None,
+                tools=self._tools(skills).schemas() or None,
                 provider=self.provider,
             )
         except Exception:
@@ -139,7 +163,8 @@ class Agent:
         return reply
 
     def _run_tools(self, calls: list[dict]) -> None:
+        tools = self._tools(self.skills())
         for call in calls:
             fn = call.get("function") or {}
-            result = run_tool(self.tools, fn.get("name", ""), fn.get("arguments"))
+            result = run_tool(tools, fn.get("name", ""), fn.get("arguments"))
             self._add({"role": "tool", "tool_call_id": call["id"], "content": result})

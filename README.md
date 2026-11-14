@@ -22,6 +22,7 @@ harness/
   api.py                `uv run api`: a small read-only web API for the UI (pre-call decisions, chain check)
   subagents.py          run_subagent, fan_out and the delegate / fan_out tools (after calls only)
   review.py             review_transcript(transcript, account): reviewer subagents check a finished call
+  skills.py             Skill, discover(), skills_prompt() and the load_skill tool
 compliance/
   decision.py           Decision (allow, rule_id, reason, evidence), the answer every rule gives
   timezones.py          zones_for(zip, phone), the time zones a debtor might be in
@@ -42,6 +43,7 @@ sim/
 instructions/
   system.md             the system prompt the agent sends first on every call
   subagent.md           the short prompt every subagent starts with
+skills/                 short playbooks for hard conversations (hardship, angry caller, ...)
 supabase/
   config.toml           local Supabase settings (database on port 54322)
   migrations/           the debtor, phone, debt, call_attempt, flags, audit_event and call_message tables
@@ -477,6 +479,23 @@ uv run demo part-14
 
 The demo prints the triggers, flags and close line for sample caller lines, including the ones that must not fire. This is not legal advice.
 
+## Skills
+
+A skill is a short playbook for a hard moment on a call, kept as a Markdown file in `skills/<name>/SKILL.md`. Five ship with the repo: `hardship`, `angry-caller`, `confused-caller`, `payment-plan-talk` and `callback-request`.
+
+- **Only the menu is always sent.** The agent adds a `## Skills` section to the system prompt with each skill's name and one-line description. When the conversation matches one, the model calls `load_skill` with its name and gets the full playbook back.
+- **Read fresh every call**, like the system prompt, so editing or adding a skill takes effect on the next turn.
+- **No skills, no tool.** If `skills/` is empty or missing, there is no menu and no `load_skill` tool. An unknown name comes back as an `error: ...` string.
+- **Guidance only.** Each playbook starts with "Rules are enforced in code, not here." The legal must-stops, the sentence filter and the pre-call checks are code and run whether or not a skill is loaded. A test runs every line of every playbook through the sentence filter, so no pressure or threat language can slip into one.
+
+The required steps of a call (greeting, verifying, the disclosure) are not skills; they come with the call stages.
+
+```bash
+uv run demo part-17
+```
+
+The demo prints the skills menu, then plays a caller who lost their job: the model loads the `hardship` playbook before answering.
+
 ## Commands
 
 | Command                   | Needs a model? | What it does                                                    |
@@ -514,6 +533,8 @@ The demo prints the triggers, flags and close line for sample caller lines, incl
 | `uv run demo part-14`     | No             | Prints the stop triggers, flags and close line for sample caller lines |
 | `uv run accept part-15`   | Yes            | Runs the earlier checks, then has reviewer subagents flag the threat in a sample call |
 | `uv run demo part-15`     | No             | Reviews a sample call with four reviewer subagents in parallel (real model if set, else the fake) |
+| `uv run accept part-17`   | Yes            | Runs the earlier checks, then checks the model loads the hardship skill for a caller who lost their job |
+| `uv run demo part-17`     | No             | Prints the skills menu and a call where the model loads a playbook (real model if set, else the fake) |
 | `npm run dev` (in `web/`) | No (needs DB and API) | Starts the UI on http://localhost:5173                   |
 
 ## Credits

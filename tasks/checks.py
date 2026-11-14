@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from fastapi.testclient import TestClient
 
     from compliance import Contact, SpeechState
+    from harness import Agent
     from model import Provider
 
 ACCEPTANCE: dict[str, Callable[[], bool]] = {}
@@ -844,3 +845,71 @@ def _demo_part14() -> None:
 
 ACCEPTANCE["part-14"] = lambda: ACCEPTANCE["part-12"]() and _accept_part14_triggers()
 DEMOS["part-14"] = _demo_part14
+
+
+# ----------------------------------------------------------------------------
+# skills: playbooks the agent loads for hard conversations
+# ----------------------------------------------------------------------------
+
+_PART17_LINE = "I lost my job last month and I just can't keep up right now."
+
+
+def _part17_agent(provider: Provider | None = None) -> Agent:
+    from harness import Agent
+    from harness.agent import DEFAULT_SKILLS_DIR
+    from harness.tools import ToolRegistry
+
+    # Only load_skill, so the run shows the skill and nothing else.
+    return Agent(provider=provider, tools=ToolRegistry(), skills_dir=DEFAULT_SKILLS_DIR)
+
+
+def _loaded_skills(messages: list[dict]) -> list[str]:
+    import json
+
+    names: list[str] = []
+    for m in messages:
+        for call in m.get("tool_calls") or []:
+            fn = call.get("function") or {}
+            if fn.get("name") == "load_skill":
+                args = fn.get("arguments") or {}
+                args = json.loads(args) if isinstance(args, str) else args
+                names.append(str(args.get("name")))
+    return names
+
+
+def _accept_part17() -> bool:
+    agent = _part17_agent()
+    print("  skills:", ", ".join(s.name for s in agent.skills()))
+    reply = agent.run(_PART17_LINE)
+    loaded = _loaded_skills(agent.messages)
+    print(f"  caller: {_PART17_LINE}\n  loaded: {loaded or 'none'}\n  agent: {reply}")
+    return "hardship" in loaded
+
+
+def _demo_part17() -> None:
+    from harness.skills import skills_prompt
+    from model import fake
+    from model.fake import Reply, tool_call, tool_reply
+
+    real = _llm_configured()
+    script: list[Reply] = [
+        tool_reply(tool_call("load_skill", name="hardship")),
+        "I'm sorry to hear that.",
+    ]
+    agent = _part17_agent(None if real else fake(scripted=script))
+    print("model:", "the real one from LLM_BASE_URL" if real else "fake (set LLM_BASE_URL)", "\n")
+    print("-- the menu added to the system prompt --")
+    print(skills_prompt(agent.skills()), "\n")
+    print(f'caller: "{_PART17_LINE}"')
+    reply = agent.run(_PART17_LINE)
+    for m in agent.messages:
+        if m["role"] == "tool":
+            first = m["content"].splitlines()[0]
+            print(f"  load_skill -> {first} ...")
+    print(f"  loaded: {_loaded_skills(agent.messages) or 'none'}")
+    print(f"agent: {reply}")
+    print("\n   # skills are guidance only; the checks in code still run on every line")
+
+
+ACCEPTANCE["part-17"] = lambda: ACCEPTANCE["part-15"]() and _accept_part17()
+DEMOS["part-17"] = _demo_part17
