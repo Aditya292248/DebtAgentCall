@@ -33,6 +33,14 @@ menu, each skill's name and description only, to the system prompt. When there
 is at least one skill it also gets a ``load_skill`` tool. The folder is re-read
 on every call, like the instructions file.
 
+Compaction (``harness/compact.py``). Before a caller turn is added, the agent
+checks how big the next model call would be: the ``prompt_tokens`` the server
+reported last time plus an estimate for what came after, or an estimate of the
+whole payload. Past ``COMPACT_AT`` of ``max_context_tokens`` it keeps the first
+``keep_head`` and last ``keep_tail`` messages and swaps the middle for one
+summary the model writes, and the session saves a ``compaction`` record. If the
+summarizer fails, the history is left as it was and the turn goes ahead.
+
 Adapted from codingHarness.
 """
 
@@ -40,6 +48,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from harness.compact import SUMMARIZE_PROMPT, compact_messages, estimate_tokens, render
 from harness.instructions import load_system_prompt
 from harness.memory import Session, unanswered_tool_calls
 from harness.skills import Skill, discover, load_skills, skill_tool, skills_prompt
@@ -49,6 +58,10 @@ from model import Provider, chat
 DEFAULT_SYSTEM_PROMPT_PATH = Path(__file__).resolve().parent.parent / "instructions" / "system.md"
 DEFAULT_SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
 MAX_STEPS = 10  # model calls per run(); stops a confused model looping forever
+MAX_CONTEXT_TOKENS = 16_000  # set to your model's context length
+COMPACT_AT = 0.8  # compact once the next call passes this share of the limit
+KEEP_HEAD = 2  # first messages kept word for word: how the call opened
+KEEP_TAIL = 6  # recent messages kept word for word: what is being said now
 
 
 class Agent:
@@ -61,9 +74,14 @@ class Agent:
         max_steps: int = MAX_STEPS,
         session: Session | None = None,
         skills_dir: str | Path | None = None,
+        max_context_tokens: int = MAX_CONTEXT_TOKENS,
+        keep_head: int = KEEP_HEAD,
+        keep_tail: int = KEEP_TAIL,
     ) -> None:
         if max_steps < 1:
             raise ValueError("max_steps must allow at least one model call")
+        if max_context_tokens < 1 or keep_head < 1 or keep_tail < 1:
+            raise ValueError("max_context_tokens, keep_head and keep_tail must be positive")
         self.model = model
         self.provider = provider
         self.system_prompt_path = Path(system_prompt_path)
@@ -72,7 +90,14 @@ class Agent:
         # Looked up here, not as a default argument, so tests can point every agent
         # at an empty folder at once.
         self.skills_dir = Path(skills_dir) if skills_dir is not None else DEFAULT_SKILLS_DIR
+        self.max_context_tokens = max_context_tokens
+        self.keep_head = keep_head
+        self.keep_tail = keep_tail
+        self.compactions = 0
+        self.compact_error: str | None = None  # why the last compaction failed, if it did
         self.messages: list[dict] = []
+        # (prompt_tokens the server reported, how many messages that prompt held)
+        self._measured: tuple[int, int] | None = None
 
         # Memory: start from what this call already said, then save everything new.
         self.session = session
@@ -92,6 +117,7 @@ class Agent:
         if len(self.messages) == length:
             return
         del self.messages[length:]
+        self._measured = None  # the server's count was for the longer history
         if self.session is not None:
             self.session.replace(self.messages)
 
@@ -118,6 +144,11 @@ class Agent:
         """One model call. Adds ``user_text`` first if given, then records the reply.
         Tool requests are recorded, not run: that's ``run()``'s job.
         """
+        if user_text is not None:
+            self._maybe_compact(user_text)
+        return self._send(user_text)
+
+    def _send(self, user_text: str | None) -> str:
         start = len(self.messages)
         if user_text is not None:
             self._add({"role": "user", "content": user_text})
@@ -133,6 +164,9 @@ class Agent:
             # Undo the user turn so a failed call leaves the history as it was.
             self._undo_to(start)
             raise
+        prompt_tokens = resp.usage.get("prompt_tokens")
+        if isinstance(prompt_tokens, int) and prompt_tokens > 0:
+            self._measured = (prompt_tokens, len(self.messages))
         if resp.tool_calls:
             # Every tool result must name the call it answers; fill in ids a server left out.
             calls = [{**c, "id": c.get("id") or f"call_{i}"} for i, c in enumerate(resp.tool_calls)]
@@ -144,9 +178,11 @@ class Agent:
     def run(self, user_text: str) -> str:
         """The agent loop: send, run the tools the model asked for, send again, until
         it answers in plain text or ``max_steps`` model calls are used up."""
+        # Compact before marking where the turn starts, so an undo can't cut the summary.
+        self._maybe_compact(user_text)
         start = len(self.messages)
         try:
-            reply = self.send(user_text)
+            reply = self._send(user_text)
             steps = 1
             while calls := self.messages[-1].get("tool_calls"):
                 # Answer every request, even on the last step, so the history stays valid:
@@ -161,6 +197,59 @@ class Agent:
             self._undo_to(start)
             raise
         return reply
+
+    def context_tokens(self) -> int:
+        """Size of the next model call, tool schemas included.
+
+        Exact for everything the server already counted on the last call, estimated
+        for the rest. With no server count (fake provider, or a server that doesn't
+        report usage) the whole payload is estimated.
+        """
+        if self._measured and len(self.messages) >= self._measured[1]:
+            counted, n = self._measured
+            return counted + estimate_tokens(self.messages[n:])
+        skills = self.skills()
+        return estimate_tokens(self._payload(skills), self._tools(skills).schemas() or None)
+
+    def _maybe_compact(self, pending: str | None = None) -> None:
+        """Compact if the next call, with ``pending`` caller text added, passes the line."""
+        size = self.context_tokens()
+        if pending:
+            size += estimate_tokens([{"role": "user", "content": pending}])
+        if size > self.max_context_tokens * COMPACT_AT:
+            self.compact()
+
+    def compact(self) -> bool:
+        """Summarize the middle of the history. False if there was nothing to do,
+        or if the summarizer failed; then the history is left exactly as it was."""
+        try:
+            compacted = compact_messages(
+                self.messages, self._summarize, self.keep_head, self.keep_tail
+            )
+        except Exception as exc:  # noqa: BLE001 - a failed summary must not end the call
+            self.compact_error = f"{type(exc).__name__}: {exc}"
+            return False
+        if compacted == self.messages:
+            return False
+        self.messages = compacted
+        if self.session is not None:
+            self.session.replace(compacted)
+        self.compactions += 1
+        self.compact_error = None
+        self._measured = None  # the server's count was for the old history
+        return True
+
+    def _summarize(self, middle: list[dict]) -> str:
+        """Ask the model for a summary of ``middle``. No tools, no history: one call."""
+        resp = chat(
+            [
+                {"role": "system", "content": SUMMARIZE_PROMPT},
+                {"role": "user", "content": render(middle)},
+            ],
+            model=self.model,
+            provider=self.provider,
+        )
+        return resp.content
 
     def _run_tools(self, calls: list[dict]) -> None:
         tools = self._tools(self.skills())
