@@ -788,3 +788,59 @@ def _demo_part15() -> None:
 
 ACCEPTANCE["part-15"] = lambda: ACCEPTANCE["part-12"]() and _accept_part15()
 DEMOS["part-15"] = _demo_part15
+
+
+# ----------------------------------------------------------------------------
+# stop triggers: what the caller says that legally ends the call
+# ----------------------------------------------------------------------------
+
+
+def _part14_samples() -> list[tuple[str, list[str]]]:
+    """(caller line, the trigger kinds expected, in priority order)."""
+    return [
+        ("Yes, this is Sam. What's this about?", []),
+        ("I don't want to stop paying, I just need more time.", []),
+        ("The bank is not my favourite.", []),
+        ("Please stop calling me at work.", ["cease"]),
+        ("I filed chapter 7 last year.", ["bankruptcy"]),
+        ("You'll have to talk to my lawyer.", ["attorney"]),
+        ("My lawyer friend said this is fine.", ["attorney"]),
+        ("That's not my debt, I don't owe anything.", ["dispute"]),
+        ("I don't consent to recording.", ["recording_objection"]),
+        ("Sorry, wrong number.", ["wrong_number"]),
+        ("He passed away in June.", ["deceased"]),
+        ("Stop calling, I have an attorney and I dispute this.", ["attorney", "cease", "dispute"]),
+    ]
+
+
+def _accept_part14_triggers() -> bool:
+    from compliance.triggers import detect
+
+    ok = True
+    for line, expected in _part14_samples():
+        got = [t.kind for t in detect(line)]
+        good = got == expected
+        ok = ok and good
+        print(f"  {'ok ' if good else 'BAD'} {', '.join(got) or 'none':<32} {line}")
+    return ok
+
+
+def _demo_part14() -> None:
+    from compliance.triggers import detect
+
+    for line, _ in _part14_samples():
+        print(f'caller: "{line}"')
+        hits = detect(line)
+        if not hits:
+            print("  no trigger: the model gets the line as usual")
+        for t in hits:
+            extra = f"flag={t.flag or '-'}{'  escalate' if t.escalate else ''}"
+            print(f"  {t.kind:<20} matched {t.matched!r:<22} {extra}")
+        if hits:
+            print(f"  agent closes with: {hits[0].close}")
+        print()
+    print("   # checked before the model sees the line; not wired into calls yet")
+
+
+ACCEPTANCE["part-14"] = lambda: ACCEPTANCE["part-12"]() and _accept_part14_triggers()
+DEMOS["part-14"] = _demo_part14

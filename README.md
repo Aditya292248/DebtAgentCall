@@ -448,6 +448,35 @@ uv run demo part-15
 
 The demo reviews a made-up call where the agent threatens arrest. With the fake model (no `LLM_BASE_URL`), the threats reviewer flags it and the other three pass.
 
+## Stop triggers
+
+Some things a caller says end the call by law, whatever the model thinks. So `detect(caller_text)` in `compliance/triggers.py` reads each caller line **before** the model sees it, and returns a list of `Trigger(kind, matched, flag, close, escalate)`: what kind it is, the words that matched, which flag to set, the fixed polite line to close with, and whether a person must follow up.
+
+| Kind                  | Caller says, for example                 | Flag         | Escalate | Rule                     |
+| --------------------- | ---------------------------------------- | ------------ | -------- | ------------------------ |
+| `attorney`            | "I have a lawyer", "talk to my attorney" | `attorney`   | yes      | FDCPA 805(a)(2)          |
+| `bankruptcy`          | "I filed for bankruptcy", "chapter 7"    | `bankruptcy` | yes      | the bankruptcy stay      |
+| `deceased`            | "he passed away", "she died"             | `deceased`   | yes      | estates go another way   |
+| `cease`               | "stop calling", "take me off your list"  | `cease`      | no       | FDCPA 805(c), TCPA revocation |
+| `dispute`             | "not my debt", "I don't owe"             | none         | yes      | FDCPA 809                |
+| `recording_objection` | "don't record", "I don't consent to recording" | none   | no       | all-party recording states |
+| `wrong_number`        | "wrong number", "no one by that name"    | none         | no       | no third-party disclosure |
+
+- **Eager on purpose.** A false alarm only ends the call politely; a miss can break the law. So any mention of a lawyer fires, even "my lawyer friend said this is fine", and the matcher doesn't understand "not" ("I'm not bankrupt" fires too). Words match whole words, ignoring case.
+- **Not too eager.** "I don't want to stop paying", "the bank is not my favourite" and "the deadline has passed" fire nothing. "Please stop calling me at work" fires `cease`, and "I filed chapter 7 last year" fires `bankruptcy`.
+- **Known false alarms, accepted:** "Don't contact my mother" and "I don't text much" fire `cease`, "I'm not disputing it" fires `dispute`, and "No, I'm not recording anything" fires `recording_objection`. Tests pin these down, so a change is a choice, not an accident.
+- **Several at once** come back in a fixed order (lawyer, bankruptcy, death, stop calling, dispute, recording, wrong number), so the first one's close is the line to say. No close mentions the debt, so it is safe to say to the wrong person.
+- **Flags:** `cease` sets the stricter `cease` flag, not `opt_out_phone`. A dispute sets no flag: it is the debt's `disputed` status, set later by `log_dispute`.
+- `combine(regex_hits, classifier_hits)` merges these with a later small classifier's hits: a trigger fires if either finds it.
+
+Nothing is wired into calls yet, and nothing is written to the database.
+
+```bash
+uv run demo part-14
+```
+
+The demo prints the triggers, flags and close line for sample caller lines, including the ones that must not fire. This is not legal advice.
+
 ## Commands
 
 | Command                   | Needs a model? | What it does                                                    |
@@ -481,6 +510,8 @@ The demo reviews a made-up call where the agent threatens arrest. With the fake 
 | `uv run accept part-12`   | Yes            | Runs the earlier checks, then the UI API's tests against the database |
 | `uv run demo part-12`     | No (needs DB)  | Prints the API's pre-call answers at two times, and the chain check |
 | `uv run api`              | No (needs DB)  | Starts the read-only API for the UI on http://127.0.0.1:8000    |
+| `uv run accept part-14`   | Yes            | Runs the earlier checks, then the stop triggers on sample caller lines |
+| `uv run demo part-14`     | No             | Prints the stop triggers, flags and close line for sample caller lines |
 | `uv run accept part-15`   | Yes            | Runs the earlier checks, then has reviewer subagents flag the threat in a sample call |
 | `uv run demo part-15`     | No             | Reviews a sample call with four reviewer subagents in parallel (real model if set, else the fake) |
 | `npm run dev` (in `web/`) | No (needs DB and API) | Starts the UI on http://localhost:5173                   |
