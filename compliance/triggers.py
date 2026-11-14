@@ -70,7 +70,7 @@ PRIORITY: tuple[str, ...] = (
     "wrong_number",
 )
 
-_NOT = r"(?:don'?t|do not|never|please don'?t)"
+_NOT = r"(?:don'?t|do not|never)"
 _CALL = r"(?:call|calling|calls|contact|contacting|phone|phoning|ring|ringing|text|texting)"
 
 _PATTERNS: dict[str, list[str]] = {
@@ -81,11 +81,13 @@ _PATTERNS: dict[str, list[str]] = {
     ],
     "bankruptcy": [
         r"\bbankrupt(?:cy|cies)?\b",
-        r"\bchapter\s*(?:7|11|13|seven|eleven|thirteen)\b",
+        r"\b(?:chapter|ch\.?)\s*(?:7|11|13|seven|eleven|thirteen)\b",
     ],
     "deceased": [
         r"\bpassed (?:away|on)\b",
-        r"\b(?:has|have|had|just) passed\b",
+        # A person who "passed", not a deadline that "has passed".
+        r"\b(?:he|she|they|husband|wife|mother|father|mom|mum|dad|son|daughter|brother"
+        r"|sister|partner|grandmother|grandfather)(?:'s| has| have| had| just)? passed\b",
         r"\b(?:died|deceased)\b",
         r"\b(?:is|was|'s) dead\b",
         r"\bno longer with us\b",
@@ -96,7 +98,9 @@ _PATTERNS: dict[str, list[str]] = {
         r"\b(?:take|remove|put)\s+(?:me|my (?:name|number))\s+(?:off|from|on)\s+"
         r"(?:your|the|this)\s+(?:\w+\s+)?list\b",
         r"\bdo[- ]not[- ]call list\b",
-        r"\bno more (?:calls|calling)\b",
+        r"\b(?:no|any) ?more (?:calls|calling)\b",
+        r"\b(?:don'?t|do not) want (?:any |further |these )?(?:calls|calling)\b",
+        rf"\b(?:don'?t|do not) want (?:you|anyone|anybody|y'all) (?:to )?(?:keep )?{_CALL}\b",
         r"\bleave me alone\b",
         r"\b(?:stop|quit) (?:bothering|harassing|contacting) me\b",
         r"\b(?:revoke|withdraw)\b[^.?!]{0,20}\bconsent\b",
@@ -105,8 +109,9 @@ _PATTERNS: dict[str, list[str]] = {
     ],
     "dispute": [
         r"\bnot (?:my|our) (?:debt|bill|account|loan|card|balance)\b",
-        r"\b(?:isn'?t|is not|ain'?t) (?:mine|my debt)\b",
-        r"\b(?:i|we)\s+(?:don'?t|do not|never|didn'?t|did not)\s+owe\b",
+        r"(?:\bisn'?t|\bis not|\bain'?t|'s not|\bwasn'?t|\bwas not) (?:mine|my debt)\b",
+        r"\b(?:i|we)\s+(?:don'?t|do not|never|didn'?t|did not)\s+owed?\b",
+        r"\b(?:don'?t|do not|didn'?t|did not) recogni[sz]e\b",
         r"\bowe (?:you |them |anybody |anyone )?nothing\b",
         r"\bdisput(?:e|es|ed|ing)\b",
         r"\bnever had (?:an?|this|that|any) (?:account|loan|card)\b",
@@ -118,7 +123,8 @@ _PATTERNS: dict[str, list[str]] = {
         r"\bturn off (?:the )?record(?:ing|er)\b",
     ],
     "wrong_number": [
-        r"\bwrong (?:number|person|house)\b",
+        r"\bwrong (?:number|person|house|guy|man|woman|lady|people)\b",
+        r"\b(?:don'?t|do not) know (?:any ?one|anybody|someone|a) (?:named|called|by)\b",
         r"\bno ?(?:one|body) (?:here )?(?:by|with|named|called) (?:that|the|this) name\b",
         r"\b(?:doesn'?t|does not|don'?t|do not) live here\b",
         r"\bnever heard of (?:him|her|them|that person)\b",
@@ -130,7 +136,7 @@ _COMPILED: dict[str, list[re.Pattern[str]]] = {
     kind: [re.compile(p, re.IGNORECASE) for p in patterns] for kind, patterns in _PATTERNS.items()
 }
 
-_FLAG: dict[str, str | None] = {
+FLAGS: dict[str, str | None] = {
     "attorney": "attorney",
     "bankruptcy": "bankruptcy",
     "deceased": "deceased",
@@ -169,7 +175,7 @@ def _trigger(kind: str, matched: str) -> Trigger:
     return Trigger(
         kind=kind,
         matched=matched,
-        flag=_FLAG[kind],
+        flag=FLAGS[kind],
         close=CLOSES[kind],
         escalate=kind in _ESCALATE,
     )

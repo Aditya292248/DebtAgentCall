@@ -11,9 +11,14 @@ lawyer counts. Several triggers in one line come back in priority order.
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 import pytest
 
-from compliance.triggers import CLOSES, PRIORITY, Trigger, combine, detect
+from compliance.triggers import CLOSES, FLAGS, PRIORITY, Trigger, combine, detect
+
+MIGRATIONS = Path(__file__).resolve().parents[2] / "supabase" / "migrations"
 
 
 def _kinds(text: str) -> list[str]:
@@ -96,12 +101,15 @@ def test_flag_and_escalate_per_kind(kind: str, flag: str | None, escalate: bool)
 
 
 def test_flags_are_known_flag_kinds() -> None:
-    # Must match the check constraint on flags.kind in the migrations.
-    from compliance.triggers import _FLAG
-
-    known = {"cease", "attorney", "bankruptcy", "deceased", "opt_out_phone", "dnc"}
-    assert set(_FLAG) == set(PRIORITY) == set(CLOSES)
-    assert {f for f in _FLAG.values() if f is not None} <= known
+    # Read straight from the check constraint on flags.kind, so a rename in SQL
+    # fails here instead of at the first insert.
+    sql = (MIGRATIONS / "20261103130000_ledger_and_flags.sql").read_text(encoding="utf-8")
+    m = re.search(r"check \(kind in \(([^)]*)\)\)", sql)
+    assert m, "flags.kind check constraint not found"
+    known = set(re.findall(r"'(\w+)'", m.group(1)))
+    assert "cease" in known
+    assert set(FLAGS) == set(PRIORITY) == set(CLOSES)
+    assert {f for f in FLAGS.values() if f is not None} <= known
 
 
 def test_closes_never_name_the_debt() -> None:
@@ -110,6 +118,54 @@ def test_closes_never_name_the_debt() -> None:
         close = CLOSES[kind].lower()
         for word in ("debt", "owe", "balance", "$", "collect", "payment"):
             assert word not in close, (kind, word)
+
+
+# --- everyday phrasings ----------------------------------------------------
+# How people actually say it. Edit a pattern and this table shows what moved.
+
+
+@pytest.mark.parametrize(
+    ("text", "kinds"),
+    [
+        ("I don't want any more calls.", ["cease"]),
+        ("I don't want you calling me anymore.", ["cease"]),
+        ("Quit phoning me.", ["cease"]),
+        ("I revoke my consent.", ["cease"]),
+        ("That's not mine.", ["dispute"]),
+        ("I never owed anything.", ["dispute"]),
+        ("I don't recognize this debt.", ["dispute"]),
+        ("My husband passed.", ["deceased"]),
+        ("She's passed.", ["deceased"]),
+        ("He's dead.", ["deceased"]),
+        ("We filed Ch. 7.", ["bankruptcy"]),
+        ("I'm working with a bankruptcy attorney.", ["attorney", "bankruptcy"]),
+        ("You've got the wrong guy.", ["wrong_number"]),
+        ("I don't know anyone named Sam.", ["wrong_number"]),
+        # Must stay quiet.
+        ("The deadline has passed.", []),
+        ("I'll call you back.", []),
+        ("Can I call you back later?", []),
+        ("I won't stop paying.", []),
+        ("No records of that.", []),
+    ],
+)
+def test_everyday_phrasings(text: str, kinds: list[str]) -> None:
+    assert _kinds(text) == kinds
+
+
+@pytest.mark.parametrize(
+    ("text", "kind"),
+    [
+        ("Don't contact my mother.", "cease"),
+        ("I don't text much.", "cease"),
+        ("I'm not disputing it, I just can't pay.", "dispute"),
+        ("No, I'm not recording anything.", "recording_objection"),
+    ],
+)
+def test_accepted_false_alarms(text: str, kind: str) -> None:
+    # Known and accepted: these end the call politely though they shouldn't.
+    # Catching too much is the safe side; a later classifier may narrow them.
+    assert kind in _kinds(text)
 
 
 # --- must NOT fire ---------------------------------------------------------

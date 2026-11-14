@@ -463,7 +463,8 @@ Some things a caller says end the call by law, whatever the model thinks. So `de
 | `wrong_number`        | "wrong number", "no one by that name"    | none         | no       | no third-party disclosure |
 
 - **Eager on purpose.** A false alarm only ends the call politely; a miss can break the law. So any mention of a lawyer fires, even "my lawyer friend said this is fine", and the matcher doesn't understand "not" ("I'm not bankrupt" fires too). Words match whole words, ignoring case.
-- **Not too eager.** "I don't want to stop paying" and "the bank is not my favourite" fire nothing. "Please stop calling me at work" fires `cease`, and "I filed chapter 7 last year" fires `bankruptcy`.
+- **Not too eager.** "I don't want to stop paying", "the bank is not my favourite" and "the deadline has passed" fire nothing. "Please stop calling me at work" fires `cease`, and "I filed chapter 7 last year" fires `bankruptcy`.
+- **Known false alarms, accepted:** "Don't contact my mother" and "I don't text much" fire `cease`, "I'm not disputing it" fires `dispute`, and "No, I'm not recording anything" fires `recording_objection`. Tests pin these down, so a change is a choice, not an accident.
 - **Several at once** come back in a fixed order (lawyer, bankruptcy, death, stop calling, dispute, recording, wrong number), so the first one's close is the line to say. No close mentions the debt, so it is safe to say to the wrong person.
 - **Flags:** `cease` sets the stricter `cease` flag, not `opt_out_phone`. A dispute sets no flag: it is the debt's `disputed` status, set later by `log_dispute`.
 - `combine(regex_hits, classifier_hits)` merges these with a later small classifier's hits: a trigger fires if either finds it.
