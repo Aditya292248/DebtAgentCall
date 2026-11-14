@@ -2,7 +2,7 @@
 
 A debt-collection voice agent that puts compliance first, built one small step at a time.
 
-Right now the project can send messages to a language model and get a reply back, and it has an agent that remembers the conversation, follows a system prompt kept in a file, and can look up an account with a tool. The made-up debtors live in a local Postgres database run by Supabase. The pre-call compliance rules (calling hours, the 7-in-7 call limit, consent, stop requests, do-not-call, lawyers, bankruptcy and death) are here as plain Python checks; they are not wired into the agent yet. Every decision they make can be written to an append-only audit log that the database won't let anyone edit. There is a webhook that AgentPhone can call during a phone call, and a fake caller to test it without a phone. Each call's conversation is saved as it happens, so every turn of a call sees the turns before it. A first read-only web page shows the debtors with their pre-call result and the audit log. The call flow and the other rules come later, each in its own step.
+Right now the project can send messages to a language model and get a reply back, and it has an agent that remembers the conversation, follows a system prompt kept in a file, and can look up an account with a tool. The made-up debtors live in a local Postgres database run by Supabase. The pre-call compliance rules (calling hours, the 7-in-7 call limit, consent, stop requests, do-not-call, lawyers, bankruptcy and death) are here as plain Python checks; they are not wired into the agent yet. Every decision they make can be written to an append-only audit log that the database won't let anyone edit. There is a webhook that AgentPhone can call during a phone call, and a fake caller to test it without a phone. Each call's conversation is saved as it happens, so every turn of a call sees the turns before it. A first read-only web page shows the debtors with their pre-call result and the audit log. A dialer checks each debt right before dialing, writes the call to the ledger first, and places it once. The call flow and the other rules come later, each in its own step.
 
 ## What is here
 
@@ -37,6 +37,10 @@ phone/
   signing.py            sign() and verify(), the HMAC check on every AgentPhone webhook
   webhook.py            create_app(), the FastAPI app with POST /webhooks/agentphone
   replies.py            say(), say_and_hangup() and transfer(), the replies AgentPhone understands
+  client.py             PhoneClient, AgentPhoneClient (make_call, never retried), FakePhoneClient, CallError
+dialer/
+  service.py            dial_one(conn, account, when, phone): check, record, then call once; dial_queue for a list
+  cli.py                `uv run dialer`: --dry-run shows who would be called; --confirm places calls
 sim/
   agentphone_sim.py     a fake AgentPhone that plays a scripted caller against the webhook
   scripts/              the caller scripts, as YAML
@@ -496,6 +500,31 @@ uv run demo part-17
 
 The demo prints the skills menu, then plays a caller who lost their job: the model loads the `hardship` playbook before answering.
 
+## Dialer: the one safe way every call is placed
+
+`dial_one(conn, account_number, when, phone)` in `dialer/service.py` is the only code that asks AgentPhone to place a call. `dial_queue(debtors, when, phone, conn)` runs it for a list of debts in a fixed order (the one whose last call is oldest goes first), and a later `place_call` tool for an operator agent will call it for one debt. Each time, for that debt:
+
+1. **Check and write it down, in one transaction.** Lock the debt's row, run every pre-call check and record each decision in the audit log. The debt must also be `active`: a disputed, paused or closed debt is blocked, even when you name it. If they all allow, add a `call_attempt` row (`placing`) and commit.
+2. **Blocked:** nobody is dialed, and the result keeps the reasons.
+3. **Dial once.** `make_call` is called one time. The AgentPhone call id goes on the attempt (`placed`).
+4. **If AgentPhone says no** (429, 409 or 402), the attempt is marked `throttled`, `concurrency_limit`, `number_busy` or `no_funds`. **If we don't hear back** (a timeout, a 5xx), it is marked `placed_unknown`, because the phone may have rung. Either way we never try again by ourselves: AgentPhone has no idempotency key, so a retry could ring the person twice.
+
+- **The decision to call is always code.** There is no model in the dialer, not even to order the queue.
+- **Why the lock:** two runners working on the same debt would otherwise both count "6 calls this week" and both place the 8th. With the row lock, the second one waits, then counts 7 and is blocked.
+- **Every attempt counts toward 7-in-7,** refused ones too. That can waste one, but it never under-counts a call that rang.
+- **The queue stops early** when AgentPhone's answer means every call would fail (no funds, too many calls, our number busy, throttled, or no answer at all). Otherwise each remaining debt would lose one of its 7 attempts to a call that never rang. The result lists the debts it didn't try.
+- **If saving the call id fails** after AgentPhone placed the call, the id is logged as an error and the run stops; the attempt stays `placing`, so it still counts.
+- **Not done yet:** nothing marks a call as answered or as a conversation with the debtor afterwards. That needs the after-call step, so for now the "no calls for 7 days after a conversation" rule only sees conversations already in the ledger.
+- `max_parallel` (default 1) works on several debts at once, each with its own database connection.
+- **Recording:** there is no recording-consent decision yet, so the dialer leaves AgentPhone's default. A TODO in `dial_one` marks where `disableRecording` goes.
+- `AgentPhoneClient` needs the `agentphone` SDK (`uv pip install agentphone`) and `AGENTPHONE_API_KEY`, `AGENTPHONE_AGENT_ID` and `AGENTPHONE_FROM_NUMBER_ID` (see `.env.example`). It sends no system prompt, so calls run in webhook mode, and it turns the SDK's own retries off.
+
+```bash
+uv run dialer --dry-run
+```
+
+The dry run prints who would be called and why each of the others is blocked, and writes nothing. Without `--dry-run`, the command refuses to start unless `AGENTPHONE_API_KEY` is set **and** `--confirm` is passed. `--when` works only with `--dry-run`: a real call rings now, so it is checked and logged at now. `uv run demo part-18` is the dry run on the seed data at a fixed time. This is not legal advice.
+
 ## Commands
 
 | Command                   | Needs a model? | What it does                                                    |
@@ -535,6 +564,9 @@ The demo prints the skills menu, then plays a caller who lost their job: the mod
 | `uv run demo part-15`     | No             | Reviews a sample call with four reviewer subagents in parallel (real model if set, else the fake) |
 | `uv run accept part-17`   | Yes            | Runs the earlier checks, then checks the model loads the hardship skill for a caller who lost their job |
 | `uv run demo part-17`     | No             | Prints the skills menu and a call where the model loads a playbook (real model if set, else the fake) |
+| `uv run accept part-18`   | Yes            | Runs the earlier checks, then a dialer dry run over every seeded debtor |
+| `uv run demo part-18`     | No (needs DB)  | A dialer dry run on the seed: who would be called, and why the rest are blocked |
+| `uv run dialer --dry-run` | No (needs DB) | Who would be called now, and why the others are blocked; writes nothing |
 | `npm run dev` (in `web/`) | No (needs DB and API) | Starts the UI on http://localhost:5173                   |
 
 ## Credits

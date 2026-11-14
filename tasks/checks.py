@@ -913,3 +913,43 @@ def _demo_part17() -> None:
 
 ACCEPTANCE["part-17"] = lambda: ACCEPTANCE["part-15"]() and _accept_part17()
 DEMOS["part-17"] = _demo_part17
+
+
+# ----------------------------------------------------------------------------
+# dialer: check, record, then place each call once
+# ----------------------------------------------------------------------------
+
+
+def _accept_part18() -> bool:
+    """The dry run over the seed blocks exactly the debts the pre-call checks block."""
+    from datetime import datetime
+
+    from dialer.service import plan_queue
+    from harness.db import connect
+
+    when = datetime.fromisoformat(_PART07_WHEN)
+    with connect() as conn:
+        result = plan_queue(list(_PART07_EXPECTED), when, conn)
+        conn.rollback()
+    ok = True
+    for o in result.outcomes:
+        expected = _PART07_EXPECTED[o.account_number][1]
+        got = [d.rule_id for d in o.decisions if not d.allow]
+        good = got == expected
+        ok = ok and good
+        print(f"  {'ok ' if good else 'BAD'} {o.account_number} blocked by {got or 'nothing'}")
+    return ok
+
+
+def _demo_part18() -> None:
+    from dialer.cli import main
+
+    print("$ uv run dialer --dry-run --when", _PART07_WHEN, "\n")
+    main(["--dry-run", "--when", _PART07_WHEN])
+    print("\n   # a dry run: nothing written, nobody dialed; code decides who is called")
+
+
+ACCEPTANCE["part-18"] = lambda: (
+    ACCEPTANCE["part-17"]() and _accept_part14_triggers() and _accept_part18()
+)
+DEMOS["part-18"] = _demo_part18
