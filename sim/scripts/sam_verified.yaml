@@ -1,0 +1,9 @@
+# Sam Doe picks up, confirms who they are, hears the disclosure, then asks about the debt.
+name: sam_verified
+from: "+12135550101"
+lines:
+  - "Hello?"
+  - "Yes, this is Sam Doe speaking."
+  - "April 12, 1985, and my ZIP is 90012."
+  - "How much do I owe, and to whom?"
+  - "Okay, thank you. Goodbye."

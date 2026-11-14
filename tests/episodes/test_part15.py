@@ -186,7 +186,10 @@ def test_live_call_tools_have_no_delegate_or_fan_out(tmp_path: Path) -> None:
     provider = fake(default="Hello.")
     secret = "whsec_test_only"
     app = create_app(
-        provider=provider, secret=secret, open_session=partial(JsonlSession.for_call, tmp_path)
+        provider=provider,
+        secret=secret,
+        open_session=partial(JsonlSession.for_call, tmp_path),
+        stages=False,
     )
     body = json.dumps(
         {"event": "agent.message", "channel": "voice", "data": {"callId": "c1", "transcript": "Hi"}}

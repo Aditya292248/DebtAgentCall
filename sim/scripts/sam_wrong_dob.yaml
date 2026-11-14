@@ -1,0 +1,10 @@
+# Someone says yes on Sam's phone but gets the date of birth wrong twice.
+# The call must end without a word about the debt.
+name: sam_wrong_dob
+from: "+12135550101"
+lines:
+  - "Hello?"
+  - "Yes, speaking."
+  - "January 1, 1990, and the ZIP is 90012."
+  - "Sorry, I mean 03/15/1984, ZIP 90012."
+  - "How much do I owe?"

@@ -9,9 +9,12 @@ same call. It is a list of records, only ever added to:
     {"type": "message", "message": {"role": "assistant", "content": "", "tool_calls": [...]}}
     {"type": "message", "message": {"role": "tool", "tool_call_id": "call_1", "content": "..."}}
     {"type": "compaction", "messages": [... the whole history from here on ...]}
+    {"type": "state", "state": {"stage": "VERIFY", "verified": false, ...}}
 
 ``load()`` replays the records: messages are appended, and a compaction swaps
-in the history it holds. Nothing is ever rewritten, so every message ever sent
+in the history it holds. ``state`` records hold the call's ``CallState``
+(``harness/call_state.py``); ``last_state()`` returns the newest one, and
+``load()`` skips them. Nothing is ever rewritten, so every message ever sent
 stays on record, even after a compaction replaced it.
 
 There are two places to keep the records, with the same behaviour:
@@ -45,7 +48,7 @@ if TYPE_CHECKING:
     import psycopg
 
 INTERRUPTED = "error: the call stopped before this tool finished; it may not have run"
-KINDS = ("session", "message", "compaction")
+KINDS = ("session", "message", "compaction", "state")
 _SAFE_ID = re.compile(r"[A-Za-z0-9_-]{1,100}")
 
 
@@ -61,6 +64,15 @@ class Session:
     def replace(self, messages: list[dict]) -> None:
         """Record that the history is now ``messages`` (after a compaction or an undo)."""
         self._write("compaction", {"type": "compaction", "messages": messages})
+
+    def put_state(self, state: dict) -> None:
+        """Record the call's state; the newest one wins."""
+        self._write("state", {"type": "state", "state": state})
+
+    def last_state(self) -> dict | None:
+        """The newest state record, or None if the call has none yet."""
+        states = [r["state"] for r in self._records() if r.get("type") == "state"]
+        return states[-1] if states else None
 
     def header(self) -> dict:
         """The first record: the call id and when the session was created."""

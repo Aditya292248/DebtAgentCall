@@ -1,0 +1,8 @@
+# Someone else answers Jordan Lee's phone. They may only be asked for a good time to call.
+name: jordan_not_here
+from: "+13125550103"
+lines:
+  - "Hello?"
+  - "He's not here right now."
+  - "What is this about?"
+  - "Try tomorrow evening."

@@ -20,6 +20,8 @@ harness/
   precall.py            check_and_record(conn, account, when): run the pre-call checks, log every decision
   memory.py             Session, JsonlSession and PostgresSession: each call's saved history
   compact.py            compact_messages(): summarize the middle of a long call to stay in the context window
+  call_state.py         CallState, Stage and Debtor: where a call is in its required steps
+  stages.py             next_stage(state, caller_text, debtor): the call's order, decided in code
   api.py                `uv run api`: a small read-only web API for the UI (pre-call decisions, chain check)
   subagents.py          run_subagent, fan_out and the delegate / fan_out tools (after calls only)
   review.py             review_transcript(transcript, account): reviewer subagents check a finished call
@@ -48,6 +50,7 @@ sim/
 instructions/
   system.md             the system prompt the agent sends first on every call
   subagent.md           the short prompt every subagent starts with
+  stages/               what the model is told in each call stage, added after system.md
 skills/                 short playbooks for hard conversations (hardship, angry caller, ...)
 supabase/
   config.toml           local Supabase settings (database on port 54322)
@@ -408,13 +411,37 @@ state = SpeechState(verified=False, known_amounts_cents={124000}, creditor="Acme
 print(check_sentence("Your balance is $1,240.", state).rule_id)  # third_party_disclosure
 ```
 
-Words match whole words, ignoring case, and the lists sit at the top of `compliance/utterance.py`. So "indebted" and "Owen" don't trip the debt check, but "debtor" does, because it is listed. "Sue" is only a threat as a verb ("we will sue", "sued"), so a person named Sue can be greeted. The filter doesn't understand "not": "we will not sue you" is blocked too. When unsure, it blocks. `split_sentences(text)` cuts model output into sentences without breaking "$1,240.50" or "Mr. Doe"; the later streaming step will use it. Nothing is wired into calls yet.
+Words match whole words, ignoring case, and the lists sit at the top of `compliance/utterance.py`. So "indebted" and "Owen" don't trip the debt check, but "debtor" does, because it is listed. "Sue" is only a threat as a verb ("we will sue", "sued"), so a person named Sue can be greeted. The filter doesn't understand "not": "we will not sue you" is blocked too. When unsure, it blocks. `split_sentences(text)` cuts model output into sentences without breaking "$1,240.50" or "Mr. Doe"; the call stages below use it on every model reply.
 
 ```bash
 uv run demo part-11
 ```
 
 The demo prints allow or block, with the rule, for a list of sample sentences at each stage of a call. This is not legal advice.
+
+## Call stages
+
+Every call goes in the same order, and code, not the model, decides when to move on:
+
+| Stage         | What happens                                                                        | Model? |
+| ------------- | ----------------------------------------------------------------------------------- | ------ |
+| `GREETING`    | "May I please speak with Sam Doe?" Nothing about a debt.                              | Only for unclear answers |
+| `VERIFY`      | Asks for date of birth and ZIP, and compares them with the database in code (FDCPA 805(b)). They can come in one turn or two; two wrong answers end the call politely | Only for questions like "why?" |
+| `DISCLOSE`    | Fixed text: the call is recorded, "you're speaking with an automated assistant", and the mini-Miranda (FDCPA 807(11)) | Never |
+| `DISCUSS`     | The model talks about the debt, with its tools                                       | Yes |
+| `THIRD_PARTY` | Someone else answered: asks only for a good time to reach the person, then says goodbye | Only for questions back |
+| `WRAP`        | The call is ending                                                                   | Yes, to say goodbye |
+| `STOPPED`     | A stop trigger fired (a later change): fixed close only                              | Never |
+
+`next_stage(state, caller_text, debtor)` in `harness/stages.py` is the whole decision, as a plain function. It returns the new state and either a fixed line to speak or `None`, meaning "let the model answer". The state (`CallState` in `harness/call_state.py`) is saved as a `state` record in the call's session, next to its messages, so it survives a restart. When the model does answer, it gets `instructions/system.md` plus the stage's file from `instructions/stages/`, no tools until the disclosure was said, and every sentence of its reply goes through the sentence filter. Blocked sentences are dropped, written to the audit log as `utterance_blocked`, and if nothing is left the caller hears "Sorry, could you say that again?". The webhook finds who a call is for from the number it dialed; an unknown number gets a fixed goodbye.
+
+The word matching is kept small and careful: a "yes" with a "no" or "not" in it is not a yes, and a date that can't be read doesn't move the call forward.
+
+```bash
+uv run demo part-13
+```
+
+The demo plays three calls (verified, wrong date of birth, someone else answers) and prints the stage next to each line. With the fake model, which always tries to say the balance, you can see the filter drop it before verification. This is not legal advice.
 
 ## The UI
 
@@ -593,6 +620,8 @@ The dry run prints who would be called and why each of the others is blocked, an
 | `uv run accept part-18`   | Yes            | Runs the earlier checks, then a dialer dry run over every seeded debtor |
 | `uv run demo part-18`     | No (needs DB)  | A dialer dry run on the seed: who would be called, and why the rest are blocked |
 | `uv run dialer --dry-run` | No (needs DB) | Who would be called now, and why the others are blocked; writes nothing |
+| `uv run accept part-13`   | Yes (needs DB) | Runs the earlier checks, then plays three calls and checks the disclosure comes before any amount, and nothing leaks otherwise |
+| `uv run demo part-13`     | No             | Plays three calls through the call stages and prints the stage next to each line |
 | `npm run dev` (in `web/`) | No (needs DB and API) | Starts the UI on http://localhost:5173                   |
 
 ## Credits

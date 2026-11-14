@@ -466,7 +466,8 @@ def _sim_client(provider: Provider | None = None) -> tuple[TestClient, str]:
     folder = tempfile.mkdtemp(prefix="debtagent-sessions-")
     open_session = partial(JsonlSession.for_call, folder)
     secret = secrets.token_hex(16)
-    app = create_app(provider=provider, secret=secret, open_session=open_session)
+    # The bare webhook these earlier parts were built on; call stages are part-13.
+    app = create_app(provider=provider, secret=secret, open_session=open_session, stages=False)
     return TestClient(app), secret
 
 
@@ -1060,3 +1061,148 @@ def _demo_part16() -> None:
 
 ACCEPTANCE["part-16"] = lambda: ACCEPTANCE["part-10"]() and _accept_part16()
 DEMOS["part-16"] = _demo_part16
+
+
+# ----------------------------------------------------------------------------
+# call stages: verify who answered, say the disclosure, then talk about the debt
+# ----------------------------------------------------------------------------
+
+_PART13_SCRIPTS = ("sam_verified", "sam_wrong_dob", "jordan_not_here")
+# A fake model that tries to say the balance every time, to show what the filter drops.
+_PART13_LEAKY = "Sure. Your balance with Northwind Furniture is $1,250.00. Anything else?"
+
+
+def _part13_debtors() -> dict:
+    """Sam and Jordan as supabase/seed.sql has them, so the demo needs no database."""
+    from datetime import date
+
+    from harness.call_state import Debtor
+
+    return {
+        "+12135550101": Debtor(
+            "00000000-0000-4000-8000-000000000001",
+            "00000000-0000-4000-8000-00000000a001",
+            "Sam",
+            "Doe",
+            date(1985, 4, 12),
+            "90012",
+            "Northwind Furniture",
+            125000,
+        ),
+        "+13125550103": Debtor(
+            "00000000-0000-4000-8000-000000000003",
+            "00000000-0000-4000-8000-00000000a003",
+            "Jordan",
+            "Lee",
+            date(1978, 1, 5),
+            "60601",
+            "Maple Street Gym",
+            8999,
+        ),
+    }
+
+
+def _staged_call(script_name: str, provider: Provider | None, *, use_db: bool) -> tuple:
+    """Play one script through the webhook with call stages on.
+
+    Returns ``(turns, stages, blocked)``: the conversation, the stage after each
+    turn (read back from the saved session), and the sentences the filter dropped.
+    """
+    import json
+    import secrets
+    import tempfile
+    from functools import partial
+    from pathlib import Path
+
+    from fastapi.testclient import TestClient
+
+    from harness.call_state import Stage
+    from harness.memory import JsonlSession
+    from phone.webhook import audit_to_db, create_app, find_debtor_in_db
+    from sim.agentphone_sim import load_script, run_script
+
+    folder = Path(tempfile.mkdtemp(prefix="debtagent-stages-"))
+    blocked: list[str] = []
+
+    def audit(decision, call_id, debt_id) -> None:  # type: ignore[no-untyped-def]
+        blocked.append(f"{decision.rule_id}: {decision.evidence.get('sentence')}")
+        if use_db:
+            audit_to_db(decision, call_id, debt_id)
+
+    secret = secrets.token_hex(16)
+    app = create_app(
+        provider=provider,
+        secret=secret,
+        open_session=partial(JsonlSession.for_call, folder),
+        find_debtor=find_debtor_in_db if use_db else _part13_debtors().get,
+        audit=audit,
+    )
+    turns = run_script(load_script(script_name), TestClient(app), secret)
+    (path,) = folder.glob("*.jsonl")
+    records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    stages = [Stage(r["state"]["stage"]) for r in records if r["type"] == "state"]
+    # DISCLOSE lasts one turn, inside the turn that verified: label that line with it.
+    stages = [
+        Stage.DISCLOSE if reply.startswith("Thank you, ") and "debt collector" in reply else stage
+        for (_, reply), stage in zip(turns, stages, strict=False)
+    ]
+    return turns, stages, blocked
+
+
+def _accept_part13() -> bool:
+    import re
+
+    from harness.stages import DISCLOSURE
+
+    debt_talk = re.compile(r"\b(?:debts?|balance|owe[sd]?|collect\w*)\b|\$", re.IGNORECASE)
+    ok = True
+    for name in _PART13_SCRIPTS:
+        turns, stages, blocked = _staged_call(name, None, use_db=True)
+        replies = [reply for _, reply in turns]
+        for (caller, agent), stage in zip(turns, stages, strict=False):
+            print(f"  [{stage.value:<11}] caller> {caller}\n  {'':<13}  agent> {agent}")
+        for line in blocked:
+            print(f"  (dropped) {line}")
+        if name == "sam_verified":
+            said = DISCLOSURE.format(first_name="Sam")
+            first_amount = next((i for i, r in enumerate(replies) if "$" in r), None)
+            good = (
+                said in replies
+                and first_amount is not None
+                and first_amount > replies.index(said)
+                and "1,250" in replies[first_amount]
+            )
+        else:
+            good = "DISCUSS" not in stages and not any(debt_talk.search(r) for r in replies)
+        print(f"  {name}: {'ok' if good else 'BAD'}\n")
+        ok = ok and good
+    return ok
+
+
+def _demo_part13() -> None:
+    from model import fake
+
+    real = _llm_configured()
+    provider = None if real else fake(default=_PART13_LEAKY)
+    print(
+        "model:",
+        "the real one from LLM_BASE_URL" if real else "fake, and it always says the balance",
+    )
+    print()
+    for name in _PART13_SCRIPTS:
+        turns, stages, blocked = _staged_call(name, provider, use_db=False)
+        print(f"-- {name} --")
+        for (caller, agent), stage in zip(turns, stages, strict=False):
+            print(f"  [{stage.value:<11}] caller> {caller}")
+            print(f"  {'':<13}  agent> {agent}")
+        for line in blocked:
+            print(f"  (dropped before it was said) {line}")
+        print()
+    print("   # greeting, identity check and disclosure are fixed lines from code; the model")
+    print("   # only speaks after them, and every sentence it writes is checked first")
+
+
+ACCEPTANCE["part-13"] = lambda: (
+    ACCEPTANCE["part-15"]() and _accept_part14_triggers() and _accept_part13()
+)
+DEMOS["part-13"] = _demo_part13

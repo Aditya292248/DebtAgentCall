@@ -41,7 +41,8 @@ negation: "we will not sue you" is blocked like "we will sue you". When unsure,
 it blocks.
 
 ``split_sentences(text)`` cuts model output into sentences, so each one can be
-checked before it is spoken. Nothing here is wired into calls yet.
+checked before it is spoken. The webhook runs both on every model reply
+(``phone/webhook.py``).
 """
 
 from __future__ import annotations
