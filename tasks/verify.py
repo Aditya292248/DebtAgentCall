@@ -24,6 +24,9 @@ SMOKE_MODULES = [
     "sim.agentphone_sim",
     "tasks.serve",
     "harness.api",
+    "phone.client",
+    "dialer.service",
+    "dialer.cli",
 ]
 
 
@@ -39,7 +42,7 @@ def main(argv: list[str] | None = None) -> int:
         failed.append("ruff-format")
     if _run(["ruff", "check", "."]) != 0:
         failed.append("ruff-check")
-    if _run(["mypy", "model", "harness", "compliance", "phone", "sim", "tasks"]) != 0:
+    if _run(["mypy", "model", "harness", "compliance", "phone", "sim", "tasks", "dialer"]) != 0:
         failed.append("mypy")
     if _run(["pytest", "-q"]) != 0:
         failed.append("pytest")
