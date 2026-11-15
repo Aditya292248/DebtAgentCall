@@ -27,6 +27,7 @@ SMOKE_MODULES = [
     "phone.client",
     "dialer.service",
     "dialer.cli",
+    "harness.operator",
 ]
 
 

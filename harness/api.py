@@ -1,4 +1,4 @@
-"""A small read-only web API, so the browser can show what the Python checks decide.
+"""A small web API: what the Python checks decide, and the operator chat.
 
 ``GET /api/precall`` runs ``compliance.check_before_call`` for every debt and
 returns all the decisions, for now or for the time in ``?at=`` (an ISO time with
@@ -8,6 +8,14 @@ the audit log, because looking at the screen is not placing a call.
 ``GET /api/audit/verify`` runs ``compliance.audit.verify_chain`` and says whether
 the audit chain is whole.
 
+``POST /api/chat`` takes ``{session_id, message}``, runs the operator agent
+(``harness/operator.py``) for one turn and returns its reply, the tool calls it
+made and any calls waiting for approval. ``POST /api/chat/approve`` takes
+``{session_id, approval_id, approve}`` and approves or denies one waiting
+``place_call``; approving dials through the dialer, which runs the checks again.
+Each chat's history is kept in the session store under ``chat:<session_id>``.
+Turns for one chat run one at a time in this process.
+
 The checks stay in ``compliance/``; this file only loads, calls and formats.
 Run it with ``uv run api`` (http://127.0.0.1:8000); the web app in ``web/``
 forwards ``/api`` to it.
@@ -16,16 +24,23 @@ forwards ``/api`` to it.
 from __future__ import annotations
 
 import os
+import re
+import threading
+from collections import defaultdict
+from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import Any
 
 import psycopg
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from compliance import check_before_call, may_call
 from compliance.audit import verify_chain
 from harness.db import connect, load_call_facts
+from harness.memory import PostgresSession
+from harness.operator import ChatTurn, Operator, PhoneUnavailable
 
 DEBTS_SQL = """
     select d.account_number, p.first_name || ' ' || p.last_name
@@ -91,6 +106,69 @@ def audit_verify() -> dict[str, Any]:
         count_row = conn.execute("select count(*) from public.audit_event").fetchone()
         problems = verify_chain(conn)
     return {"ok": not problems, "rows": count_row[0] if count_row else 0, "problems": problems}
+
+
+# --- operator chat ------------------------------------------------------------
+
+_SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
+_chat_locks: defaultdict[str, threading.Lock] = defaultdict(threading.Lock)
+_chat_locks_guard = threading.Lock()
+
+
+def make_operator(session_id: str) -> Operator:
+    """The operator for one chat, on its saved history. Tests swap this out."""
+    return Operator(PostgresSession.for_call(f"chat:{session_id}"))
+
+
+class ChatIn(BaseModel):
+    session_id: str
+    message: str
+
+
+class ApproveIn(BaseModel):
+    session_id: str
+    approval_id: str
+    approve: bool
+
+
+def _chat_lock(session_id: str) -> threading.Lock:
+    if not _SESSION_ID.fullmatch(session_id):
+        raise HTTPException(400, "session_id must be 1-64 letters, digits, _ or -")
+    with _chat_locks_guard:
+        return _chat_locks[session_id]
+
+
+def _turn_json(turn: ChatTurn) -> dict[str, Any]:
+    return {
+        "reply": turn.reply,
+        "tool_calls": turn.tool_calls,
+        "pending_approvals": [asdict(a) for a in turn.pending_approvals],
+        "dial": turn.dial,
+    }
+
+
+@app.post("/api/chat")
+def chat(body: ChatIn) -> dict[str, Any]:
+    """One operator message: the agent's reply, its tool calls and what awaits approval."""
+    if not body.message.strip():
+        raise HTTPException(400, "message is empty")
+    with _chat_lock(body.session_id):
+        return _turn_json(make_operator(body.session_id).chat(body.message))
+
+
+@app.post("/api/chat/approve")
+def chat_approve(body: ApproveIn) -> dict[str, Any]:
+    """Approve or deny one waiting ``place_call``. Approving still runs every check."""
+    with _chat_lock(body.session_id):
+        operator = make_operator(body.session_id)
+        try:
+            turn = operator.decide(body.approval_id, body.approve)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except PhoneUnavailable as exc:
+            # Nothing recorded and the approval is still pending: fix the setup, retry.
+            raise HTTPException(503, f"AgentPhone is not set up ({exc})") from exc
+        return _turn_json(turn)
 
 
 def main() -> None:
