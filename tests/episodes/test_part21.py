@@ -8,7 +8,10 @@ What it checks:
   - a plan inside the policy is approved; one outside it is saved as pending,
     with the fixed "a specialist will confirm" line, and is not approved
   - arguments the approver can't parse are always denied, and audited
-  - after ``log_dispute`` offers and callbacks return ``error: blocked by dispute``
+  - after ``log_dispute`` offers and callbacks return ``error: blocked by dispute``,
+    on later turns too (a fresh context that reads the store), and even when
+    saving the dispute or writing its audit row failed
+  - 52 weekly, 26 biweekly and 12 monthly installments all count as 12 months
   - a callback outside calling hours, or after a cease flag, is blocked
   - every gate and approver decision is written to the audit log
   - against the real local database (``db``): the rows and audit rows are written
@@ -29,6 +32,7 @@ from harness.call_state import CallState, Debtor, Stage
 from harness.call_tools import (
     BLOCKED_BY_DISPUTE,
     DISPUTE_LOGGED,
+    DISPUTE_NOT_SAVED,
     PENDING_PLAN,
     CallContext,
     CallTools,
@@ -220,6 +224,66 @@ def test_log_dispute_is_allowed_before_verification() -> None:
     assert store.rows[0]["kind"] == "dispute"
 
 
+OFFER = {"down_cents": "25000", "installments": "10", "frequency": "monthly"}
+
+
+def _boom(*_: object) -> None:
+    raise RuntimeError("database down")
+
+
+def test_offers_stay_blocked_when_saving_the_dispute_fails() -> None:
+    ctx, _, store = make_ctx()
+    store.save_dispute = _boom  # type: ignore[method-assign]
+    tools = call_tools(ctx)
+    result = run_tool(tools, "log_dispute", {"reason": "not mine"})
+    assert result == DISPUTE_NOT_SAVED.format(exc=repr(RuntimeError("database down")))
+    assert ctx.disputed
+    assert run_tool(tools, "offer_payment_plan", OFFER) == BLOCKED_BY_DISPUTE
+    assert store.rows == []
+
+
+def test_dispute_is_saved_even_when_the_audit_write_fails() -> None:
+    ctx, _, store = make_ctx()
+    ctx.audit = lambda *_: _boom()
+    result = call(ctx, "log_dispute", reason="not mine")
+    assert result.startswith(DISPUTE_LOGGED) and "audit failed" in result
+    assert [r["kind"] for r in store.rows] == ["dispute"]
+    assert ctx.disputed
+
+
+def test_dispute_blocks_offers_on_a_later_turn() -> None:
+    first, _, store = make_ctx()
+    assert call(first, "log_dispute", reason="I already paid this") == DISPUTE_LOGGED
+    later, _, _ = make_ctx()  # the next caller turn builds a new context
+    later.store = store
+    assert not later.disputed
+    assert call(later, "offer_payment_plan", **OFFER) == BLOCKED_BY_DISPUTE
+    assert json.loads(call(later, "lookup_account"))["disputed"] is True
+
+
+def test_offers_are_blocked_when_the_store_cant_say_if_disputed() -> None:
+    ctx, _, store = make_ctx()
+    store.is_disputed = _boom  # type: ignore[method-assign]
+    assert call(ctx, "offer_payment_plan", **OFFER) == BLOCKED_BY_DISPUTE
+
+
+@pytest.mark.parametrize(
+    ("count", "freq", "approved"),
+    [
+        ("52", "weekly", True),
+        ("26", "biweekly", True),
+        ("12", "monthly", True),
+        ("53", "weekly", False),
+        ("27", "biweekly", False),
+        ("13", "monthly", False),
+    ],
+)
+def test_twelve_months_in_every_frequency(count: str, freq: str, approved: bool) -> None:
+    ctx, _, _ = make_ctx()
+    result = call(ctx, "offer_payment_plan", down_cents="25000", installments=count, frequency=freq)
+    assert result.startswith("approved: ") is approved
+
+
 # --- schedule_callback --------------------------------------------------------
 
 
@@ -320,5 +384,12 @@ def test_rows_and_audit_are_written_to_the_database() -> None:
                 (call_id,),
             ).fetchall()
             assert kinds == [("allow",), ("block",), ("allow",), ("allow",)]
+            debt = conn.execute(
+                "select status from public.debt where id = %s", (SAM.debt_id,)
+            ).fetchone()
+            assert debt == ("disputed",)
+            # The next turn's context starts with disputed=False and reads the database.
+            later = replace(ctx, disputed=False)
+            assert run_tool(call_tools(later), "offer_payment_plan", OFFER) == BLOCKED_BY_DISPUTE
         finally:
             conn.rollback()  # leave no rows behind

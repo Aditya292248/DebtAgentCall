@@ -8,6 +8,8 @@
 -- `payment_plan` holds every plan offered: `approved` inside the policy,
 -- `pending` outside it, waiting for a specialist. `callback`, `dispute` and
 -- `escalation` hold the other tools' requests. Each row names the call and debt.
+-- Logging a dispute also sets `debt.status` to `disputed`, so later turns and
+-- later calls see it.
 --
 -- Row level security is on with only a read policy for signed-in users, the
 -- same as the other tables.
@@ -56,6 +58,10 @@ create table public.escalation (
     reason text not null,
     created_at timestamptz not null default now()
 );
+
+-- At most one default policy, so the fallback is never a coin toss.
+create unique index plan_policy_one_default_idx on public.plan_policy ((true))
+    where creditor is null;
 
 create index payment_plan_debt_id_idx on public.payment_plan (debt_id);
 create index callback_debt_id_idx on public.callback (debt_id);

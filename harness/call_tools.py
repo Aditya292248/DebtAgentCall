@@ -15,8 +15,9 @@ this call's debt.
 Every tool call goes through two steps, in this order, and both are audited:
 
   1. The compliance gate (``CallTools.gate``): is this tool allowed right now?
-     It looks at the stage, a dispute logged on this call, a cease flag, and
-     for a callback the calling hours. A block returns ``error: blocked ...``
+     It looks at the stage, a dispute on this debt (logged on this call or
+     already saved, as ``debt.status = 'disputed'``), a cease flag, and for a
+     callback the calling hours. A block returns ``error: blocked ...``
      and nothing else happens.
   2. The approver (``PolicyApprover.approve(name, args) -> bool``, the shape
      codingHarness uses). Arguments it can't parse are always denied. A payment
@@ -32,9 +33,11 @@ The tools:
   ``schedule_callback``     a local date and time plus a time zone, checked with
                             ``compliance.hours``; not after a cease
   ``log_dispute(reason)``   always allowed; afterwards offers and callbacks are
-                            blocked by the dispute
+                            blocked by the dispute, on this turn and every later
+                            one, even if saving or auditing it failed
   ``escalate_to_human``     always allowed; saves a request for a person
-  ``end_call(reason)``      always allowed; moves the call to WRAP
+  ``end_call(reason)``      always allowed; moves ``ctx.state`` to WRAP, which
+                            the caller still has to save
 """
 
 from __future__ import annotations
@@ -61,6 +64,7 @@ APPROVER_RULE = "call_tool_approver"
 # Stages where the person is known to be the debtor and has heard the disclosure.
 TALK_STAGES = (Stage.DISCUSS, Stage.WRAP)
 FREQUENCIES = {"weekly": 7, "biweekly": 14, "monthly": 30}  # days between installments
+DAYS_PER_MONTH = 365.25 / 12  # so 52 weekly, 26 biweekly and 12 monthly all fit 12 months
 MAX_CALLBACK_DAYS = 30
 
 PENDING_PLAN = (
@@ -69,6 +73,12 @@ PENDING_PLAN = (
 )
 DISPUTE_LOGGED = (
     "ok: the dispute is recorded. Collection on this debt stops until it has been reviewed."
+)
+# Said when the dispute could not be saved. The call still treats the debt as
+# disputed, and the error tells the model not to promise anything else.
+DISPUTE_NOT_SAVED = (
+    "error: the dispute could not be saved ({exc}). Collection talk stays blocked on this "
+    "call; tell the person a specialist will follow up about the dispute."
 )
 ESCALATED = "ok: a specialist has been asked to follow up with this person."
 BLOCKED_BY_DISPUTE = "error: blocked by dispute"
@@ -99,6 +109,7 @@ class CallStore(Protocol):
     def save_callback(self, ctx: CallContext, at: datetime, tz: str) -> None: ...
     def save_dispute(self, ctx: CallContext, reason: str) -> None: ...
     def save_escalation(self, ctx: CallContext, reason: str) -> None: ...
+    def is_disputed(self, ctx: CallContext) -> bool: ...
 
 
 @dataclass
@@ -120,10 +131,17 @@ class MemoryCallStore:
     def save_escalation(self, ctx: CallContext, reason: str) -> None:
         self._add("escalation", ctx, reason=reason)
 
+    def is_disputed(self, ctx: CallContext) -> bool:
+        return any(r["kind"] == "dispute" and r["debt_id"] == ctx.debt_id for r in self.rows)
+
 
 @dataclass
 class CallContext:
-    """One call's facts and handles. ``state`` and ``disputed`` change as tools run."""
+    """One call's facts and handles. ``state`` and ``disputed`` change as tools run.
+
+    A context is built fresh for each caller turn, so ``disputed`` only covers
+    this turn; ``CallTools`` also asks the store, which is what lasts.
+    """
 
     debtor: Debtor
     state: CallState
@@ -273,7 +291,8 @@ def outside_policy(plan: PaymentPlan, balance_cents: int, policy: PlanPolicy) ->
     if plan.installments > policy.max_installments:
         return f"more than {policy.max_installments} installments"
     days = plan.installments * FREQUENCIES[plan.frequency]
-    if days > policy.max_months * 30:
+    months = plan.installments if plan.frequency == "monthly" else days / DAYS_PER_MONTH
+    if months > policy.max_months:
         return f"longer than {policy.max_months} months"
     return None
 
@@ -288,6 +307,15 @@ class CallTools:
         self.ctx = ctx
         self.approver = approver or PolicyApprover(ctx)
 
+    def disputed(self) -> bool:
+        """Disputed on this turn or before. If the store can't say, assume it is."""
+        if self.ctx.disputed:
+            return True
+        try:
+            return bool(self.ctx.store.is_disputed(self.ctx))
+        except Exception:  # noqa: BLE001 - unknown is treated as disputed (fail closed)
+            return True
+
     # The compliance gate: first, before the approver sees anything.
     def gate(self, name: str, when: datetime | None = None) -> Decision:
         ctx, s = self.ctx, self.ctx.state
@@ -296,7 +324,7 @@ class CallTools:
             "stage": s.stage.value,
             "verified": s.verified,
             "disclosed": s.disclosed,
-            "disputed": ctx.disputed,
+            "disputed": self.disputed(),
         }
         if name in ("log_dispute", "escalate_to_human", "end_call"):
             return allow(GATE_RULE, f"{name} is always allowed", evidence)
@@ -304,7 +332,7 @@ class CallTools:
             return block(GATE_RULE, f"not verified and disclosed (stage {s.stage.value})", evidence)
         if name == "lookup_account":
             return allow(GATE_RULE, "verified and disclosed", evidence)
-        if ctx.disputed:
+        if evidence["disputed"]:
             return block(GATE_RULE, "dispute", evidence)
         cease = check_cease(ctx.flags, ctx.debt_id, ctx.contact.phone_e164)
         if not cease.allow:
@@ -326,7 +354,7 @@ class CallTools:
         self.ctx.record(decision)
         if decision.allow:
             return None
-        if self.ctx.disputed and decision.reason == "dispute":
+        if decision.reason == "dispute":
             return BLOCKED_BY_DISPUTE
         return f"error: blocked ({decision.reason})"
 
@@ -341,7 +369,7 @@ class CallTools:
                 "creditor": d.creditor,
                 "balance": f"{d.balance_cents // 100}.{d.balance_cents % 100:02d}",
                 "currency": "USD",
-                "disputed": self.ctx.disputed,
+                "disputed": self.disputed(),
             }
         )
 
@@ -377,12 +405,22 @@ class CallTools:
         return f"ok: callback booked for {when:%Y-%m-%d %H:%M} {zone}"
 
     def log_dispute(self, reason: str) -> str:
-        if err := self._gated("log_dispute"):
-            return err
-        # Saved even if the approver can't parse the reason: a dispute is never lost.
-        self.approver.approve("log_dispute", {"reason": reason})
-        self.ctx.store.save_dispute(self.ctx, reason.strip() or "(no reason given)")
+        # The flag goes up first, so nothing below (a failed audit write, a failed
+        # save) can leave offers open after the person said they dispute the debt.
         self.ctx.disputed = True
+        problems: list[str] = []
+        try:
+            self._gated("log_dispute")  # always allows; called for its audit row
+            # The reason is saved even if the approver can't parse it.
+            self.approver.approve("log_dispute", {"reason": reason})
+        except Exception as exc:  # noqa: BLE001 - auditing must not lose the dispute
+            problems.append(f"audit failed: {exc!r}")
+        try:
+            self.ctx.store.save_dispute(self.ctx, reason.strip() or "(no reason given)")
+        except Exception as exc:  # noqa: BLE001 - say so, and stay blocked
+            return DISPUTE_NOT_SAVED.format(exc=repr(exc))
+        if problems:
+            return DISPUTE_LOGGED + " (" + "; ".join(problems) + ")"
         return DISPUTE_LOGGED
 
     def escalate_to_human(self, reason: str) -> str:
@@ -487,6 +525,19 @@ class PgCallStore:
             "insert into public.dispute (call_id, debt_id, reason) values (%s, %s, %s)",
             (ctx.call_id, ctx.debt_id, reason),
         )
+        # The debt itself is marked, so later turns and later calls see it too.
+        self.conn.execute(
+            "update public.debt set status = 'disputed' where id = %s", (ctx.debt_id,)
+        )
+
+    def is_disputed(self, ctx: CallContext) -> bool:
+        row = self.conn.execute(
+            "select d.status = 'disputed' or exists"
+            " (select 1 from public.dispute x where x.debt_id = d.id)"
+            " from public.debt d where d.id = %s",
+            (ctx.debt_id,),
+        ).fetchone()
+        return row is None or bool(row[0])  # no such debt: treat as disputed
 
     def save_escalation(self, ctx: CallContext, reason: str) -> None:
         self.conn.execute(
