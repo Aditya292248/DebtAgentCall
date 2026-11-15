@@ -2,8 +2,8 @@
 
 These tools are built on ``harness/tools.py`` (``Tool``, ``ToolRegistry``,
 ``run_tool``), so a failure always comes back as an ``error: ...`` string and
-never raises into the call loop. They are not used on live calls yet: the
-webhook does not offer them to the model.
+never raises into the call loop. On a live call ``phone/live_tools.py`` builds
+the ``CallContext`` for each turn and the webhook gives the model this registry.
 
 ``CallContext`` is everything one call's tools may touch: the person and the
 one debt the call is about, the call state (stage, verified, disclosed), the
