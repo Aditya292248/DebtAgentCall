@@ -2,11 +2,13 @@
 
 What it checks:
   - The model asking for ``place_call`` never dials: it only opens an approval,
-    through the agent and through ``POST /api/chat``. Unparseable arguments
-    open nothing.
+    through the agent and through ``POST /api/chat``. The approval names the
+    debtor and their masked phone. Unparseable arguments and unknown ids open
+    nothing.
   - Only ``decide`` (``POST /api/chat/approve``) dials, once per approval. A
     denial, a repeat, an unknown id, or an approval "given" in chat text by the
-    model or the person dials nobody.
+    model or the person dials nobody. With AgentPhone not set up, approving
+    records nothing and leaves the approval pending.
   - Pending approvals live in the chat's saved history, so a new request sees them.
   - The operator gets its own prompt and its four tools, and no skills menu.
   - Against the real local database (``db``): an approved call to a debtor
@@ -15,7 +17,8 @@ What it checks:
     ``check_call`` gives the blocking rule.
 
 The offline tests pass a ``connect`` that fails the test if it is used, so they
-also prove the database is never touched on those paths.
+also prove the database is never touched on those paths (no attempt recorded).
+They look debts up in ``SEED`` instead, as ``lookup_account`` tests pass ``find``.
 """
 
 from __future__ import annotations
@@ -29,7 +32,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from harness.memory import JsonlSession
-from harness.operator import DEFAULT_OPERATOR_PROMPT_PATH, Operator, mask_phone
+from harness.operator import (
+    DEFAULT_OPERATOR_PROMPT_PATH,
+    Operator,
+    PhoneUnavailable,
+    mask_phone,
+)
 from model.fake import fake, tool_call, tool_reply
 from model.provider import LLMResponse
 from phone.client import FakePhoneClient
@@ -38,6 +46,8 @@ WHEN = datetime(2026, 11, 5, 19, 0, tzinfo=UTC)  # 11:00 in Los Angeles
 NIGHT = datetime(2026, 11, 5, 12, 0, tzinfo=UTC)  # 04:00 in Los Angeles
 SAM = "ACC-1001"  # Sam Doe, Los Angeles: allowed at WHEN
 CASEY = "ACC-1004"  # 7 calls in 7 days: blocked by call_frequency
+SEED = {SAM: ("Sam Doe", "+12135550101"), CASEY: ("Casey Morgan", "+16175550104")}
+AGENTPHONE_ENV = ("AGENTPHONE_API_KEY", "AGENTPHONE_AGENT_ID", "AGENTPHONE_FROM_NUMBER_ID")
 
 
 def no_database():
@@ -48,14 +58,25 @@ def asks_to_call(account: str = SAM, then: str = "Waiting for your approval.") -
     return [tool_reply(tool_call("place_call", debtor_id=account)), then]
 
 
-def make(tmp_path: Path, script: list, *, phone=None, connect=no_database, clock=None) -> Operator:
+def make(
+    tmp_path: Path,
+    script: list,
+    *,
+    phone=None,
+    connect=no_database,
+    clock=None,
+    agentphone: bool = False,
+) -> Operator:
+    """An operator on the chat ``chat-1``. ``agentphone=True`` keeps the real default
+    phone client instead of a fake one."""
     session = JsonlSession.for_call(tmp_path / "chats", "chat-1")
     return Operator(
         session,
         provider=fake(scripted=script),
         connect=connect,
-        phone=phone or FakePhoneClient(),
+        phone=None if agentphone else (phone or FakePhoneClient()),
         clock=clock or (lambda: WHEN),
+        lookup=SEED.get if connect is no_database else None,
     )
 
 
@@ -73,6 +94,7 @@ def test_place_call_without_approval_dials_nobody(tmp_path):
     assert turn.reply == "Waiting for your approval."
     (pending,) = turn.pending_approvals
     assert pending.debtor_id == SAM
+    assert (pending.name, pending.phone) == ("Sam Doe", "***-***-0101")
     (call,) = turn.tool_calls
     assert call["name"] == "place_call"
     assert json.loads(call["result"])["status"] == "needs_approval"
@@ -100,6 +122,29 @@ def test_a_malformed_debtor_id_opens_no_approval(tmp_path, debtor_id):
     turn = op.chat("call them")
     assert turn.pending_approvals == []
     assert "nothing was dialed" in turn.tool_calls[0]["result"]
+
+
+def test_an_unknown_debtor_opens_no_approval(tmp_path):
+    op = make(tmp_path, asks_to_call("ACC-9999"))
+    turn = op.chat("call them")
+    assert turn.pending_approvals == []
+    assert turn.tool_calls[0]["result"] == "error: no debtor 'ACC-9999'; nothing was dialed"
+
+
+def test_without_agentphone_setup_approving_records_nothing(tmp_path, monkeypatch):
+    """A missing key must fail before dial_one records an attempt (which would count
+    against the debtor's limit as a call that may have rung), and keep the approval."""
+    for name in AGENTPHONE_ENV:
+        monkeypatch.delenv(name, raising=False)
+    op = make(tmp_path, asks_to_call(), agentphone=True)  # connect fails if used
+    (pending,) = op.chat("call Sam Doe").pending_approvals
+
+    with pytest.raises(PhoneUnavailable, match="AGENTPHONE_API_KEY"):
+        op.decide(pending.id, approve=True)
+
+    assert op.pending() == [pending]
+    denied = op.decide(pending.id, approve=False)  # denying needs no AgentPhone
+    assert "Sam Doe" in denied.reply
 
 
 def test_approval_claimed_in_chat_text_dials_nobody(tmp_path):
@@ -182,6 +227,7 @@ def api(tmp_path, monkeypatch) -> Iterator[tuple[TestClient, FakePhoneClient, li
             connect=no_database,
             phone=phone,
             clock=lambda: WHEN,
+            lookup=SEED.get,
         )
 
     monkeypatch.setattr(harness.api, "make_operator", make_operator)
@@ -200,6 +246,7 @@ def test_chat_endpoint_returns_the_pending_approval_and_dials_nobody(api):
     assert [c["name"] for c in body["tool_calls"]] == ["place_call"]
     (pending,) = body["pending_approvals"]
     assert pending["debtor_id"] == SAM
+    assert (pending["name"], pending["phone"]) == ("Sam Doe", "***-***-0101")
     assert phone.calls == []
 
 
@@ -216,6 +263,27 @@ def test_approve_endpoint_denies_and_rejects_unknown_ids(api):
     again = {"session_id": "s1", "approval_id": approval_id, "approve": True}
     assert client.post("/api/chat/approve", json=again).status_code == 404
     assert phone.calls == []
+
+
+def test_approve_endpoint_says_when_agentphone_is_not_set_up(tmp_path, monkeypatch):
+    import harness.api
+
+    for name in AGENTPHONE_ENV:
+        monkeypatch.delenv(name, raising=False)
+    scripts = [asks_to_call()]
+
+    def make_operator(session_id: str) -> Operator:
+        return make(tmp_path, scripts.pop(0) if scripts else ["ok"], agentphone=True)
+
+    monkeypatch.setattr(harness.api, "make_operator", make_operator)
+    client = TestClient(harness.api.app)
+    body = client.post("/api/chat", json={"session_id": "s1", "message": "call Sam"}).json()
+    approve = {"session_id": "s1", "approval_id": body["pending_approvals"][0]["id"]}
+
+    r = client.post("/api/chat/approve", json={**approve, "approve": True})
+
+    assert r.status_code == 503 and "AgentPhone is not set up" in r.json()["detail"]
+    assert client.post("/api/chat/approve", json={**approve, "approve": False}).status_code == 200
 
 
 @pytest.mark.parametrize("session_id", ["", "../etc", "a" * 65, "has space"])
@@ -270,7 +338,7 @@ def test_an_approved_call_outside_calling_hours_is_not_dialed(tmp_path, db):
     assert phone.calls == []
     assert turn.dial is not None and turn.dial["blocked"]
     assert any(r.startswith("calling_hours") for r in turn.dial["reasons"])
-    assert "Not dialed" in turn.reply
+    assert "Not dialed" in turn.reply and "Sam Doe" in turn.reply
     assert _attempt_ids(db, SAM) == before  # no attempt recorded
     assert op.pending() == []
 
@@ -320,3 +388,13 @@ def test_check_call_gives_the_blocking_rule(tmp_path):
     assert casey["decision"] == "block"
     assert any(r["rule_id"] == "call_frequency" and not r["allow"] for r in casey["rules"])
     assert sam["decision"] == "allow"
+
+
+@pytest.mark.db
+def test_place_call_names_the_debtor_from_the_database(tmp_path):
+    from harness.db import connect
+
+    op = make(tmp_path, ["ok"], connect=connect)
+    opened = json.loads(op.place_call(SAM))
+    assert (opened["name"], opened["phone"]) == ("Sam Doe", "***-***-0101")
+    assert op.place_call("ACC-9999").startswith("error: no debtor")

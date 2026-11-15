@@ -10,16 +10,19 @@
   - ``check_call(debtor_id)``: the pre-call checks as they stand right now
     (``dialer.service.plan_queue``, the dialer's own dry run): allow or block,
     with each rule id and reason. It only reads, like ``GET /api/precall``.
-  - ``place_call(debtor_id)``: does **not** dial. It records a pending approval
-    and tells the model that nothing has been dialed. Arguments that don't parse
-    never reach it (``run_tool`` answers them with an error), so no approval is
-    opened for them.
+  - ``place_call(debtor_id)``: does **not** dial. It looks the debt up and
+    records a pending approval that names the debtor and their masked phone, so
+    the person approves who will be called, not just an id the model chose. An
+    unknown id opens nothing, and nor do arguments that don't parse (``run_tool``
+    answers those with an error).
   - ``call_status(call_id)``: one ``call_attempt`` row, found by its own id or
     by the AgentPhone call id.
 
 Only ``decide(approval_id, approve)`` dials, and only for an approval that is
 still pending. It is called by code (``POST /api/chat/approve``), never by the
-model. Before dialing, the decision is written to the history, so a second
+model. First it makes sure AgentPhone is set up, so a missing key fails
+before any attempt is recorded (and leaves the approval pending). Then the
+decision is written to the history, so a second
 click on the same approval finds nothing pending. Then it goes through
 ``dialer.service.dial_one``, which locks the debt, runs and records every
 pre-call check again, records the attempt, and dials at most once. A debt the
@@ -77,6 +80,16 @@ FIND_SQL = """
     limit %s
 """
 
+LOOKUP_SQL = """
+    select p.first_name || ' ' || p.last_name, ph.e164
+    from public.debt d
+    join public.debtor p on p.id = d.debtor_id
+    left join lateral (
+        select e164 from public.phone where debtor_id = p.id order by e164 limit 1
+    ) ph on true
+    where d.account_number = %s
+"""
+
 STATUS_SQL = """
     select a.id::text, d.account_number, a.outcome, a.placed_at, a.connected,
            a.agentphone_call_id
@@ -95,10 +108,16 @@ def mask_phone(e164: str | None) -> str | None:
     return "***-***-" + e164[-4:]
 
 
+class PhoneUnavailable(RuntimeError):
+    """AgentPhone isn't set up (keys or SDK missing), so no call can be placed."""
+
+
 @dataclass(frozen=True)
 class Approval:
     id: str
     debtor_id: str
+    name: str
+    phone: str | None  # masked
     tool_call_id: str
 
 
@@ -129,7 +148,11 @@ def pending_approvals(messages: list[dict]) -> list[Approval]:
             continue
         if isinstance(body, dict) and body.get("status") == NEEDS_APPROVAL:
             approval = Approval(
-                str(body.get("approval_id")), str(body.get("debtor_id")), m.get("tool_call_id", "")
+                id=str(body.get("approval_id")),
+                debtor_id=str(body.get("debtor_id")),
+                name=str(body.get("name")),
+                phone=body.get("phone"),
+                tool_call_id=m.get("tool_call_id", ""),
             )
             if approval.id not in closed:
                 opened.append(approval)
@@ -160,6 +183,19 @@ class _PhoneFromEnv:
     def __init__(self) -> None:
         self._client: PhoneClient | None = None
 
+    def ready(self) -> None:
+        """Build the client now; raise ``PhoneUnavailable`` if AgentPhone isn't set up."""
+        if self._client is not None:
+            return
+        from phone.client import AgentPhoneClient
+
+        try:
+            client = AgentPhoneClient.from_env()
+            client._client()  # imports the SDK
+        except RuntimeError as exc:
+            raise PhoneUnavailable(str(exc)) from exc
+        self._client = client
+
     def make_call(
         self,
         to_number: str,
@@ -167,10 +203,8 @@ class _PhoneFromEnv:
         disable_recording: bool | None = None,
         ring_timeout_seconds: int | None = None,
     ) -> str:
-        if self._client is None:
-            from phone.client import AgentPhoneClient
-
-            self._client = AgentPhoneClient.from_env()
+        self.ready()
+        assert self._client is not None
         return self._client.make_call(
             to_number,
             disable_recording=disable_recording,
@@ -182,7 +216,9 @@ class Operator:
     """One chat session's operator agent. Make a new one per request; the session keeps the rest.
 
     ``connect`` opens the database, ``phone`` places calls (by default AgentPhone,
-    made on the first real dial), and ``clock`` says what time the checks run at.
+    made when a call is approved), and ``clock`` says what time the checks run at.
+    ``lookup(account_number)`` gives ``(name, e164)`` for a debt, or None; it
+    reads the database unless a test passes its own.
     """
 
     def __init__(
@@ -194,6 +230,7 @@ class Operator:
         connect: Callable[[], psycopg.Connection] | None = None,
         phone: PhoneClient | None = None,
         clock: Callable[[], datetime] | None = None,
+        lookup: Callable[[str], tuple[str, str | None] | None] | None = None,
         system_prompt_path: str | Path = DEFAULT_OPERATOR_PROMPT_PATH,
     ) -> None:
         if connect is None:
@@ -203,6 +240,7 @@ class Operator:
         self._connect = connect
         self._phone = phone or _PhoneFromEnv()
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._lookup = lookup or self._lookup_in_db
         self.session = session
         self.agent = Agent(
             model=model,
@@ -291,15 +329,26 @@ class Operator:
     def place_call(self, debtor_id: str) -> str:
         if not _ACCOUNT.fullmatch(debtor_id):
             return f"error: {debtor_id!r} is not a debtor id; nothing was dialed"
+        found = self._lookup(debtor_id)
+        if found is None:
+            return f"error: no debtor {debtor_id!r}; nothing was dialed"
+        name, e164 = found
         return json.dumps(
             {
                 "status": NEEDS_APPROVAL,
                 "approval_id": "apr_" + secrets.token_hex(8),
                 "debtor_id": debtor_id,
+                "name": name,
+                "phone": mask_phone(e164),
                 "note": "Nothing has been dialed. The person must approve this call, "
                 "and the pre-call checks run again before dialing.",
             }
         )
+
+    def _lookup_in_db(self, account_number: str) -> tuple[str, str | None] | None:
+        with self._connect() as conn:
+            row = conn.execute(LOOKUP_SQL, (account_number,)).fetchone()
+        return (row[0], row[1]) if row else None
 
     def call_status(self, call_id: str) -> str:
         with self._connect() as conn:
@@ -337,11 +386,16 @@ class Operator:
         """Approve or deny a pending ``place_call``. Approving dials through ``dial_one``.
 
         Raises ``LookupError`` if ``approval_id`` is not pending (never opened,
-        already decided, or closed some other way).
+        already decided, or closed some other way), and ``PhoneUnavailable`` if
+        AgentPhone isn't set up; then nothing is recorded and it stays pending.
         """
         approval = next((a for a in self.pending() if a.id == approval_id), None)
         if approval is None:
             raise LookupError(f"no pending approval {approval_id!r}")
+        if approve and isinstance(self._phone, _PhoneFromEnv):
+            # Before any attempt is recorded: dial_one would take a setup error for
+            # a call that may have rung, and count it against the debtor's limit.
+            self._phone.ready()
         marker = f"[approval {approval.id}]"
         verb = "approved" if approve else "denied"
         # Close it before dialing, so a repeat of this request finds nothing to dial.
@@ -349,19 +403,19 @@ class Operator:
             {"role": "user", "content": f"{marker} {verb}: place_call for {approval.debtor_id}"}
         )
         if not approve:
-            reply = f"{marker} Not dialed: you denied the call to {approval.debtor_id}."
+            reply = f"{marker} Not dialed: you denied the call to {approval.name}."
             self.agent._add({"role": "assistant", "content": reply})
             return ChatTurn(reply=reply, pending_approvals=self.pending())
 
         dial = self._dial(approval.debtor_id)
         if dial["blocked"]:
             reasons = "; ".join(dial["reasons"])
-            reply = f"{marker} Not dialed: the checks block {approval.debtor_id} ({reasons})."
+            reply = f"{marker} Not dialed: the checks block {approval.name} ({reasons})."
         elif dial["outcome"] == "placed":
-            reply = f"{marker} Calling {approval.debtor_id}. Call id {dial['call_id']}."
+            reply = f"{marker} Calling {approval.name}. Call id {dial['call_id']}."
         else:
             reply = (
-                f"{marker} The call to {approval.debtor_id} came back {dial['outcome']}. "
+                f"{marker} The call to {approval.name} came back {dial['outcome']}. "
                 f"Attempt {dial['attempt_id']}."
             )
         self.agent._add({"role": "assistant", "content": reply})

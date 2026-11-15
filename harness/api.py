@@ -40,7 +40,7 @@ from compliance import check_before_call, may_call
 from compliance.audit import verify_chain
 from harness.db import connect, load_call_facts
 from harness.memory import PostgresSession
-from harness.operator import ChatTurn, Operator
+from harness.operator import ChatTurn, Operator, PhoneUnavailable
 
 DEBTS_SQL = """
     select d.account_number, p.first_name || ' ' || p.last_name
@@ -165,6 +165,9 @@ def chat_approve(body: ApproveIn) -> dict[str, Any]:
             turn = operator.decide(body.approval_id, body.approve)
         except LookupError as exc:
             raise HTTPException(404, str(exc)) from exc
+        except PhoneUnavailable as exc:
+            # Nothing recorded and the approval is still pending: fix the setup, retry.
+            raise HTTPException(503, f"AgentPhone is not set up ({exc})") from exc
         return _turn_json(turn)
 
 
