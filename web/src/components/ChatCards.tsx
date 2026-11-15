@@ -2,7 +2,15 @@ import { ChevronRight, CircleCheck, CircleHelp, CircleX, Phone, Wrench } from 'l
 
 import { Button } from '@/components/ui/button'
 import { prettyJson, type Approval, type Dial, type ToolCall } from '@/lib/chat'
-import { blockedRules, canApprove, parseCheck, type CheckView } from '@/lib/checks'
+import {
+  blockedRules,
+  canApprove,
+  isFresh,
+  MAX_CHECK_AGE_MS,
+  parseCheck,
+  passes,
+  type CheckView,
+} from '@/lib/checks'
 import { ruleName } from '@/lib/rules'
 import { cn } from '@/lib/utils'
 
@@ -32,7 +40,7 @@ export function CheckSummary({ check }: { check: CheckView | null | undefined })
     )
   }
   const blocks = blockedRules(check)
-  if (canApprove(check)) {
+  if (passes(check)) {
     return (
       <span className={cn(pill, 'bg-ok/15 text-ok')}>
         <CircleCheck className="size-3" /> pass
@@ -126,14 +134,16 @@ export function DialResult({ dial }: { dial: Dial }) {
 type ApprovalProps = {
   approval: Approval
   check: CheckView | null | undefined
+  /** The time now, in ms, for how old the check is. */
+  now: number
   busy: boolean
   onDecide: (approve: boolean) => void
 }
 
-/** A place_call waiting on the person. Approve shows only when the check
- *  passes; a blocked or unchecked call can only be denied. */
-export function ApprovalCard({ approval, check, busy, onDecide }: ApprovalProps) {
-  const allowed = canApprove(check)
+/** A place_call waiting on the person. Approve shows only when a recent check
+ *  passes; a blocked, unchecked or stale call can only be denied. */
+export function ApprovalCard({ approval, check, now, busy, onDecide }: ApprovalProps) {
+  const allowed = canApprove(check, now)
   return (
     <div
       className="space-y-2 rounded-lg border border-amber-500/40 bg-amber-500/5 p-3"
@@ -162,9 +172,13 @@ export function ApprovalCard({ approval, check, busy, onDecide }: ApprovalProps)
       </dl>
       {!allowed && (
         <p className="text-[11px] text-muted-foreground">
-          {check
-            ? 'The checks block this call, so it can’t be approved.'
-            : 'No check result for this debtor yet, so it can’t be approved.'}
+          {!check
+            ? 'No check result for this debtor yet, so it can’t be approved.'
+            : !passes(check)
+              ? 'The checks block this call, so it can’t be approved.'
+              : !isFresh(check, now)
+                ? `This check is more than ${MAX_CHECK_AGE_MS / 60_000} minutes old. Ask the agent to check again before approving.`
+                : 'This call can’t be approved.'}
         </p>
       )}
       <div className="flex gap-2">

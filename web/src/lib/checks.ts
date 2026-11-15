@@ -10,6 +10,18 @@ export type CheckView = {
   rules: Rule[]
   /** Where it came from: the agent's own check_call, or the page's /api/precall. */
   source: 'chat' | 'precall'
+  /** When the checks ran, in ms since the epoch; 0 if the result didn't say. */
+  checkedAt: number
+}
+
+/** A check older than this can't be approved from: calling hours and call
+ *  limits change, so ask for a fresh one. The server checks again either way. */
+export const MAX_CHECK_AGE_MS = 5 * 60_000
+
+/** Milliseconds for an ISO time, or 0 (the oldest possible) if it doesn't parse. */
+export function timeOf(iso: unknown): number {
+  const ms = typeof iso === 'string' ? Date.parse(iso) : NaN
+  return Number.isFinite(ms) ? ms : 0
 }
 
 function isRule(x: unknown): x is Rule {
@@ -36,7 +48,7 @@ export function parseCheck(result: string | null | undefined): CheckView | null 
   const rules = b.rules as Rule[]
   // Allowed only if the result says so and no rule in it blocks.
   const allow = b.decision === 'allow' && rules.every((r) => r.allow)
-  return { debtorId: b.debtor_id, allow, rules, source: 'chat' }
+  return { debtorId: b.debtor_id, allow, rules, source: 'chat', checkedAt: timeOf(b.at) }
 }
 
 type ToolCallLike = { name: string | null; result: string | null }
@@ -52,13 +64,32 @@ export function latestChecks(calls: ToolCallLike[]): Map<string, CheckView> {
   return out
 }
 
-/** Approve shows only for a check that is known and passes every rule. A
- *  blocked call, or one with no check result, gets no Approve button. The
- *  server runs every check again before dialing either way. */
-export function canApprove(check: CheckView | null | undefined): boolean {
+/** Every rule passes. A check with no rules says nothing, so it doesn't pass. */
+export function passes(check: CheckView | null | undefined): boolean {
   return Boolean(
     check && check.allow && check.rules.length > 0 && check.rules.every((r) => r.allow),
   )
+}
+
+export function isFresh(check: CheckView | null | undefined, now: number): boolean {
+  return Boolean(check && now - check.checkedAt <= MAX_CHECK_AGE_MS)
+}
+
+/** Approve shows only for a check that is known, recent, and passes every rule.
+ *  A blocked call, an old check, or none at all gets no Approve button. The
+ *  server runs every check again before dialing either way. */
+export function canApprove(check: CheckView | null | undefined, now: number): boolean {
+  return passes(check) && isFresh(check, now)
+}
+
+/** The more recent of two checks for the same debtor (the first on a tie). */
+export function newerCheck(
+  a: CheckView | null | undefined,
+  b: CheckView | null | undefined,
+): CheckView | null {
+  if (!a) return b ?? null
+  if (!b) return a
+  return b.checkedAt > a.checkedAt ? b : a
 }
 
 export function blockedRules(check: CheckView | null | undefined): Rule[] {

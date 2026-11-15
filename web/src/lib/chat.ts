@@ -36,12 +36,28 @@ export type ChatTurn = {
   dial: Dial | null
 }
 
+/** A failed API call. `status` is the HTTP status, or null if no answer came
+ *  back at all (network error, proxy gave up). */
+export class ApiError extends Error {
+  readonly status: number | null
+
+  constructor(status: number | null, detail: string) {
+    super(status === null ? detail : `${status}: ${detail}`)
+    this.status = status
+  }
+}
+
 async function postJson<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(path, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  })
+  let res: Response
+  try {
+    res = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+  } catch (err) {
+    throw new ApiError(null, err instanceof Error ? err.message : String(err))
+  }
   if (!res.ok) {
     const text = await res.text()
     let detail = text.slice(0, 200)
@@ -51,9 +67,36 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
     } catch {
       // Not JSON (e.g. the dev proxy's own error page); show the start of it.
     }
-    throw new Error(`${res.status}: ${detail}`)
+    throw new ApiError(res.status, detail)
   }
   return (await res.json()) as T
+}
+
+/** What a failed approve or deny means, from what the server said, if anything.
+ *
+ *  Only a 503 (AgentPhone isn't set up) proves nothing was dialed: the server
+ *  refuses before it records an attempt. A 404 means the approval was already
+ *  closed, maybe by an earlier click that did dial. Anything else, including
+ *  no answer at all, leaves it unknown: the server may have dialed anyway. */
+export function decideFailure(
+  err: unknown,
+  approve: boolean,
+): { text: string; closed: boolean } {
+  const status = err instanceof ApiError ? err.status : null
+  if (status === 404) {
+    return {
+      text: 'That call was already approved or denied. Ask the agent for its status.',
+      closed: true,
+    }
+  }
+  if (!approve) return { text: 'Couldn’t deny the call. Try again.', closed: false }
+  if (status === 503) {
+    return { text: 'Not dialed: AgentPhone isn’t set up. The call is still waiting.', closed: false }
+  }
+  return {
+    text: 'Couldn’t confirm whether the call was placed. Ask the agent for its status before approving again.',
+    closed: false,
+  }
 }
 
 export function sendChat(sessionId: string, message: string): Promise<ChatTurn> {

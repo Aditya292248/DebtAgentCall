@@ -44,10 +44,15 @@ export default function App() {
   // other chosen time says nothing about a call approved now.
   const precallCheck = (debtorId: string): CheckView | null => {
     if (at) return null
-    const check = debts.find((d) => d.account === debtorId)?.check
-    return check
-      ? { debtorId, allow: check.may_call, rules: check.decisions, source: 'precall' }
-      : null
+    const debt = debts.find((d) => d.account === debtorId)
+    if (!debt?.check) return null
+    return {
+      debtorId,
+      allow: debt.check.may_call,
+      rules: debt.check.decisions,
+      source: 'precall',
+      checkedAt: debt.checkedAt,
+    }
   }
 
   const toggle = () => {

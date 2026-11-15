@@ -8,18 +8,21 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import {
   chatSessionId,
   decideApproval,
+  decideFailure,
   sendChat,
   type Approval,
   type ChatTurn,
   type Dial,
   type ToolCall,
 } from '@/lib/chat'
-import { latestChecks, type CheckView } from '@/lib/checks'
+import { latestChecks, newerCheck, type CheckView } from '@/lib/checks'
 
 type Item =
   | { kind: 'user'; text: string }
   | { kind: 'agent'; text: string; toolCalls: ToolCall[]; dial: Dial | null }
   | { kind: 'error'; text: string; detail: string }
+
+const NOW_TICK_MS = 15_000
 
 type Props = {
   /** The page's own pre-call result for a debt right now, if it has one. */
@@ -34,6 +37,14 @@ export function ChatPanel({ precallCheck }: Props) {
   const [draft, setDraft] = useState('')
   const [busy, setBusy] = useState(false)
   const bottom = useRef<HTMLDivElement>(null)
+  // The time the approval cards judge a check's age by, at most 15 s behind.
+  // A check that just came in is newer than it, so it reads as fresh.
+  const [now, setNow] = useState(() => Date.now())
+
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), NOW_TICK_MS)
+    return () => clearInterval(id)
+  }, [])
 
   useEffect(() => {
     bottom.current?.scrollIntoView({ block: 'end' })
@@ -76,7 +87,10 @@ export function ChatPanel({ precallCheck }: Props) {
     try {
       take(await decideApproval(sessionId, approval.id, approve))
     } catch (err) {
-      fail(approve ? 'The call wasn’t placed.' : 'Couldn’t deny the call.', err)
+      const { text, closed } = decideFailure(err, approve)
+      fail(text, err)
+      // The server has no such approval any more, so its card must go too.
+      if (closed) setPending((ps) => ps.filter((p) => p.id !== approval.id))
     } finally {
       setBusy(false)
     }
@@ -89,7 +103,10 @@ export function ChatPanel({ precallCheck }: Props) {
     }
   }
 
-  const checkFor = (debtorId: string) => checks.get(debtorId) ?? precallCheck(debtorId)
+  // Whichever check ran last: the agent's in this chat, or the list's, which
+  // is re-run every minute.
+  const checkFor = (debtorId: string) =>
+    newerCheck(checks.get(debtorId), precallCheck(debtorId))
 
   return (
     <div className="flex h-full flex-col">
@@ -117,6 +134,7 @@ export function ChatPanel({ precallCheck }: Props) {
               key={a.id}
               approval={a}
               check={checkFor(a.debtor_id)}
+              now={now}
               busy={busy}
               onDecide={(approve) => void decide(a, approve)}
             />
