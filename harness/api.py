@@ -1,4 +1,4 @@
-"""A small web API: what the Python checks decide, and the operator chat.
+"""A small web API: what the Python checks decide, the operator chat, and bill upload.
 
 ``GET /api/precall`` runs ``compliance.check_before_call`` for every debt and
 returns all the decisions, for now or for the time in ``?at=`` (an ISO time with
@@ -16,6 +16,14 @@ made and any calls waiting for approval. ``POST /api/chat/approve`` takes
 Each chat's history is kept in the session store under ``chat:<session_id>``.
 Turns for one chat run one at a time in this process.
 
+``POST /api/bills`` takes a bill (multipart, field ``file``: PNG, JPEG, WebP or
+PDF), has the model read it (``harness/bills.py``) and returns a draft: its id,
+the fields read and the ones a person must look at. It saves no debtor, phone
+or debt. ``POST /api/bills/{id}/confirm`` takes ``{fields}`` as the person
+edited them, checks them again (422 with each problem if any fails) and only
+then saves the debtor, the phone (with no consent, so no call is allowed yet)
+and the debt. ``GET /api/bills/{id}`` returns a draft again.
+
 The checks stay in ``compliance/``; this file only loads, calls and formats.
 Run it with ``uv run api`` (http://127.0.0.1:8000); the web app in ``web/``
 forwards ``/api`` to it.
@@ -32,12 +40,23 @@ from datetime import UTC, datetime
 from typing import Any
 
 import psycopg
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from compliance import check_before_call, may_call
 from compliance.audit import verify_chain
+from harness.bills import (
+    MAX_BYTES,
+    AccountExists,
+    AlreadyConfirmed,
+    BillRejected,
+    Bills,
+    DraftNotFound,
+    InvalidFields,
+    PostgresBillDb,
+    bills_from_env,
+)
 from harness.db import connect, load_call_facts
 from harness.memory import PostgresSession
 from harness.operator import ChatTurn, Operator, PhoneUnavailable
@@ -117,7 +136,7 @@ _chat_locks_guard = threading.Lock()
 
 def make_operator(session_id: str) -> Operator:
     """The operator for one chat, on its saved history. Tests swap this out."""
-    return Operator(PostgresSession.for_call(f"chat:{session_id}"))
+    return Operator(PostgresSession.for_call(f"chat:{session_id}"), bills=PostgresBillDb())
 
 
 class ChatIn(BaseModel):
@@ -169,6 +188,60 @@ def chat_approve(body: ApproveIn) -> dict[str, Any]:
             # Nothing recorded and the approval is still pending: fix the setup, retry.
             raise HTTPException(503, f"AgentPhone is not set up ({exc})") from exc
         return _turn_json(turn)
+
+
+# --- bills -----------------------------------------------------------------------
+
+
+def make_bills() -> Bills:
+    """Where bills are stored and drafts are kept. Tests swap this out."""
+    return bills_from_env()
+
+
+class ConfirmIn(BaseModel):
+    fields: dict[str, Any]
+
+
+@app.post("/api/bills")
+def upload_bill(file: UploadFile = File(...)) -> dict[str, Any]:  # noqa: B008
+    """Read a bill into a draft. Nothing is saved as a debtor or debt."""
+    data = file.file.read(MAX_BYTES + 1)  # one byte over, so sniff() can say it's too big
+    try:
+        draft = make_bills().upload(data, file.content_type)
+    except BillRejected as exc:
+        raise HTTPException(415, str(exc)) from exc
+    return draft.as_json()
+
+
+@app.get("/api/bills/{draft_id}")
+def get_bill(draft_id: str) -> dict[str, Any]:
+    draft = make_bills().get(draft_id)
+    if draft is None:
+        raise HTTPException(404, f"no bill draft {draft_id!r}")
+    return draft.as_json()
+
+
+@app.post("/api/bills/{draft_id}/confirm")
+def confirm_bill(draft_id: str, body: ConfirmIn) -> dict[str, Any]:
+    """Save a draft's fields as the person confirmed them, after checking them again."""
+    try:
+        saved = make_bills().confirm(draft_id, body.fields)
+    except InvalidFields as exc:
+        raise HTTPException(422, {"problems": exc.problems}) from exc
+    except DraftNotFound as exc:
+        raise HTTPException(404, f"no bill draft {draft_id!r}") from exc
+    except AlreadyConfirmed as exc:
+        raise HTTPException(409, f"bill draft {draft_id!r} is already confirmed") from exc
+    except AccountExists as exc:
+        raise HTTPException(409, f"a debt with account number {exc} already exists") from exc
+    return {
+        "draft_id": saved.draft_id,
+        "debtor_id": saved.debtor_id,
+        "debt_id": saved.debt_id,
+        "account_number": saved.account_number,
+        "note": "Saved with no consent on file, so the pre-call checks block calls "
+        "to this number until consent is recorded.",
+    }
 
 
 def main() -> None:

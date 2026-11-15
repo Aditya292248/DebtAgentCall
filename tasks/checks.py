@@ -1479,3 +1479,118 @@ def _demo_part19() -> None:
 
 ACCEPTANCE["part-19"] = lambda: ACCEPTANCE["part-13"]() and _accept_part19()
 DEMOS["part-19"] = _demo_part19
+
+
+# bill upload: the model reads a bill into a draft, a person confirms it
+# ----------------------------------------------------------------------------
+
+_PART23_REPLY = (
+    '{"fields": {"first_name": "Riley", "last_name": "Example", '
+    '"address": "100 Test Street, Los Angeles", "zip": "90012", "state": "CA", '
+    '"phone": "(213) 555-0199", "creditor": "Northbank Utilities", "balance": "$1,234.56", '
+    '"account_reference": "NB-20931", "statement_date": "2026-10-31"}, "unsure": ["creditor"]}'
+)
+
+
+def _part23_png() -> bytes:
+    """A synthetic 1x1 white PNG standing in for a photo of a bill."""
+    import struct
+    import zlib
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        body = kind + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body))
+
+    header = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(b"\x00\xff\xff\xff"))
+        + chunk(b"IEND", b"")
+    )
+
+
+def _part23_run(provider: Provider | None) -> bool:
+    """Upload, a bad confirm, a good confirm, then the pre-call checks. Prints each step."""
+    import tempfile
+    from datetime import UTC, datetime
+
+    from compliance import CallFacts, PhoneConsent, check_before_call, may_call
+    from harness.bills import Bills, InvalidFields, LocalBillStore, MemoryBillDb, validate
+
+    db = MemoryBillDb()
+    with tempfile.TemporaryDirectory() as root:
+        bills = Bills(store=LocalBillStore(root), db=db, provider=provider)
+        draft = bills.upload(_part23_png(), "image/png")
+    print("draft", draft.id)
+    for name, value in draft.fields.items():
+        flag = draft.flags.get(name)
+        print(f"  {name:18} {value!r:34} {'<- ' + flag if flag else ''}")
+    # Every field that would not pass confirm as read must be flagged for the person.
+    unflagged = set(validate(draft.fields)) - set(draft.flags) - {"fields"}
+    print(f"  saved after upload: {len(db.debts)} debts; problems not flagged: {unflagged or '-'}")
+
+    # The person fills in what a bill never has and fixes anything flagged.
+    person = {
+        "first_name": "Riley",
+        "last_name": "Example",
+        "address": "100 Test Street, Los Angeles",
+        "zip": "90012",
+        "state": "CA",
+        "phone": "+12135550199",
+        "line_type": "cell",
+        "dob": "1985-04-12",
+        "creditor": "Northbank Utilities",
+        "balance_cents": 123456,
+        "account_reference": "NB-20931",
+        "statement_date": None,
+    }
+    try:
+        bills.confirm(draft.id, {**person, "balance_cents": "1234.56"})
+        rejected = False
+    except InvalidFields as exc:
+        rejected = True
+        print("confirm with balance '1234.56':", exc)
+    saved = bills.confirm(draft.id, person)
+    print(f"confirmed: debt {saved.debt_id} ({saved.account_number}); debts now {len(db.debts)}")
+
+    (phone,) = db.phones
+    facts = CallFacts(
+        debt_id=saved.debt_id,
+        zip=person["zip"],  # type: ignore[arg-type]
+        phone=PhoneConsent(e164=phone["e164"], line_type=phone["line_type"]),
+        attempts=[],
+        flags=[],
+    )
+    when = datetime(2026, 11, 16, 19, 0, tzinfo=UTC)  # 11:00 in Los Angeles
+    decisions = check_before_call(facts, when)
+    for d in decisions:
+        if not d.allow:
+            print(f"  pre-call block: {d.rule_id}: {d.reason}")
+    return (
+        not unflagged
+        and rejected
+        and len(db.debts) == 1
+        and not may_call(decisions)
+        and any(d.rule_id == "tcpa_consent" and not d.allow for d in decisions)
+    )
+
+
+def _accept_part23() -> bool:
+    # A real vision model on the synthetic bill: whatever it reads, nothing is
+    # saved before confirm, anything that wouldn't pass is flagged, and the
+    # saved debtor still can't be called.
+    return _part23_run(None)
+
+
+def _demo_part23() -> None:
+    from model import fake
+
+    real = _llm_configured()
+    print("model:", "the real one from LLM_BASE_URL" if real else "fake (set LLM_BASE_URL)\n")
+    _part23_run(None if real else fake(default=_PART23_REPLY))
+    print("\n   # the model reads, the code checks, the person confirms; a bill is not consent")
+
+
+ACCEPTANCE["part-23"] = _accept_part23
+DEMOS["part-23"] = _demo_part23

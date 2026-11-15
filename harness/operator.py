@@ -18,6 +18,12 @@
   - ``call_status(call_id)``: one ``call_attempt`` row, found by its own id or
     by the AgentPhone call id.
 
+Given ``bills`` (a ``harness.bills.BillDb``), it gets a fifth tool,
+``read_bill(draft_id)``: one bill draft as read off an uploaded bill, with its
+flagged fields and the phone masked, so the chat can talk about it. It only
+reads. Saving a bill is ``POST /api/bills/{id}/confirm``, called by the
+person's form, never by the model.
+
 Only ``decide(approval_id, approve)`` dials, and only for an approval that is
 still pending. It is called by code (``POST /api/chat/approve``), never by the
 model. First it makes sure AgentPhone is set up, so a missing key fails
@@ -50,6 +56,7 @@ from typing import Any
 import psycopg
 
 from harness.agent import Agent
+from harness.bills import BillDb
 from harness.memory import Session
 from harness.tools import Tool, ToolRegistry
 from model import Provider
@@ -231,6 +238,7 @@ class Operator:
         phone: PhoneClient | None = None,
         clock: Callable[[], datetime] | None = None,
         lookup: Callable[[str], tuple[str, str | None] | None] | None = None,
+        bills: BillDb | None = None,
         system_prompt_path: str | Path = DEFAULT_OPERATOR_PROMPT_PATH,
     ) -> None:
         if connect is None:
@@ -241,6 +249,7 @@ class Operator:
         self._phone = phone or _PhoneFromEnv()
         self._clock = clock or (lambda: datetime.now(UTC))
         self._lookup = lookup or self._lookup_in_db
+        self._bills = bills
         self.session = session
         self.agent = Agent(
             model=model,
@@ -255,7 +264,7 @@ class Operator:
 
     def tools(self) -> ToolRegistry:
         debtor = "The id find_debtor returned, for example 'ACC-1001'."
-        return ToolRegistry(
+        registry = ToolRegistry(
             [
                 Tool(
                     "find_debtor",
@@ -286,6 +295,34 @@ class Operator:
                 ),
             ]
         )
+        if self._bills is not None:
+            registry.register(
+                Tool(
+                    "read_bill",
+                    "Show one bill draft read from an uploaded bill: each field, and the "
+                    "ones the person must check. This saves nothing; the person confirms "
+                    "the fields in the bill form.",
+                    {"draft_id": "The draft id from the upload, for example 'bill_0123...'."},
+                    self.read_bill,
+                )
+            )
+        return registry
+
+    def read_bill(self, draft_id: str) -> str:
+        from harness.bills import DRAFT_ID
+
+        if self._bills is None:
+            return "error: bills are not available here"
+        draft = self._bills.get_draft(draft_id) if DRAFT_ID.fullmatch(draft_id) else None
+        if draft is None:
+            return f"error: no bill draft {draft_id!r}"
+        body = draft.as_json()
+        body["fields"]["phone"] = mask_phone(body["fields"].get("phone"))
+        body["note"] = (
+            "Nothing has been saved. The person must check every flagged field and "
+            "confirm the bill in the bill form."
+        )
+        return json.dumps(body)
 
     def find_debtor(self, query: str) -> str:
         words = " ".join(query.split()).lower()
