@@ -22,12 +22,16 @@ One caller turn, with call stages on (the default):
    said, before anything else sees it. If one fires (a lawyer, bankruptcy, a
    death, "stop calling", a dispute, a recording objection, a wrong number):
    save its flag (for "stop calling", also revoke the number's consent; for a
-   dispute, mark the debt ``disputed`` so the dialer stops) and an audit row
+   dispute, add a ``dispute`` row and mark the debt ``disputed`` so the dialer
+   stops) and an audit row
    (``kind="stop_trigger"``), all in one transaction; then move the call to
    STOPPED, speak the trigger's fixed close and hang up. The model is
-   not called. If saving fails, the close and hangup still happen and the
-   failure is logged as an error for a person to fix: the call never goes on
-   because a write failed.
+   not called. Before the person is verified a dispute changes nothing on the
+   debt and gets a neutral goodbye (it may be a stranger saying "this number
+   isn't mine"); its ``dispute`` row says ``verified = false`` for a person to
+   review, the same as ``log_dispute`` in ``harness/call_tools.py``. If saving fails,
+   the close and hangup still happen and the failure is logged as an error
+   for a person to fix: the call never goes on because a write failed.
 3. Load the call's ``CallState`` and run ``harness.stages.next_stage``. Turns
    of the same call wait for each other, so they never see stale state.
 4. If it gives a fixed line (greeting, identity check, disclosure, closes),
@@ -92,6 +96,9 @@ STOP_SOURCE = "live_call"  # flags.source for a flag a stop trigger set
 # A lawyer represents the person on one debt; a stop request, a bankruptcy or a
 # death is about the person, so those flags cover every debt.
 _FLAG_THIS_DEBT_ONLY = frozenset({"attorney"})
+# Said instead of the dispute close before verification: promises nothing and
+# doesn't hint that there is a debt.
+UNVERIFIED_DISPUTE_CLOSE = "Thank you for letting me know. Goodbye."
 MAX_REMEMBERED_IDS = 10_000  # enough to spot repeats, without growing forever
 # Turns of the same call run one at a time. A fixed set of locks, picked by call
 # id, so memory doesn't grow with calls; two calls rarely share one. This only
@@ -113,6 +120,19 @@ class Stop:
     debtor: Debtor
     phone: str  # the number we called
     stage: Stage | None  # where the call was; None if its state couldn't be read
+    verified: bool = False  # whether the person had passed the identity check
+
+    @property
+    def marks_disputed(self) -> bool:
+        """Only the verified debtor can dispute the debt; anyone else changes nothing."""
+        return self.trigger.kind == "dispute" and self.verified
+
+    @property
+    def close(self) -> str:
+        """The fixed line to say before hanging up."""
+        if self.trigger.kind == "dispute" and not self.verified:
+            return UNVERIFIED_DISPUTE_CLOSE
+        return self.trigger.close
 
     def flag(self) -> Flag | None:
         """The flag to save, or None for a trigger that sets no flag."""
@@ -126,8 +146,12 @@ class Stop:
             source=STOP_SOURCE,
         )
 
-    def decision(self) -> Decision:
-        """The audit row: the call was stopped, and why."""
+    def decision(self, debt_disputed: bool | None = None) -> Decision:
+        """The audit row: the call was stopped, and why.
+
+        ``debt_disputed`` says whether the debt's status really moved to
+        ``disputed`` (False if it wasn't active); None when nothing was tried.
+        """
         t = self.trigger
         return block(
             t.kind,
@@ -137,6 +161,8 @@ class Stop:
                 "flag": t.flag,
                 "escalate": t.escalate,
                 "stage": self.stage.value if self.stage else None,
+                "verified": self.verified,
+                "debt_disputed": debt_disputed,
             },
         )
 
@@ -182,19 +208,24 @@ def audit_to_db(decision: Decision, call_id: str, debt_id: str | None) -> None:
 def record_stop_in_db(stop: Stop) -> None:
     """Save a stop trigger's flag, consent or debt status change and audit row together."""
     from compliance.audit import record
-    from harness.db import connect, mark_disputed, revoke_phone, save_flag
+    from harness.db import connect, mark_disputed, revoke_phone, save_dispute, save_flag
 
     with connect() as conn:  # commits on a clean exit, rolls back on an error
         if (flag := stop.flag()) is not None:
             save_flag(conn, flag, stop.debtor.debtor_id)
         if stop.trigger.kind == "cease":
             revoke_phone(conn, stop.debtor.debtor_id, stop.phone)
+        disputed = None
         if stop.trigger.kind == "dispute":
+            # Kept either way, like log_dispute: a person reviews an unverified one.
+            reason = f"caller said {stop.trigger.matched!r}"
+            save_dispute(conn, stop.call_id, stop.debtor.debt_id, reason, stop.verified)
+        if stop.marks_disputed:
             # The close promises a follow-up; until then the dialer must not call.
-            mark_disputed(conn, stop.debtor.debt_id)
+            disputed = mark_disputed(conn, stop.debtor.debt_id)
         record(
             conn,
-            stop.decision(),
+            stop.decision(disputed),
             kind="stop_trigger",
             call_id=stop.call_id,
             debt_id=stop.debtor.debt_id,
@@ -311,12 +342,12 @@ def _staged_turn(turn: _Turn, data: dict, transcript: str) -> dict:
     with _CALL_LOCKS[zlib.crc32(call_id.encode()) % len(_CALL_LOCKS)]:
         # Stop triggers come first: the model never sees a turn that must end the call.
         if hits := detect(transcript):
-            return _stop_turn(turn, call_id, debtor, phone, transcript, hits[0])
+            return _stop_turn(turn, call_id, debtor, phone, transcript, hits)
         return _locked_turn(turn, call_id, debtor, transcript)
 
 
 def _stop_turn(
-    turn: _Turn, call_id: str, debtor: Debtor, phone: str, transcript: str, trigger: Trigger
+    turn: _Turn, call_id: str, debtor: Debtor, phone: str, transcript: str, hits: list[Trigger]
 ) -> dict:
     """Save the stop, then the fixed close and hang up, whatever fails on the way."""
     session: Session | None = None
@@ -326,7 +357,9 @@ def _stop_turn(
         state = load_state(session) or CallState.new(call_id, debtor)
     except Exception:
         log.exception("call %s: could not read the call state for a stop trigger", call_id)
-    stop = Stop(trigger, call_id, debtor, phone, state.stage if state else None)
+    verified = state is not None and state.verified  # unreadable state: not verified
+    trigger = _pick(hits, verified)
+    stop = Stop(trigger, call_id, debtor, phone, state.stage if state else None, verified)
     try:
         turn.record_stop(stop)
     except Exception:
@@ -341,11 +374,22 @@ def _stop_turn(
     if session is not None and state is not None:
         try:
             session.append({"role": "user", "content": transcript})
-            session.append({"role": "assistant", "content": trigger.close})
+            session.append({"role": "assistant", "content": stop.close})
             save_state(session, replace(state, stage=Stage.STOPPED, turns=state.turns + 1))
         except Exception:
             log.exception("call %s: could not save the STOPPED state", call_id)
-    return say_and_hangup(trigger.close)
+    return say_and_hangup(stop.close)
+
+
+def _pick(hits: list[Trigger], verified: bool) -> Trigger:
+    """The trigger to act on. Before verification a dispute gives way to any other
+    hit ("that phone wasn't mine, wrong number" is a wrong number), since a
+    dispute only means something from the debtor."""
+    if not verified:
+        others = [t for t in hits if t.kind != "dispute"]
+        if others:
+            return others[0]
+    return hits[0]
 
 
 def _locked_turn(turn: _Turn, call_id: str, debtor: Debtor, transcript: str) -> dict:

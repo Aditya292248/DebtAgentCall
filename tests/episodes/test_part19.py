@@ -6,6 +6,8 @@ What it checks, through the signed simulator and the webhook with stages on:
     STOPPED (the negative case: before this change the model answered)
   - every stop trigger kind does the same in DISCUSS, with its own fixed
     close and flag; a lawyer's flag covers this debt only
+  - before verification a dispute leaves the debt alone and gets a neutral
+    goodbye, and a wrong number in the same breath wins over it
   - saving the stop can fail (or the session can) and the call still ends
     with the fixed close: fail closed, and an error is logged
   - a later turn on a STOPPED call gets the fixed close, still no model
@@ -29,6 +31,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from compliance import SpeechState, check_sentence
 from compliance.triggers import CLOSES
 from harness import Agent
 from harness.call_state import Debtor, Stage
@@ -36,7 +39,14 @@ from harness.memory import JsonlSession
 from harness.stages import GREETING, STOPPED_CLOSE
 from model import FakeProvider, Provider
 from phone import signed_headers
-from phone.webhook import SAFE_LINE, WEBHOOK_PATH, Stop, create_app, record_stop_in_db
+from phone.webhook import (
+    SAFE_LINE,
+    UNVERIFIED_DISPUTE_CLOSE,
+    WEBHOOK_PATH,
+    Stop,
+    create_app,
+    record_stop_in_db,
+)
 from sim.agentphone_sim import load_script, run_script
 
 SECRET = "whsec_test_only"
@@ -165,9 +175,11 @@ def test_each_stop_trigger_in_discuss_ends_the_call(
     else:
         assert flag is not None and flag.kind == flag_kind
         assert flag.debt_id == (SAM.debt_id if this_debt_only else None)
+    assert stop.verified is True
     decision = stop.decision()
     assert not decision.allow and decision.rule_id == kind
     assert decision.evidence["stage"] == "DISCUSS"
+    assert decision.evidence["verified"] is True
     assert call.stages()[-1] == Stage.STOPPED
 
 
@@ -177,6 +189,40 @@ def test_a_stopped_call_stays_stopped(tmp_path: Path) -> None:
     call.turn("call_s", "I'm talking to my attorney about this.")
     assert call.turn("call_s", "How much was it again?") == {"text": STOPPED_CLOSE, "hangup": True}
     assert call.responder.calls == []
+
+
+@pytest.mark.parametrize(
+    "said",
+    [
+        "Sorry, this number isn't mine anymore, Sam had it before.",
+        "I already paid it off, who is this?",
+    ],
+)
+def test_a_dispute_before_verification_changes_nothing_and_hints_at_nothing(
+    tmp_path: Path, said: str
+) -> None:
+    call = Call(tmp_path)
+    call.turn("call_u", "Hello?")
+    reply = call.turn("call_u", said)
+    assert reply == {"text": UNVERIFIED_DISPUTE_CLOSE, "hangup": True}
+    assert "dispute" not in reply["text"].lower()
+    # The strictest filter (nobody verified) lets it through: it reveals nothing.
+    assert check_sentence(UNVERIFIED_DISPUTE_CLOSE, SpeechState(creditor=SAM.creditor)).allow
+    assert call.responder.calls == []
+    (stop,) = call.stops
+    assert stop.trigger.kind == "dispute" and stop.verified is False
+    assert not stop.marks_disputed  # the debt stays as it is
+    decision = stop.decision()
+    assert decision.evidence["verified"] is False and decision.evidence["escalate"] is True
+    assert call.stages()[-1] == Stage.STOPPED
+
+
+def test_before_verification_a_wrong_number_wins_over_a_dispute(tmp_path: Path) -> None:
+    call = Call(tmp_path)
+    call.turn("call_w", "Hello?")
+    reply = call.turn("call_w", "That phone wasn't mine, wrong number.")
+    assert reply == {"text": CLOSES["wrong_number"], "hangup": True}
+    assert [s.trigger.kind for s in call.stops] == ["wrong_number"]
 
 
 # --- fail closed: a failed write still ends the call ----------------------------
@@ -323,15 +369,21 @@ def test_record_stop_in_db_writes_flag_consent_and_audit_row(throwaway_debtor) -
 def test_a_dispute_marks_the_debt_disputed_so_the_dialer_stops(throwaway_debtor) -> None:  # type: ignore[no-untyped-def]
     from compliance.triggers import detect
     from dialer.service import check_debt_status
+    from harness.db import connect
 
     debtor, phone, call_id = throwaway_debtor
     (trigger,) = detect("That's not my debt.")
-    record_stop_in_db(Stop(trigger, call_id, debtor, phone, Stage.DISCUSS))
+    record_stop_in_db(Stop(trigger, call_id, debtor, phone, Stage.DISCUSS, verified=True))
     flags, revoked, status, audit = _written(debtor, call_id)
     assert flags == []
     assert revoked is False
     assert status == "disputed"
     assert not check_debt_status(status).allow  # the next campaign run skips it
+    with connect() as conn:
+        disputes = conn.execute(
+            "select verified from public.dispute where call_id = %s", (call_id,)
+        ).fetchall()
+    assert disputes == [(True,)]
     assert audit == [("stop_trigger", "dispute", "block", debtor.debt_id)]
 
 
@@ -340,6 +392,7 @@ class _RecordingConn:
 
     def __init__(self) -> None:
         self.sql: list[str] = []
+        self.rowcount = 1
 
     def __enter__(self) -> _RecordingConn:
         return self
@@ -356,16 +409,17 @@ class _RecordingConn:
 
 
 @pytest.mark.parametrize(
-    ("said", "expected"),
+    ("said", "verified", "expected"),
     [
-        ("stop calling me", ["insert into public.flags", "update public.phone", "audit_event"]),
-        ("That's not my debt.", ["update public.debt set status = 'disputed'", "audit_event"]),
-        ("I have a lawyer.", ["insert into public.flags", "audit_event"]),
-        ("wrong number", ["audit_event"]),
+        ("stop calling me", True, ["insert into public.flags", "update public.phone", "audit"]),
+        ("That's not my debt.", True, ["into public.dispute", "set status = 'disputed'", "audit"]),
+        ("That's not my debt.", False, ["into public.dispute", "audit_event"]),  # debt untouched
+        ("I have a lawyer.", False, ["insert into public.flags", "audit_event"]),
+        ("wrong number", False, ["audit_event"]),
     ],
 )
 def test_record_stop_in_db_writes_on_one_connection(
-    monkeypatch: pytest.MonkeyPatch, said: str, expected: list[str]
+    monkeypatch: pytest.MonkeyPatch, said: str, verified: bool, expected: list[str]
 ) -> None:
     import harness.db
     from compliance.triggers import detect
@@ -373,7 +427,7 @@ def test_record_stop_in_db_writes_on_one_connection(
     conn = _RecordingConn()
     monkeypatch.setattr(harness.db, "connect", lambda: conn)
     trigger = detect(said)[0]
-    record_stop_in_db(Stop(trigger, "call_1", SAM, SAM_PHONE, Stage.DISCUSS))
+    record_stop_in_db(Stop(trigger, "call_1", SAM, SAM_PHONE, Stage.DISCUSS, verified))
     assert len(conn.sql) == len(expected)
     for statement, wanted in zip(conn.sql, expected, strict=True):
         assert wanted in statement, statement

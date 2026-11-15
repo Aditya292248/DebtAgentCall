@@ -23,7 +23,9 @@ Choices:
     ``phone.revoked_at`` on the number it called too.
   - ``dispute`` sets no flag. A dispute is not a ``flags.kind``; it is the
     ``disputed`` status of the debt, which the webhook sets, so the dialer
-    (which only calls ``active`` debts) stops until someone reviews it.
+    (which only calls ``active`` debts) stops until someone reviews it. Only
+    after the person is verified: before that the webhook changes nothing and
+    says a neutral goodbye, since a stranger's "it isn't mine" is no dispute.
   - ``wrong_number`` and ``recording_objection`` set no flag either: no flag
     kind fits, and neither one stops future calls to the right person.
 
