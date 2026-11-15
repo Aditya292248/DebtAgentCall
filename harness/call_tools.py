@@ -15,10 +15,9 @@ this call's debt.
 Every tool call goes through two steps, in this order, and both are audited:
 
   1. The compliance gate (``CallTools.gate``): is this tool allowed right now?
-     It looks at the stage, a dispute on this debt (logged on this call or
-     already saved, as ``debt.status = 'disputed'``), a cease flag, and for a
-     callback the calling hours. A block returns ``error: blocked ...``
-     and nothing else happens.
+     It looks at the stage, a dispute (``debt.status = 'disputed'``, or one
+     logged on this call), a cease flag, and for a callback the calling hours.
+     A block returns ``error: blocked ...`` and nothing else happens.
   2. The approver (``PolicyApprover.approve(name, args) -> bool``, the shape
      codingHarness uses). Arguments it can't parse are always denied. A payment
      plan inside the plan policy is approved; one outside it is denied, which
@@ -33,8 +32,12 @@ The tools:
   ``schedule_callback``     a local date and time plus a time zone, checked with
                             ``compliance.hours``; not after a cease
   ``log_dispute(reason)``   always allowed; afterwards offers and callbacks are
-                            blocked by the dispute, on this turn and every later
-                            one, even if saving or auditing it failed
+                            blocked for the rest of the call, even if saving or
+                            auditing it failed. From the verified debtor it also
+                            marks the debt disputed, which lasts until a person
+                            sets the status back. Before verification it is saved
+                            for a person to review, and its result never says
+                            anything about a debt.
   ``escalate_to_human``     always allowed; saves a request for a person
   ``end_call(reason)``      always allowed; moves ``ctx.state`` to WRAP, which
                             the caller still has to save
@@ -43,7 +46,6 @@ The tools:
 from __future__ import annotations
 
 import json
-import math
 import threading
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
@@ -74,11 +76,14 @@ PENDING_PLAN = (
 DISPUTE_LOGGED = (
     "ok: the dispute is recorded. Collection on this debt stops until it has been reviewed."
 )
+# Before verification the person may not be the debtor, so the result must not
+# say there is a debt.
+DISPUTE_NOTED = "ok: noted. A specialist will look into it and follow up."
 # Said when the dispute could not be saved. The call still treats the debt as
 # disputed, and the error tells the model not to promise anything else.
 DISPUTE_NOT_SAVED = (
-    "error: the dispute could not be saved ({exc}). Collection talk stays blocked on this "
-    "call; tell the person a specialist will follow up about the dispute."
+    "error: this could not be saved ({exc}). Offers stay blocked on this call; tell the "
+    "person a specialist will follow up."
 )
 ESCALATED = "ok: a specialist has been asked to follow up with this person."
 BLOCKED_BY_DISPUTE = "error: blocked by dispute"
@@ -98,16 +103,32 @@ class PaymentPlan:
     down_cents: int
     installments: int
     frequency: str
-    installment_cents: int  # each installment after the down payment, rounded up
+    installment_cents: int  # each installment after the down payment, rounded down
+    last_installment_cents: int  # the last one also takes the leftover cents
+
+    @property
+    def total_cents(self) -> int:
+        return (
+            self.down_cents
+            + self.installment_cents * (self.installments - 1)
+            + (self.last_installment_cents)
+        )
 
 
 class CallStore(Protocol):
     """Where the tools' rows go. ``PgCallStore`` is the database; ``MemoryCallStore``
-    keeps them in a list, for demos and offline runs."""
+    keeps them in a list, for demos and offline runs.
+
+    ``save_dispute`` must have made the dispute durable when it returns, because
+    the tool then tells the caller it is recorded. ``verified`` says whether it
+    came from the verified debtor; only then is the debt itself marked disputed.
+    ``is_disputed`` is true if the debt is marked disputed, or a dispute was
+    logged on this call by anyone.
+    """
 
     def save_plan(self, ctx: CallContext, plan: PaymentPlan, status: str) -> None: ...
     def save_callback(self, ctx: CallContext, at: datetime, tz: str) -> None: ...
-    def save_dispute(self, ctx: CallContext, reason: str) -> None: ...
+    def save_dispute(self, ctx: CallContext, reason: str, verified: bool) -> None: ...
     def save_escalation(self, ctx: CallContext, reason: str) -> None: ...
     def is_disputed(self, ctx: CallContext) -> bool: ...
 
@@ -115,6 +136,7 @@ class CallStore(Protocol):
 @dataclass
 class MemoryCallStore:
     rows: list[dict[str, Any]] = field(default_factory=list)
+    disputed_debts: set[str] = field(default_factory=set)  # stands in for debt.status
 
     def _add(self, kind: str, ctx: CallContext, **data: Any) -> None:
         self.rows.append({"kind": kind, "call_id": ctx.call_id, "debt_id": ctx.debt_id, **data})
@@ -125,14 +147,18 @@ class MemoryCallStore:
     def save_callback(self, ctx: CallContext, at: datetime, tz: str) -> None:
         self._add("callback", ctx, at=at.isoformat(), tz=tz)
 
-    def save_dispute(self, ctx: CallContext, reason: str) -> None:
-        self._add("dispute", ctx, reason=reason)
+    def save_dispute(self, ctx: CallContext, reason: str, verified: bool) -> None:
+        self._add("dispute", ctx, reason=reason, verified=verified)
+        if verified:
+            self.disputed_debts.add(ctx.debt_id)
 
     def save_escalation(self, ctx: CallContext, reason: str) -> None:
         self._add("escalation", ctx, reason=reason)
 
     def is_disputed(self, ctx: CallContext) -> bool:
-        return any(r["kind"] == "dispute" and r["debt_id"] == ctx.debt_id for r in self.rows)
+        return ctx.debt_id in self.disputed_debts or any(
+            r["kind"] == "dispute" and r["call_id"] == ctx.call_id for r in self.rows
+        )
 
 
 @dataclass
@@ -205,8 +231,10 @@ def parse_plan(args: str | dict | None, balance_cents: int) -> PaymentPlan:
         raise BadArgs(f"frequency must be one of {', '.join(FREQUENCIES)}")
     if count < 1 or down < 0 or down > balance_cents:
         raise BadArgs("installments must be at least 1 and down_cents within the balance")
-    each = math.ceil((balance_cents - down) / count)
-    return PaymentPlan(down, count, frequency, each)
+    # Round down and put the leftover cents on the last installment, so the plan
+    # adds up to exactly the balance, never a cent more.
+    each, leftover = divmod(balance_cents - down, count)
+    return PaymentPlan(down, count, frequency, each, each + leftover)
 
 
 def parse_callback(args: str | dict | None) -> tuple[datetime, str]:
@@ -384,7 +412,7 @@ class CallTools:
             return f"error: offer_payment_plan arguments not understood: {exc}"
         if self.approver.approve("offer_payment_plan", args):
             self.ctx.store.save_plan(self.ctx, plan, "approved")
-            return "approved: " + json.dumps(asdict(plan))
+            return "approved: " + json.dumps(asdict(plan) | {"total_cents": plan.total_cents})
         self.ctx.store.save_plan(self.ctx, plan, "pending")
         return PENDING_PLAN
 
@@ -415,13 +443,15 @@ class CallTools:
             self.approver.approve("log_dispute", {"reason": reason})
         except Exception as exc:  # noqa: BLE001 - auditing must not lose the dispute
             problems.append(f"audit failed: {exc!r}")
+        verified = self.ctx.state.verified
         try:
-            self.ctx.store.save_dispute(self.ctx, reason.strip() or "(no reason given)")
+            self.ctx.store.save_dispute(self.ctx, reason.strip() or "(no reason given)", verified)
         except Exception as exc:  # noqa: BLE001 - say so, and stay blocked
             return DISPUTE_NOT_SAVED.format(exc=repr(exc))
+        said = DISPUTE_LOGGED if verified else DISPUTE_NOTED
         if problems:
-            return DISPUTE_LOGGED + " (" + "; ".join(problems) + ")"
-        return DISPUTE_LOGGED
+            return said + " (" + "; ".join(problems) + ")"
+        return said
 
     def escalate_to_human(self, reason: str) -> str:
         if err := self._gated("escalate_to_human"):
@@ -493,7 +523,12 @@ def call_tools(ctx: CallContext, approver: PolicyApprover | None = None) -> Tool
 
 
 class PgCallStore:
-    """Writes the tools' rows to Postgres on an open connection; the caller commits."""
+    """Writes the tools' rows to Postgres on an open connection.
+
+    The caller commits, except for a dispute: ``save_dispute`` commits before it
+    returns, because the caller is about to hear that it was recorded. That
+    commit also commits anything written earlier on the same connection.
+    """
 
     def __init__(self, conn: Any) -> None:
         self.conn = conn
@@ -501,7 +536,8 @@ class PgCallStore:
     def save_plan(self, ctx: CallContext, plan: PaymentPlan, status: str) -> None:
         self.conn.execute(
             "insert into public.payment_plan (call_id, debt_id, down_cents, installments,"
-            " frequency, installment_cents, status) values (%s, %s, %s, %s, %s, %s, %s)",
+            " frequency, installment_cents, last_installment_cents, status)"
+            " values (%s, %s, %s, %s, %s, %s, %s, %s)",
             (
                 ctx.call_id,
                 ctx.debt_id,
@@ -509,6 +545,7 @@ class PgCallStore:
                 plan.installments,
                 plan.frequency,
                 plan.installment_cents,
+                plan.last_installment_cents,
                 status,
             ),
         )
@@ -520,22 +557,26 @@ class PgCallStore:
             (ctx.call_id, ctx.debt_id, at, tz),
         )
 
-    def save_dispute(self, ctx: CallContext, reason: str) -> None:
-        self.conn.execute(
-            "insert into public.dispute (call_id, debt_id, reason) values (%s, %s, %s)",
-            (ctx.call_id, ctx.debt_id, reason),
-        )
-        # The debt itself is marked, so later turns and later calls see it too.
-        self.conn.execute(
-            "update public.debt set status = 'disputed' where id = %s", (ctx.debt_id,)
-        )
+    def save_dispute(self, ctx: CallContext, reason: str, verified: bool) -> None:
+        # A savepoint, so a failure here leaves the connection usable.
+        with self.conn.transaction():
+            self.conn.execute(
+                "insert into public.dispute (call_id, debt_id, reason, verified)"
+                " values (%s, %s, %s, %s)",
+                (ctx.call_id, ctx.debt_id, reason, verified),
+            )
+            if verified:  # later turns and later calls see it, until a person clears it
+                self.conn.execute(
+                    "update public.debt set status = 'disputed' where id = %s", (ctx.debt_id,)
+                )
+        self.conn.commit()
 
     def is_disputed(self, ctx: CallContext) -> bool:
         row = self.conn.execute(
             "select d.status = 'disputed' or exists"
-            " (select 1 from public.dispute x where x.debt_id = d.id)"
+            " (select 1 from public.dispute x where x.debt_id = d.id and x.call_id = %s)"
             " from public.debt d where d.id = %s",
-            (ctx.debt_id,),
+            (ctx.call_id, ctx.debt_id),
         ).fetchone()
         return row is None or bool(row[0])  # no such debt: treat as disputed
 
@@ -557,10 +598,16 @@ def load_plan_policy(conn: Any, creditor: str) -> PlanPolicy:
 
 
 def audit_to_conn(conn: Any) -> AuditWriter:
-    """An audit writer that adds ``call_tool`` rows on ``conn``; the caller commits."""
+    """An audit writer that adds ``call_tool`` rows on ``conn``.
+
+    Each row is written in its own savepoint. The caller commits, unless no
+    transaction was open, in which case psycopg commits the row at once.
+    """
     from compliance.audit import record
 
     def write(decision: Decision, call_id: str, debt_id: str | None) -> None:
-        record(conn, decision, kind="call_tool", call_id=call_id, debt_id=debt_id)
+        # A savepoint, so a failed audit write can't spoil the rest of the turn's writes.
+        with conn.transaction():
+            record(conn, decision, kind="call_tool", call_id=call_id, debt_id=debt_id)
 
     return write

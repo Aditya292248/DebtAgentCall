@@ -12,6 +12,10 @@ What it checks:
     on later turns too (a fresh context that reads the store), and even when
     saving the dispute or writing its audit row failed
   - 52 weekly, 26 biweekly and 12 monthly installments all count as 12 months
+  - a plan always adds up to exactly the balance, never a cent more
+  - a dispute before verification is saved for review, does not mark the debt,
+    and its result says nothing about a debt; a dispute is not forever: once
+    the debt's status is cleared, a later call can offer plans again
   - a callback outside calling hours, or after a cease flag, is blocked
   - every gate and approver decision is written to the audit log
   - against the real local database (``db``): the rows and audit rows are written
@@ -33,6 +37,7 @@ from harness.call_tools import (
     BLOCKED_BY_DISPUTE,
     DISPUTE_LOGGED,
     DISPUTE_NOT_SAVED,
+    DISPUTE_NOTED,
     PENDING_PLAN,
     CallContext,
     CallTools,
@@ -218,10 +223,49 @@ def test_offers_and_callbacks_are_blocked_after_a_dispute() -> None:
     assert [r["kind"] for r in store.rows] == ["dispute"]
 
 
-def test_log_dispute_is_allowed_before_verification() -> None:
-    ctx, _, store = make_ctx(stage_fn=lambda s: replace(s, stage=Stage.VERIFY))
-    assert call(ctx, "log_dispute", reason="not my debt") == DISPUTE_LOGGED
-    assert store.rows[0]["kind"] == "dispute"
+@pytest.mark.parametrize("stage", [Stage.GREETING, Stage.VERIFY, Stage.THIRD_PARTY])
+def test_dispute_before_verification_is_noted_without_naming_a_debt(stage: Stage) -> None:
+    ctx, _, store = make_ctx(stage_fn=lambda s: replace(s, stage=stage))
+    result = call(ctx, "log_dispute", reason="he doesn't owe anything")
+    assert result == DISPUTE_NOTED
+    for word in ("debt", "collect", "balance", "owe", SAM.creditor):
+        assert word not in result.lower()
+    assert store.rows[0]["kind"] == "dispute" and store.rows[0]["verified"] is False
+    assert store.disputed_debts == set()  # a stranger can't mark the real debt disputed
+    assert ctx.disputed  # but nothing more is offered on this call
+
+
+def test_unverified_dispute_does_not_block_a_later_call() -> None:
+    first, _, store = make_ctx(stage_fn=lambda s: replace(s, stage=Stage.THIRD_PARTY))
+    call(first, "log_dispute", reason="not his")
+    later, _, _ = make_ctx()
+    later.store = store
+    later.state = replace(later.state, call_id="call-part21-later")
+    assert call(later, "offer_payment_plan", **OFFER).startswith("approved: ")
+
+
+def test_a_cleared_dispute_no_longer_blocks_a_later_call() -> None:
+    first, _, store = make_ctx()
+    call(first, "log_dispute", reason="I already paid this")
+    later, _, _ = make_ctx()
+    later.store = store
+    later.state = replace(later.state, call_id="call-part21-later")
+    assert call(later, "offer_payment_plan", **OFFER) == BLOCKED_BY_DISPUTE
+    store.disputed_debts.clear()  # a person reviewed it and set the debt back to active
+    assert call(later, "offer_payment_plan", **OFFER).startswith("approved: ")
+
+
+@pytest.mark.parametrize(
+    ("down", "count"), [("12500", "7"), ("12501", "3"), ("125000", "1"), ("99999", "52")]
+)
+def test_plan_adds_up_to_exactly_the_balance(down: str, count: str) -> None:
+    ctx, _, store = make_ctx()
+    freq = "weekly" if count == "52" else "monthly"
+    result = call(ctx, "offer_payment_plan", down_cents=down, installments=count, frequency=freq)
+    plan = json.loads(result.removeprefix("approved: "))
+    paid = plan["down_cents"] + plan["installment_cents"] * (plan["installments"] - 1)
+    assert paid + plan["last_installment_cents"] == plan["total_cents"] == SAM.balance_cents
+    assert 0 <= plan["last_installment_cents"] - plan["installment_cents"] < plan["installments"]
 
 
 OFFER = {"down_cents": "25000", "installments": "10", "frequency": "monthly"}
@@ -254,7 +298,7 @@ def test_dispute_is_saved_even_when_the_audit_write_fails() -> None:
 def test_dispute_blocks_offers_on_a_later_turn() -> None:
     first, _, store = make_ctx()
     assert call(first, "log_dispute", reason="I already paid this") == DISPUTE_LOGGED
-    later, _, _ = make_ctx()  # the next caller turn builds a new context
+    later, _, _ = make_ctx()  # the next caller turn builds a new context, same call id
     later.store = store
     assert not later.disputed
     assert call(later, "offer_payment_plan", **OFFER) == BLOCKED_BY_DISPUTE
@@ -359,6 +403,10 @@ def test_rows_and_audit_are_written_to_the_database() -> None:
 
     call_id = f"test-part21-{uuid.uuid4()}"
     with connect() as conn:
+        (status_before,) = conn.execute(
+            "select status from public.debt where id = %s", (SAM.debt_id,)
+        ).fetchone()
+        conn.commit()
         try:
             ctx = CallContext(
                 debtor=SAM,
@@ -391,5 +439,19 @@ def test_rows_and_audit_are_written_to_the_database() -> None:
             # The next turn's context starts with disputed=False and reads the database.
             later = replace(ctx, disputed=False)
             assert run_tool(call_tools(later), "offer_payment_plan", OFFER) == BLOCKED_BY_DISPUTE
+            # The dispute was committed by the tool itself, before it said "recorded".
+            with connect() as other:
+                seen = other.execute(
+                    "select verified from public.dispute where call_id = %s", (call_id,)
+                ).fetchall()
+            assert seen == [(True,)]
         finally:
-            conn.rollback()  # leave no rows behind
+            # The tool committed, so a rollback isn't enough. Audit rows stay: the
+            # log can't be edited, and they are ordinary, valid entries.
+            conn.rollback()
+            for table in ("dispute", "payment_plan"):
+                conn.execute(f"delete from public.{table} where call_id = %s", (call_id,))
+            conn.execute(
+                "update public.debt set status = %s where id = %s", (status_before, SAM.debt_id)
+            )
+            conn.commit()

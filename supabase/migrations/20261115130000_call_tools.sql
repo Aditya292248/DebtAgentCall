@@ -8,8 +8,10 @@
 -- `payment_plan` holds every plan offered: `approved` inside the policy,
 -- `pending` outside it, waiting for a specialist. `callback`, `dispute` and
 -- `escalation` hold the other tools' requests. Each row names the call and debt.
--- Logging a dispute also sets `debt.status` to `disputed`, so later turns and
--- later calls see it.
+-- A dispute from the verified debtor also sets `debt.status` to `disputed`, so
+-- later turns and later calls see it until a person sets the status back. One
+-- logged before verification is kept with `verified = false` for a person to
+-- review and does not change the debt.
 --
 -- Row level security is on with only a read policy for signed-in users, the
 -- same as the other tables.
@@ -30,6 +32,9 @@ create table public.payment_plan (
     installments integer not null check (installments > 0),
     frequency text not null check (frequency in ('weekly', 'biweekly', 'monthly')),
     installment_cents bigint not null check (installment_cents >= 0),
+    -- The last installment also takes the leftover cents, so the plan adds up
+    -- to exactly the balance.
+    last_installment_cents bigint not null check (last_installment_cents >= installment_cents),
     status text not null check (status in ('approved', 'pending', 'confirmed', 'rejected')),
     created_at timestamptz not null default now()
 );
@@ -48,6 +53,7 @@ create table public.dispute (
     call_id text not null,
     debt_id uuid not null references public.debt (id) on delete cascade,
     reason text not null,
+    verified boolean not null,
     created_at timestamptz not null default now()
 );
 
