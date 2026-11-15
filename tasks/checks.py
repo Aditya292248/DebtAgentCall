@@ -1209,6 +1209,97 @@ DEMOS["part-13"] = _demo_part13
 
 
 # ----------------------------------------------------------------------------
+# operator chat: "call Sam Doe" asks for approval; the checks still decide
+# ----------------------------------------------------------------------------
+
+_PART20_NIGHT = "2026-11-05T12:00:00+00:00"  # 04:00 in Los Angeles
+
+
+def _part20_operator(root: str, at: str, provider: Provider | None = None):
+    from datetime import datetime
+
+    from harness.memory import JsonlSession
+    from harness.operator import Operator
+    from phone.client import FakePhoneClient
+
+    phone = FakePhoneClient()
+    when = datetime.fromisoformat(at)
+    operator = Operator(
+        JsonlSession.for_call(root, "chat-demo"),
+        provider=provider,
+        phone=phone,
+        clock=lambda: when,
+    )
+    return operator, phone
+
+
+def _accept_part20() -> bool:
+    """The real model asks to call Sam Doe; nothing dials until approval, and an
+    approval outside calling hours still dials nobody."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as root:
+        operator, phone = _part20_operator(root, _PART07_WHEN)
+        turn = operator.chat("Please call Sam Doe.")
+        print("tools:", [c["name"] for c in turn.tool_calls])
+        print("reply:", turn.reply)
+        asked = [a for a in turn.pending_approvals if a.debtor_id == "ACC-1001"]
+        if not asked or phone.calls:
+            print("BAD: expected one pending approval for ACC-1001 and no dial")
+            return False
+        night, night_phone = _part20_operator(root, _PART20_NIGHT)
+        result = night.decide(asked[0].id, approve=True)
+        print("after approval at night:", result.reply)
+        return not night_phone.calls and bool(result.dial and result.dial["blocked"])
+
+
+def _demo_part20() -> None:
+    import tempfile
+
+    from model import fake
+    from model.fake import tool_call, tool_reply
+
+    real = _llm_configured()
+    provider = (
+        None
+        if real
+        else fake(
+            scripted=[
+                tool_reply(tool_call("find_debtor", "c1", query="Sam Doe")),
+                tool_reply(tool_call("check_call", "c2", debtor_id="ACC-1001")),
+                tool_reply(tool_call("place_call", "c3", debtor_id="ACC-1001")),
+                "Sam Doe (ACC-1001) passes every check. The call is waiting for your approval; "
+                "nothing has been dialed.",
+            ]
+        )
+    )
+    print("model:", "the real one from LLM_BASE_URL" if real else "fake (set LLM_BASE_URL)\n")
+    with tempfile.TemporaryDirectory() as root:
+        operator, phone = _part20_operator(root, _PART07_WHEN, provider)
+        print("you>   call Sam Doe   (at 11:00 in Los Angeles)")
+        turn = operator.chat("call Sam Doe")
+        for c in turn.tool_calls:
+            print(f"  tool  {c['name']}({c['arguments']}) -> {str(c['result'])[:100]}")
+        print("agent>", turn.reply)
+        print("dials so far:", len(phone.calls))
+        # The person comes back to approve hours later, at 04:00 in Los Angeles.
+        later, later_phone = _part20_operator(root, _PART20_NIGHT, provider)
+        for approval in turn.pending_approvals:
+            print(f"\n[approve {approval.id} for {approval.debtor_id}] (at 04:00 in Los Angeles)")
+            print("agent>", later.decide(approval.id, approve=True).reply)
+        print("dials so far:", len(phone.calls) + len(later_phone.calls))
+    print("\n   # the model asks, the person approves, the checks decide: nothing rang at 04:00")
+
+
+ACCEPTANCE["part-20"] = lambda: (
+    ACCEPTANCE["part-18"]()
+    and ACCEPTANCE["part-16"]()
+    and ACCEPTANCE["part-13"]()
+    and _accept_part20()
+)
+DEMOS["part-20"] = _demo_part20
+
+
 # call tools: what the agent may do during a call, gated and then approved
 # ----------------------------------------------------------------------------
 
