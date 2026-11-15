@@ -22,7 +22,9 @@ and checks them again with ``validate``, strictly this time: the balance must
 be a positive integer number of cents, the phone must already be E.164, and so
 on. Only then does it save the debtor, the phone and the debt, mark the draft
 confirmed, and write an audit row, all in one transaction. A draft confirms
-once.
+once. It refuses an account number that is already saved, and a phone number
+that is already on file: calls find their debtor by the number, so a second
+debtor on one number could make a call load the wrong person.
 
 A bill is not consent to be called. The phone is saved with no ``consent_at``,
 so ``compliance.check_consent`` blocks every call to it until consent is
@@ -130,6 +132,14 @@ class AlreadyConfirmed(RuntimeError):
 
 class AccountExists(RuntimeError):
     """A debt with this account number is already saved."""
+
+
+class PhoneExists(RuntimeError):
+    """This phone number is already on file for a debtor.
+
+    A live call finds its debtor by the number dialed, so a second debtor on the
+    same number could make a call load the wrong person.
+    """
 
 
 @dataclass(frozen=True)
@@ -422,7 +432,7 @@ class BillDb(Protocol):
     def confirm(self, draft_id: str, fields: dict[str, Any], decision: Decision) -> Saved:
         """Save debtor, phone (no consent) and debt, mark the draft confirmed and
         write the audit row, all or nothing. Raises ``DraftNotFound``,
-        ``AlreadyConfirmed`` or ``AccountExists``."""
+        ``AlreadyConfirmed``, ``AccountExists`` or ``PhoneExists``."""
 
 
 INSERT_DRAFT_SQL = """
@@ -435,6 +445,10 @@ GET_DRAFT_SQL = """
 """
 LOCK_DRAFT_SQL = "select status from public.bill_draft where id = %s for update"
 ACCOUNT_TAKEN_SQL = "select 1 from public.debt where account_number = %s"
+# phone.e164 has no unique constraint, so two confirms of one number are kept
+# apart by a lock on the number for the rest of the transaction.
+LOCK_PHONE_SQL = "select pg_advisory_xact_lock(hashtextextended('bill_phone:' || %s, 0))"
+PHONE_TAKEN_SQL = "select 1 from public.phone where e164 = %s"
 INSERT_DEBTOR_SQL = """
     insert into public.debtor (first_name, last_name, dob, address, zip, state)
     values (%s, %s, %s, %s, %s, %s) returning id::text
@@ -499,6 +513,9 @@ class PostgresBillDb:
                 raise AlreadyConfirmed(draft_id)
             if conn.execute(ACCOUNT_TAKEN_SQL, (account,)).fetchone():
                 raise AccountExists(account)
+            conn.execute(LOCK_PHONE_SQL, (fields["phone"],))
+            if conn.execute(PHONE_TAKEN_SQL, (fields["phone"],)).fetchone():
+                raise PhoneExists(fields["phone"])
             try:
                 return self._save(conn, draft_id, fields, decision)
             except psycopg.errors.UniqueViolation as exc:  # saved by someone else just now
@@ -567,6 +584,8 @@ class MemoryBillDb:
             account = fields["account_reference"]
             if any(d["account_number"] == account for d in self.debts.values()):
                 raise AccountExists(account)
+            if any(p["e164"] == fields["phone"] for p in self.phones):
+                raise PhoneExists(fields["phone"])
             debtor_id, debt_id = str(uuid.uuid4()), str(uuid.uuid4())
             self.debtors[debtor_id] = {
                 k: fields[k] for k in ("first_name", "last_name", "dob", "address", "zip", "state")

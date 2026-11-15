@@ -54,6 +54,7 @@ from harness.bills import (
     Bills,
     DraftNotFound,
     InvalidFields,
+    PhoneExists,
     PostgresBillDb,
     bills_from_env,
 )
@@ -234,6 +235,10 @@ def confirm_bill(draft_id: str, body: ConfirmIn) -> dict[str, Any]:
         raise HTTPException(409, f"bill draft {draft_id!r} is already confirmed") from exc
     except AccountExists as exc:
         raise HTTPException(409, f"a debt with account number {exc} already exists") from exc
+    except PhoneExists as exc:
+        raise HTTPException(
+            409, "this phone number is already on file for a debtor; nothing was saved"
+        ) from exc
     return {
         "draft_id": saved.draft_id,
         "debtor_id": saved.debtor_id,

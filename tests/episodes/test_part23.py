@@ -3,6 +3,8 @@
 What it checks:
   - Uploading a bill saves no debtor, phone or debt: only a draft and an audit
     row. Only confirm saves them, once.
+  - Confirm refuses a phone number already on file for a debtor, since a live
+    call finds its debtor by the number and could load the wrong person.
   - Confirm checks the person's fields again: a balance that isn't a positive
     whole number of cents, or a phone that isn't E.164, is rejected (422) and
     nothing is saved.
@@ -173,6 +175,26 @@ def test_an_account_number_already_saved_is_not_saved_twice(api):
     )
     assert resp.status_code == 409
     assert len(bills.db.debts) == 1  # type: ignore[attr-defined]
+
+
+def test_a_phone_number_already_on_file_is_not_given_to_a_second_debtor(api):
+    client, bills = api
+    first, second = upload(client).json(), upload(client).json()
+    ok = client.post(
+        f"/api/bills/{first['draft_id']}/confirm", json={"fields": confirmed(first["fields"])}
+    )
+    assert ok.status_code == 200
+    # Same number, different account: a call to the number could load either one.
+    resp = client.post(
+        f"/api/bills/{second['draft_id']}/confirm",
+        json={"fields": confirmed(second["fields"], account_reference="NB-77777")},
+    )
+    assert resp.status_code == 409
+    assert "phone number is already on file" in resp.json()["detail"]
+    db = bills.db
+    assert isinstance(db, MemoryBillDb)
+    assert len(db.debts) == len(db.debtors) == len(db.phones) == 1
+    assert client.get(f"/api/bills/{second['draft_id']}").json()["status"] == "draft"
 
 
 def test_confirming_an_unknown_draft_is_a_404(api):
@@ -474,3 +496,18 @@ def test_in_db_a_bad_balance_saves_nothing_and_a_draft_confirms_once(pg_bills):
     with pytest.raises(AlreadyConfirmed):
         bills.confirm(draft.id, confirmed(draft.fields))
     assert _count("select count(*) from public.debt where account_number = %s", account) == 1
+
+
+@pytest.mark.db
+def test_in_db_a_bill_with_a_seeded_debtors_phone_saves_nothing(pg_bills):
+    from harness.bills import PhoneExists
+    from harness.db import find_debtor_by_phone
+
+    bills, account = pg_bills
+    draft = bills.upload(PNG, "image/png")
+    sam = "+12135550101"  # Sam Doe's number in the seed
+    with pytest.raises(PhoneExists):
+        bills.confirm(draft.id, confirmed(draft.fields, phone=sam))
+    assert _count("select count(*) from public.debt where account_number = %s", account) == 0
+    found = find_debtor_by_phone(sam)
+    assert found is not None and (found.first_name, found.last_name) == ("Sam", "Doe")
