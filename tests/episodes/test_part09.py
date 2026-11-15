@@ -47,6 +47,7 @@ def client(responder: FakeProvider, no_instructions, tmp_path) -> TestClient:
         ),
         open_session=partial(JsonlSession.for_call, tmp_path / "sessions"),
         clock=lambda: NOW,
+        stages=False,  # the bare webhook; call stages are tested in test_part13
     )
     return TestClient(app)
 
@@ -187,7 +188,7 @@ def test_no_secret_configured_refuses_everything(responder, monkeypatch) -> None
     monkeypatch.delenv("AGENTPHONE_WEBHOOK_SECRET", raising=False)
     monkeypatch.setattr("phone.webhook._load_dotenv", lambda: None)
     provider = Provider(base_url="fake://local", model="fake", responder=responder)
-    app = TestClient(create_app(provider=provider, clock=lambda: NOW))
+    app = TestClient(create_app(provider=provider, clock=lambda: NOW, stages=False))
     body = _message()
     resp = _post(app, body, _headers(body))
     assert resp.status_code == 401

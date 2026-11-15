@@ -72,6 +72,7 @@ def _client(responder: FakeProvider, open_session: OpenSession, no_instructions)
         ),
         open_session=open_session,
         clock=lambda: NOW,
+        stages=False,  # the bare webhook; call stages are tested in test_part13
     )
     return TestClient(app)
 

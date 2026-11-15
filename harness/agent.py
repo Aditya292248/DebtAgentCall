@@ -8,7 +8,9 @@ itself is still stateless; memory is just us resending everything every turn.
 The system prompt lives in a file (``instructions/system.md`` by default).
 ``_payload()`` loads it and puts it first as a ``system`` message, ahead of the
 history. It is re-read on every call and never stored in ``self.messages``, so
-editing the file takes effect on the next turn.
+editing the file takes effect on the next turn. On a call, the webhook also sets
+``stage_prompt_path`` to the current stage's file (``instructions/stages/``),
+which is added after it in the same system message.
 
 If the model call fails, the user turn is taken back out, so the history never
 ends on a user message with no reply.
@@ -77,6 +79,7 @@ class Agent:
         max_context_tokens: int = MAX_CONTEXT_TOKENS,
         keep_head: int = KEEP_HEAD,
         keep_tail: int = KEEP_TAIL,
+        stage_prompt_path: str | Path | None = None,
     ) -> None:
         if max_steps < 1:
             raise ValueError("max_steps must allow at least one model call")
@@ -85,6 +88,7 @@ class Agent:
         self.model = model
         self.provider = provider
         self.system_prompt_path = Path(system_prompt_path)
+        self.stage_prompt_path = Path(stage_prompt_path) if stage_prompt_path else None
         self.tools = default_tools() if tools is None else tools
         self.max_steps = max_steps
         # Looked up here, not as a default argument, so tests can point every agent
@@ -132,9 +136,13 @@ class Agent:
         return ToolRegistry([*self.tools, skill_tool(skills)])
 
     def _payload(self, skills: list[Skill] | None = None) -> list[dict]:
-        """What the model receives: system prompt + skills menu (if any), then history."""
+        """What the model receives: system prompt + call stage instructions + skills menu
+        (each if any), then history."""
         skills = self.skills() if skills is None else skills
-        parts = [load_system_prompt(self.system_prompt_path), skills_prompt(skills)]
+        parts = [load_system_prompt(self.system_prompt_path)]
+        if self.stage_prompt_path is not None:
+            parts.append(load_system_prompt(self.stage_prompt_path))
+        parts.append(skills_prompt(skills))
         system_prompt = "\n\n".join(p for p in parts if p)
         system = [{"role": "system", "content": system_prompt}] if system_prompt else []
         # A new list, so whatever the provider holds onto doesn't change under it later.

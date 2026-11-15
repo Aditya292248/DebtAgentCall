@@ -7,6 +7,8 @@ come in through Supabase's API.
 
 ``find_account(name)`` is the debt for a person, matched on their full name
 without caring about case or extra spaces, or ``None``.
+``find_debtor_by_phone(e164)`` is the person and debt behind a phone number,
+which the call stages compare the caller's answers against.
 
 The pre-call loaders read what ``compliance.check_before_call`` needs for one
 debt: ``load_attempts``, ``load_phone`` and ``load_flags`` each read one thing,
@@ -24,6 +26,7 @@ import os
 import psycopg
 
 from compliance import Attempt, CallFacts, Flag, PhoneConsent
+from harness.call_state import Debtor
 from model.provider import _load_dotenv
 
 DEFAULT_DATABASE_URL = "postgresql://postgres:postgres@127.0.0.1:54322/postgres"
@@ -64,6 +67,38 @@ def find_account(name: str) -> dict | None:
         "balance": f"{balance_cents // 100}.{balance_cents % 100:02d}",
         "currency": "USD",
     }
+
+
+# The debtor and debt behind a phone number: what the call stages check against.
+DEBTOR_BY_PHONE_SQL = """
+    select p.id::text, d.id::text, p.first_name, p.last_name, p.dob, p.zip,
+           d.creditor, d.balance_cents
+    from public.phone ph
+    join public.debtor p on p.id = ph.debtor_id
+    join public.debt d on d.debtor_id = p.id
+    where ph.e164 = %s
+    order by d.account_number
+    limit 1
+"""
+
+
+def find_debtor_by_phone(e164: str) -> Debtor | None:
+    """Who a call to ``e164`` is for, and their debt, or None if the number is unknown."""
+    with connect() as conn:
+        row = conn.execute(DEBTOR_BY_PHONE_SQL, (e164.strip(),)).fetchone()
+    if row is None:
+        return None
+    debtor_id, debt_id, first, last, dob, zip_code, creditor, balance_cents = row
+    return Debtor(
+        debtor_id=debtor_id,
+        debt_id=debt_id,
+        first_name=first,
+        last_name=last,
+        dob=dob,
+        zip=zip_code,
+        creditor=creditor,
+        balance_cents=balance_cents,
+    )
 
 
 # --- pre-call loaders ----------------------------------------------------------
