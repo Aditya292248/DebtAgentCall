@@ -75,10 +75,9 @@ export function DebtorDetail({
         </ul>
       </section>
 
-      <div className="flex items-center gap-3">
-        <Button disabled>Simulate call</Button>
-        <span className="text-[11px] text-muted-foreground">Calling isn't switched on yet.</span>
-      </div>
+      <p className="text-[11px] text-muted-foreground">
+        To call {debt.name}, ask the agent on the right. Each call waits for your approval.
+      </p>
     </div>
   )
 }

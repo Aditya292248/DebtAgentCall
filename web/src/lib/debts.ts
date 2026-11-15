@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 
 import { fetchPrecall, type DebtCheck } from '@/lib/api'
+import { timeOf } from '@/lib/checks'
 import { supabase, supabaseConfigError } from '@/lib/supabase'
 
 /** One debt as the page shows it: the database row plus the pre-call result. */
@@ -15,6 +16,8 @@ export type DebtView = {
   status: string
   phones: { e164: string; line_type: string }[]
   check: DebtCheck | undefined
+  /** When `check` ran, in ms since the epoch (0 if unknown). */
+  checkedAt: number
   checkFailed: boolean
 }
 
@@ -36,7 +39,12 @@ type DebtorRow = {
 export const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' })
 
 /** The checks we got back, and which time they were run for. */
-type CheckResult = { key: string; checks: Map<string, DebtCheck>; error: string | null }
+type CheckResult = {
+  key: string
+  at: number
+  checks: Map<string, DebtCheck>
+  error: string | null
+}
 
 const NOW_REFRESH_MS = 60_000
 
@@ -79,12 +87,12 @@ export function useDebts(at: string | null) {
       .then((res) => {
         if (cancelled) return
         const checks = new Map(res.debts.map((d) => [d.account_number, d]))
-        setResult({ key, checks, error: null })
+        setResult({ key, at: timeOf(res.at), checks, error: null })
       })
       .catch((err: unknown) => {
         if (cancelled) return
         const error = err instanceof Error ? err.message : String(err)
-        setResult({ key, checks: new Map(), error })
+        setResult({ key, at: 0, checks: new Map(), error })
       })
     return () => {
       cancelled = true
@@ -112,6 +120,7 @@ export function useDebts(at: string | null) {
       status: d.status,
       phones: p.phone,
       check: current?.checks.get(d.account_number),
+      checkedAt: current?.at ?? 0,
       // Checked, but with no answer for this debt: unknown, never assumed fine.
       checkFailed: current !== null && !current.checks.has(d.account_number),
     })),
