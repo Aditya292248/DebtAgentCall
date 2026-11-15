@@ -15,6 +15,12 @@ debt: ``load_attempts``, ``load_phone`` and ``load_flags`` each read one thing,
 and ``load_call_facts(account_number)`` puts them together as ``CallFacts``.
 They only load; all the deciding stays in ``compliance/``.
 
+``save_flag``, ``revoke_phone``, ``save_dispute`` and ``mark_disputed`` are what a stop
+trigger writes during a
+call (``phone/webhook.py``). Like ``compliance.audit.record`` they take an open
+connection and leave committing to the caller, so the flag and its audit row
+commit together.
+
 The tables and seed data live in ``supabase/``. Run ``supabase start`` to get a
 local database, and ``supabase db reset`` to reload the seed.
 """
@@ -194,3 +200,59 @@ def load_call_facts(
         attempts=load_attempts(conn, debt_id),
         flags=load_flags(conn, debt_id),
     )
+
+
+# --- writes from a live call ---------------------------------------------------
+
+INSERT_FLAG_SQL = """
+    insert into public.flags (debtor_id, debt_id, kind, data, source)
+    values (%s, %s, %s, %s, %s)
+"""
+
+# Robocall consent ends when the person says stop (TCPA). Only the number we
+# called, and only if it isn't revoked already, so the first time is kept.
+REVOKE_PHONE_SQL = """
+    update public.phone set revoked_at = now()
+    where debtor_id = %s and e164 = %s and revoked_at is null
+"""
+
+
+# Only an active debt moves: a closed or paused one keeps its status.
+MARK_DISPUTED_SQL = "update public.debt set status = 'disputed' where id = %s and status = 'active'"
+
+
+INSERT_DISPUTE_SQL = """
+    insert into public.dispute (call_id, debt_id, reason, verified)
+    values (%s, %s, %s, %s)
+"""
+
+
+def save_dispute(
+    conn: psycopg.Connection, call_id: str, debt_id: str, reason: str, verified: bool
+) -> None:
+    """Add a dispute row, the same table ``log_dispute`` writes. One that isn't
+    ``verified`` is kept for a person to review. Committing is left to the caller."""
+    conn.execute(INSERT_DISPUTE_SQL, (call_id, debt_id, reason, verified))
+
+
+def mark_disputed(conn: psycopg.Connection, debt_id: str) -> bool:
+    """Set an active debt's status to ``disputed``; True if it changed.
+
+    Committing is left to the caller.
+    """
+    return conn.execute(MARK_DISPUTED_SQL, (debt_id,)).rowcount == 1
+
+
+def save_flag(conn: psycopg.Connection, flag: Flag, debtor_id: str) -> None:
+    """Add one flag for ``debtor_id``. Committing is left to the caller."""
+    from psycopg.types.json import Jsonb
+
+    conn.execute(
+        INSERT_FLAG_SQL,
+        (debtor_id, flag.debt_id, flag.kind, Jsonb(dict(flag.data)), flag.source),
+    )
+
+
+def revoke_phone(conn: psycopg.Connection, debtor_id: str, e164: str) -> None:
+    """Mark the number's consent as revoked now. Committing is left to the caller."""
+    conn.execute(REVOKE_PHONE_SQL, (debtor_id, e164.strip()))

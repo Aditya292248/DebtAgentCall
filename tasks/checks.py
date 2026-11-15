@@ -1388,3 +1388,94 @@ def _demo_part21() -> None:
 
 ACCEPTANCE["part-21"] = _accept_part21
 DEMOS["part-21"] = _demo_part21
+
+
+# ----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# live checks: stop triggers before the model, the sentence filter after it
+# ----------------------------------------------------------------------------
+
+
+def _part19_call(script_name: str, reply: str | None) -> tuple:
+    """Play one script with stages on; stops are kept in a list, never written.
+
+    ``reply`` is what a fake model says; None means a model that must not be
+    called at all. Returns ``(turns, stops, blocked, model_calls)``.
+    """
+    import secrets
+    import tempfile
+    from functools import partial
+    from pathlib import Path
+
+    from fastapi.testclient import TestClient
+
+    from harness.memory import JsonlSession
+    from model import fake
+    from phone.webhook import create_app
+    from sim.agentphone_sim import load_script, run_script
+
+    model_calls: list[str] = []
+
+    def must_not_run(messages: list) -> str:
+        model_calls.append(str(messages[-1].get("content")))
+        return "the model should not have been called"
+
+    provider = fake(default=reply) if reply is not None else fake(scripted=must_not_run)
+    stops: list = []
+    blocked: list = []
+    secret = secrets.token_hex(16)
+    app = create_app(
+        provider=provider,
+        secret=secret,
+        open_session=partial(
+            JsonlSession.for_call, Path(tempfile.mkdtemp(prefix="debtagent-p19-"))
+        ),
+        find_debtor=_part13_debtors().get,
+        audit=lambda decision, call_id, debt_id: blocked.append(decision),
+        record_stop=stops.append,
+    )
+    turns = run_script(load_script(script_name), TestClient(app), secret)
+    return turns, stops, blocked, model_calls
+
+
+def _accept_part19() -> bool:
+    from compliance.triggers import CLOSES
+
+    turns, stops, _, model_calls = _part19_call("sam_stop_calling", None)
+    for caller, agent in turns:
+        print(f"  caller> {caller}\n   agent> {agent}")
+    stopped = (
+        turns[-1][1] == CLOSES["cease"]
+        and not model_calls
+        and [s.trigger.flag for s in stops] == ["cease"]
+    )
+    print(f"  stop calling: {'ok' if stopped else 'BAD'} (model calls: {len(model_calls)})")
+
+    turns, _, blocked, _ = _part19_call("sam_balance", _PART13_LEAKY)
+    replies = [reply for _, reply in turns]
+    filtered = bool(blocked) and not any("$" in r or "balance" in r.lower() for r in replies)
+    print(
+        f"  balance before verify dropped: {'ok' if filtered else 'BAD'} ({len(blocked)} blocked)"
+    )
+    return stopped and filtered
+
+
+def _demo_part19() -> None:
+    print("-- the caller says stop: the model is never asked --")
+    turns, stops, _, model_calls = _part19_call("sam_stop_calling", None)
+    for caller, agent in turns:
+        print(f"  caller> {caller}\n   agent> {agent}")
+    for s in stops:
+        print(f"  saved: flag={s.trigger.flag} stage={s.stage} matched={s.trigger.matched!r}")
+    print(f"  model calls: {len(model_calls)}\n")
+    print("-- a model that says the balance before anyone is verified --")
+    turns, _, blocked, _ = _part19_call("sam_balance", _PART13_LEAKY)
+    for caller, agent in turns:
+        print(f"  caller> {caller}\n   agent> {agent}")
+    for d in blocked:
+        print(f"  (dropped before it was said, {d.rule_id}) {d.evidence.get('sentence')}")
+    print("\n   # code ends the call on a stop request and checks every sentence the model writes")
+
+
+ACCEPTANCE["part-19"] = lambda: ACCEPTANCE["part-13"]() and _accept_part19()
+DEMOS["part-19"] = _demo_part19

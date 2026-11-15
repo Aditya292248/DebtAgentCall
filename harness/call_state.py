@@ -5,7 +5,7 @@ Every call has to go in this order:
     GREETING -> VERIFY -> DISCLOSE -> DISCUSS -> WRAP
 
 with two side exits, ``THIRD_PARTY`` (someone else answered) and ``STOPPED``
-(the person asked us to stop; set by the in-call triggers, which come later).
+(the person asked us to stop; set by the stop triggers in ``phone/webhook.py``).
 ``harness/stages.py`` decides each move. This file only holds the facts and
 saves them.
 

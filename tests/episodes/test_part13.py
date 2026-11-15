@@ -242,7 +242,7 @@ def test_wrong_number_closes_without_the_model(tmp_path: Path) -> None:
     call = Call(tmp_path)
     turns = call.play("wrong_number")
     assert turns[-1][1] == WRONG_NUMBER_CLOSE
-    assert call.stages()[-1] == Stage.WRAP
+    assert call.stages()[-1] == Stage.STOPPED  # caught by the stop triggers first
     assert call.responder.calls == []
 
 

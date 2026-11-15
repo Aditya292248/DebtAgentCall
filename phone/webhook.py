@@ -18,18 +18,34 @@ One caller turn, with call stages on (the default):
 1. Find who the call is for from the phone number we dialed (``data.to`` on an
    outbound call), and open the session for ``data.callId``. An unknown number,
    or a call with no id, gets a fixed goodbye: no model, no debt facts.
-2. Load the call's ``CallState`` and run ``harness.stages.next_stage``. Turns
+2. Run the stop triggers (``compliance.triggers.detect``) on what the caller
+   said, before anything else sees it. If one fires (a lawyer, bankruptcy, a
+   death, "stop calling", a dispute, a recording objection, a wrong number):
+   save its flag (for "stop calling", also revoke the number's consent; for a
+   dispute, add a ``dispute`` row and mark the debt ``disputed`` so the dialer
+   stops) and an audit row
+   (``kind="stop_trigger"``), all in one transaction; then move the call to
+   STOPPED, speak the trigger's fixed close and hang up. The model is
+   not called. Before the person is verified a dispute changes nothing on the
+   debt and gets a neutral goodbye (it may be a stranger saying "this number
+   isn't mine"); its ``dispute`` row says ``verified = false`` for a person to
+   review, the same as ``log_dispute`` in ``harness/call_tools.py``. If saving fails,
+   the close and hangup still happen and the failure is logged as an error
+   for a person to fix: the call never goes on because a write failed.
+3. Load the call's ``CallState`` and run ``harness.stages.next_stage``. Turns
    of the same call wait for each other, so they never see stale state.
-3. If it gives a fixed line (greeting, identity check, disclosure, closes),
+4. If it gives a fixed line (greeting, identity check, disclosure, closes),
    speak it. The model is not called.
-4. Otherwise run the agent with ``system.md`` plus the stage's file from
+5. Otherwise run the agent with ``system.md`` plus the stage's file from
    ``instructions/stages/``. Until the person is verified and has heard the
    disclosure, it gets no tools and no skills.
-5. Cut the reply into sentences and check each one with
-   ``compliance.check_sentence``. Blocked sentences are dropped and written to
-   the audit log (``kind="utterance_blocked"``). If nothing is left, a fixed
-   safe line is spoken instead. The saved history keeps what was really said.
-6. Save the new ``CallState`` in the session.
+6. Cut the reply into sentences and check each one with
+   ``compliance.check_sentence``, using what the call state says so far
+   (verified, disclosed). Blocked sentences are dropped and written to the
+   audit log (``kind="utterance_blocked"``). If nothing is left, a fixed safe
+   line is spoken instead. The saved history keeps what was really said. A
+   failed audit write is logged; the blocked sentence is still not spoken.
+7. Save the new ``CallState`` in the session.
 
 ``create_app(stages=False)`` is the bare webhook from before: every turn goes
 straight to the model, unchecked. Only the older tests use it.
@@ -40,25 +56,27 @@ are kept in Postgres (``call_message``) unless ``open_session`` says otherwise.
 
 Run it with ``uv run serve``. Tests build their own app with ``create_app``,
 passing a fake model, a test secret, JSONL sessions in a temp folder, and their
-own debtor lookup and audit log.
+own debtor lookup, audit log and stop recorder.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
 import zlib
 from collections import OrderedDict
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
-from compliance import Decision, SpeechState, check_sentence, split_sentences
+from compliance import Decision, Flag, SpeechState, block, check_sentence, split_sentences
+from compliance.triggers import Trigger, detect
 from harness import Agent
 from harness.call_state import CallState, Debtor, Stage, load_state, save_state
 from harness.memory import PostgresSession, Session
@@ -74,6 +92,13 @@ SECRET_ENV = "AGENTPHONE_WEBHOOK_SECRET"
 DIDNT_CATCH = "Sorry, I didn't catch that. Could you say it again?"
 SAFE_LINE = "Sorry, could you say that again?"  # when every sentence was blocked
 CANT_CONTINUE = "Sorry, I can't continue this call right now. Goodbye."
+STOP_SOURCE = "live_call"  # flags.source for a flag a stop trigger set
+# A lawyer represents the person on one debt; a stop request, a bankruptcy or a
+# death is about the person, so those flags cover every debt.
+_FLAG_THIS_DEBT_ONLY = frozenset({"attorney"})
+# Said instead of the dispute close before verification: promises nothing and
+# doesn't hint that there is a debt.
+UNVERIFIED_DISPUTE_CLOSE = "Thank you for letting me know. Goodbye."
 MAX_REMEMBERED_IDS = 10_000  # enough to spot repeats, without growing forever
 # Turns of the same call run one at a time. A fixed set of locks, picked by call
 # id, so memory doesn't grow with calls; two calls rarely share one. This only
@@ -82,6 +107,67 @@ _CALL_LOCKS = [threading.Lock() for _ in range(64)]
 
 FindDebtor = Callable[[str], Debtor | None]
 Audit = Callable[[Decision, str, str | None], None]  # (decision, call_id, debt_id)
+
+log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class Stop:
+    """A stop trigger that fired on a live call, and what to write down for it."""
+
+    trigger: Trigger
+    call_id: str
+    debtor: Debtor
+    phone: str  # the number we called
+    stage: Stage | None  # where the call was; None if its state couldn't be read
+    verified: bool = False  # whether the person had passed the identity check
+
+    @property
+    def marks_disputed(self) -> bool:
+        """Only the verified debtor can dispute the debt; anyone else changes nothing."""
+        return self.trigger.kind == "dispute" and self.verified
+
+    @property
+    def close(self) -> str:
+        """The fixed line to say before hanging up."""
+        if self.trigger.kind == "dispute" and not self.verified:
+            return UNVERIFIED_DISPUTE_CLOSE
+        return self.trigger.close
+
+    def flag(self) -> Flag | None:
+        """The flag to save, or None for a trigger that sets no flag."""
+        kind = self.trigger.flag
+        if kind is None:
+            return None
+        return Flag(
+            kind=kind,
+            debt_id=self.debtor.debt_id if kind in _FLAG_THIS_DEBT_ONLY else None,
+            data={"call_id": self.call_id, "matched": self.trigger.matched},
+            source=STOP_SOURCE,
+        )
+
+    def decision(self, debt_disputed: bool | None = None) -> Decision:
+        """The audit row: the call was stopped, and why.
+
+        ``debt_disputed`` says whether the debt's status really moved to
+        ``disputed`` (False if it wasn't active); None when nothing was tried.
+        """
+        t = self.trigger
+        return block(
+            t.kind,
+            f"caller said {t.matched!r}, so the call was stopped",
+            {
+                "matched": t.matched,
+                "flag": t.flag,
+                "escalate": t.escalate,
+                "stage": self.stage.value if self.stage else None,
+                "verified": self.verified,
+                "debt_disputed": debt_disputed,
+            },
+        )
+
+
+RecordStop = Callable[[Stop], None]
 
 
 class _SeenIds:
@@ -119,6 +205,33 @@ def audit_to_db(decision: Decision, call_id: str, debt_id: str | None) -> None:
         record(conn, decision, kind="utterance_blocked", call_id=call_id, debt_id=debt_id)
 
 
+def record_stop_in_db(stop: Stop) -> None:
+    """Save a stop trigger's flag, consent or debt status change and audit row together."""
+    from compliance.audit import record
+    from harness.db import connect, mark_disputed, revoke_phone, save_dispute, save_flag
+
+    with connect() as conn:  # commits on a clean exit, rolls back on an error
+        if (flag := stop.flag()) is not None:
+            save_flag(conn, flag, stop.debtor.debtor_id)
+        if stop.trigger.kind == "cease":
+            revoke_phone(conn, stop.debtor.debtor_id, stop.phone)
+        disputed = None
+        if stop.trigger.kind == "dispute":
+            # Kept either way, like log_dispute: a person reviews an unverified one.
+            reason = f"caller said {stop.trigger.matched!r}"
+            save_dispute(conn, stop.call_id, stop.debtor.debt_id, reason, stop.verified)
+        if stop.marks_disputed:
+            # The close promises a follow-up; until then the dialer must not call.
+            disputed = mark_disputed(conn, stop.debtor.debt_id)
+        record(
+            conn,
+            stop.decision(disputed),
+            kind="stop_trigger",
+            call_id=stop.call_id,
+            debt_id=stop.debtor.debt_id,
+        )
+
+
 def create_app(
     *,
     provider: Provider | None = None,
@@ -129,6 +242,7 @@ def create_app(
     stages: bool = True,
     find_debtor: FindDebtor = find_debtor_in_db,
     audit: Audit = audit_to_db,
+    record_stop: RecordStop = record_stop_in_db,
 ) -> FastAPI:
     """The webhook app.
 
@@ -140,13 +254,14 @@ def create_app(
     Postgres by default, or e.g. ``partial(JsonlSession.for_call, folder)``.
     ``find_debtor(phone)`` and ``audit(decision, call_id, debt_id)`` read the
     debtor and record blocked sentences; both use the database unless replaced.
+    ``record_stop(stop)`` saves what a stop trigger found (database by default).
     ``stages=False`` turns the call stages and the sentence filter off.
     """
     if secret is None:
         _load_dotenv()
         secret = os.environ.get(SECRET_ENV) or None
     make_agent = agent_factory or (lambda session: Agent(provider=provider, session=session))
-    turn = _Turn(make_agent, open_session, stages, find_debtor, audit)
+    turn = _Turn(make_agent, open_session, stages, find_debtor, audit, record_stop)
     seen = _SeenIds()
     app = FastAPI(title="DebtAgentCall webhook")
     app.state.seen = seen
@@ -186,6 +301,7 @@ class _Turn:
     stages: bool
     find_debtor: FindDebtor
     audit: Audit
+    record_stop: RecordStop
 
 
 async def _handle(envelope: dict, turn: _Turn) -> dict:
@@ -224,7 +340,56 @@ def _staged_turn(turn: _Turn, data: dict, transcript: str) -> dict:
     # One turn per call at a time, so two webhooks for the same call can't both
     # read the same state (e.g. two wrong answers each counted as the first try).
     with _CALL_LOCKS[zlib.crc32(call_id.encode()) % len(_CALL_LOCKS)]:
+        # Stop triggers come first: the model never sees a turn that must end the call.
+        if hits := detect(transcript):
+            return _stop_turn(turn, call_id, debtor, phone, transcript, hits)
         return _locked_turn(turn, call_id, debtor, transcript)
+
+
+def _stop_turn(
+    turn: _Turn, call_id: str, debtor: Debtor, phone: str, transcript: str, hits: list[Trigger]
+) -> dict:
+    """Save the stop, then the fixed close and hang up, whatever fails on the way."""
+    session: Session | None = None
+    state: CallState | None = None
+    try:
+        session = turn.open_session(call_id)
+        state = load_state(session) or CallState.new(call_id, debtor)
+    except Exception:
+        log.exception("call %s: could not read the call state for a stop trigger", call_id)
+    verified = state is not None and state.verified  # unreadable state: not verified
+    trigger = _pick(hits, verified)
+    stop = Stop(trigger, call_id, debtor, phone, state.stage if state else None, verified)
+    try:
+        turn.record_stop(stop)
+    except Exception:
+        # Fail closed: the call still ends. A person has to save this by hand.
+        log.exception(
+            "call %s: stop trigger %r (flag %s) for debt %s was NOT saved; record it by hand",
+            call_id,
+            trigger.kind,
+            trigger.flag,
+            debtor.debt_id,
+        )
+    if session is not None and state is not None:
+        try:
+            session.append({"role": "user", "content": transcript})
+            session.append({"role": "assistant", "content": stop.close})
+            save_state(session, replace(state, stage=Stage.STOPPED, turns=state.turns + 1))
+        except Exception:
+            log.exception("call %s: could not save the STOPPED state", call_id)
+    return say_and_hangup(stop.close)
+
+
+def _pick(hits: list[Trigger], verified: bool) -> Trigger:
+    """The trigger to act on. Before verification a dispute gives way to any other
+    hit ("that phone wasn't mine, wrong number" is a wrong number), since a
+    dispute only means something from the debtor."""
+    if not verified:
+        others = [t for t in hits if t.kind != "dispute"]
+        if others:
+            return others[0]
+    return hits[0]
 
 
 def _locked_turn(turn: _Turn, call_id: str, debtor: Debtor, transcript: str) -> dict:
@@ -257,7 +422,11 @@ def _locked_turn(turn: _Turn, call_id: str, debtor: Debtor, transcript: str) -> 
         agent.messages[-1] = {**last, "content": spoken}
         session.replace(agent.messages)
     for decision in blocked:
-        turn.audit(decision, call_id, debtor.debt_id)
+        try:
+            turn.audit(decision, call_id, debtor.debt_id)
+        except Exception:
+            # The sentence was already dropped; only the record of it is missing.
+            log.exception("call %s: blocked sentence (%s) not audited", call_id, decision.rule_id)
     save_state(session, state)
     return say(spoken)
 

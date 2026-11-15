@@ -1,0 +1,7 @@
+# Sam answers and asks us to stop: the call must end without the model.
+name: sam_stop_calling
+from: "+12135550101"
+lines:
+  - "Hello?"
+  - "Stop calling me."
+  - "Are you still there?"
