@@ -20,11 +20,12 @@ answer, with this stage's instructions".
     THIRD_PARTY  Fixed question: a good time to reach the person. Their answer
                  gets a fixed goodbye -> WRAP. A question back goes to the model.
     WRAP         The call is ending. Fixed closes also hang up.
-    STOPPED      Set by stop triggers (a later change). Fixed close only.
+    STOPPED      Set by the stop triggers, which the webhook runs before this
+                 function (``compliance/triggers.py``). Fixed close only.
 
 The text matching is kept small and cautious: when unsure, the call does not
 move forward. A "yes" with a "no" or "not" in it is not a yes. The full list of
-stop phrases (lawyer, bankruptcy, "stop calling") comes in a separate change.
+stop phrases (lawyer, bankruptcy, "stop calling") is ``compliance/triggers.py``.
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
+from compliance.triggers import CLOSES
 from harness.call_state import CallState, Debtor, Stage
 
 STAGES_DIR = Path(__file__).resolve().parent.parent / "instructions" / "stages"
@@ -65,7 +67,7 @@ DISCLOSURE = (
 )
 LOCATION_ASK = "Okay, thank you. Is there a good time to reach {full_name}?"
 THIRD_PARTY_CLOSE = "Thank you for your help. Goodbye."
-WRONG_NUMBER_CLOSE = "Sorry to bother you. Goodbye."
+WRONG_NUMBER_CLOSE = CLOSES["wrong_number"]  # one wrong-number goodbye, wherever it's caught
 STOPPED_CLOSE = "Thank you. Goodbye."
 
 # --- what the caller said -----------------------------------------------------

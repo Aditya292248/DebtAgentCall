@@ -19,8 +19,8 @@ Choices:
   - ``cease`` sets the ``cease`` flag, not ``opt_out_phone``. "Stop calling"
     may mean this number only, but ``cease`` stops every call and
     ``check_cease`` blocks on either, so the stricter one is the safe guess.
-    It also counts as revoking robocall consent (TCPA); the later wiring sets
-    ``phone.revoked_at`` too.
+    It also counts as revoking robocall consent (TCPA), so the webhook sets
+    ``phone.revoked_at`` on the number it called too.
   - ``dispute`` sets no flag. A dispute is not a ``flags.kind``; it is the
     ``disputed`` status of the debt, which ``log_dispute`` sets later.
   - ``wrong_number`` and ``recording_objection`` set no flag either: no flag
@@ -38,8 +38,10 @@ the first one's ``close`` is the line to say.
 ``combine(regex_hits, classifier_hits)`` merges these hits with those of a
 later small classifier: a trigger fires if either one finds it.
 
-Nothing here is wired into calls yet, and nothing is written to the database.
-This is not legal advice.
+The webhook (``phone/webhook.py``) runs ``detect`` on every caller turn
+before the model, saves the flag, sets ``phone.revoked_at`` for ``cease``,
+writes an audit row and ends the call with the first hit's ``close``. This
+module itself writes nothing. This is not legal advice.
 """
 
 from __future__ import annotations
