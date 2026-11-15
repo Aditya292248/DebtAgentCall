@@ -22,7 +22,8 @@ Choices:
     It also counts as revoking robocall consent (TCPA), so the webhook sets
     ``phone.revoked_at`` on the number it called too.
   - ``dispute`` sets no flag. A dispute is not a ``flags.kind``; it is the
-    ``disputed`` status of the debt, which ``log_dispute`` sets later.
+    ``disputed`` status of the debt, which the webhook sets, so the dialer
+    (which only calls ``active`` debts) stops until someone reviews it.
   - ``wrong_number`` and ``recording_objection`` set no flag either: no flag
     kind fits, and neither one stops future calls to the right person.
 

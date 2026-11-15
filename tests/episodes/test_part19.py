@@ -12,7 +12,8 @@ What it checks, through the signed simulator and the webhook with stages on:
   - a model scripted to say the balance before verification has that sentence
     dropped, and an ``utterance_blocked`` decision is recorded
   - a failed audit write never lets the blocked sentence through
-  - ``record_stop_in_db`` writes the flag, revokes the number's consent and
+  - ``record_stop_in_db`` writes the flag, revokes the number's consent (or
+    marks a disputed debt ``disputed``, so the dialer skips it) and
     adds a ``stop_trigger`` audit row (``db`` test)
 """
 
@@ -250,14 +251,13 @@ def test_a_failed_audit_write_never_lets_the_sentence_through(
 # --- the database writer ---------------------------------------------------------
 
 
-@pytest.mark.db
-def test_record_stop_in_db_writes_flag_consent_and_audit_row() -> None:
-    from compliance.triggers import detect
+@pytest.fixture
+def throwaway_debtor():  # type: ignore[no-untyped-def]
+    """A made-up debtor, debt and phone in the local database, deleted afterwards."""
     from harness.db import connect
 
     tag = uuid.uuid4().hex[:8]
     phone = f"+1999{int(tag, 16) % 10_000_000:07d}"
-    call_id = f"test_{tag}_stop"
     with connect() as conn:
         debtor_id = conn.execute(
             "insert into public.debtor (first_name, last_name, dob, address, zip, state) "
@@ -275,27 +275,105 @@ def test_record_stop_in_db_writes_flag_consent_and_audit_row() -> None:
             (debtor_id, phone),
         )
     debtor = Debtor(debtor_id, debt_id, "Test", "Stopper", date(1990, 1, 1), "90012", "T", 100)
-    (trigger,) = detect("stop calling me")
     try:
-        record_stop_in_db(Stop(trigger, call_id, debtor, phone, Stage.DISCUSS))
-        with connect() as conn:
-            flags = conn.execute(
-                "select kind, debt_id, source, data->>'call_id' from public.flags "
-                "where debtor_id = %s",
-                (debtor_id,),
-            ).fetchall()
-            revoked = conn.execute(
-                "select revoked_at is not null from public.phone where debtor_id = %s",
-                (debtor_id,),
-            ).fetchone()[0]
-            audit = conn.execute(
-                "select kind, rule_id, decision, debt_id::text from public.audit_event "
-                "where call_id = %s",
-                (call_id,),
-            ).fetchall()
-        assert flags == [("cease", None, "live_call", call_id)]
-        assert revoked is True
-        assert audit == [("stop_trigger", "cease", "block", debt_id)]
+        yield debtor, phone, f"test_{tag}_stop"
     finally:
         with connect() as conn:  # flags, phone and debt go with the debtor
             conn.execute("delete from public.debtor where id = %s", (debtor_id,))
+
+
+def _written(debtor: Debtor, call_id: str) -> tuple:
+    from harness.db import connect
+
+    with connect() as conn:
+        flags = conn.execute(
+            "select kind, debt_id, source, data->>'call_id' from public.flags where debtor_id = %s",
+            (debtor.debtor_id,),
+        ).fetchall()
+        revoked = conn.execute(
+            "select revoked_at is not null from public.phone where debtor_id = %s",
+            (debtor.debtor_id,),
+        ).fetchone()[0]
+        status = conn.execute(
+            "select status from public.debt where id = %s", (debtor.debt_id,)
+        ).fetchone()[0]
+        audit = conn.execute(
+            "select kind, rule_id, decision, debt_id::text from public.audit_event "
+            "where call_id = %s",
+            (call_id,),
+        ).fetchall()
+    return flags, revoked, status, audit
+
+
+@pytest.mark.db
+def test_record_stop_in_db_writes_flag_consent_and_audit_row(throwaway_debtor) -> None:  # type: ignore[no-untyped-def]
+    from compliance.triggers import detect
+
+    debtor, phone, call_id = throwaway_debtor
+    (trigger,) = detect("stop calling me")
+    record_stop_in_db(Stop(trigger, call_id, debtor, phone, Stage.DISCUSS))
+    flags, revoked, status, audit = _written(debtor, call_id)
+    assert flags == [("cease", None, "live_call", call_id)]
+    assert revoked is True
+    assert status == "active"
+    assert audit == [("stop_trigger", "cease", "block", debtor.debt_id)]
+
+
+@pytest.mark.db
+def test_a_dispute_marks_the_debt_disputed_so_the_dialer_stops(throwaway_debtor) -> None:  # type: ignore[no-untyped-def]
+    from compliance.triggers import detect
+    from dialer.service import check_debt_status
+
+    debtor, phone, call_id = throwaway_debtor
+    (trigger,) = detect("That's not my debt.")
+    record_stop_in_db(Stop(trigger, call_id, debtor, phone, Stage.DISCUSS))
+    flags, revoked, status, audit = _written(debtor, call_id)
+    assert flags == []
+    assert revoked is False
+    assert status == "disputed"
+    assert not check_debt_status(status).allow  # the next campaign run skips it
+    assert audit == [("stop_trigger", "dispute", "block", debtor.debt_id)]
+
+
+class _RecordingConn:
+    """Stands in for one psycopg connection: keeps every statement, commits nothing."""
+
+    def __init__(self) -> None:
+        self.sql: list[str] = []
+
+    def __enter__(self) -> _RecordingConn:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def execute(self, sql: str, params: tuple = ()) -> _RecordingConn:
+        self.sql.append(" ".join(sql.split()))
+        return self
+
+    def fetchone(self) -> tuple:
+        return (1, "0" * 64)  # what audit.record reads back: seq, hash
+
+
+@pytest.mark.parametrize(
+    ("said", "expected"),
+    [
+        ("stop calling me", ["insert into public.flags", "update public.phone", "audit_event"]),
+        ("That's not my debt.", ["update public.debt set status = 'disputed'", "audit_event"]),
+        ("I have a lawyer.", ["insert into public.flags", "audit_event"]),
+        ("wrong number", ["audit_event"]),
+    ],
+)
+def test_record_stop_in_db_writes_on_one_connection(
+    monkeypatch: pytest.MonkeyPatch, said: str, expected: list[str]
+) -> None:
+    import harness.db
+    from compliance.triggers import detect
+
+    conn = _RecordingConn()
+    monkeypatch.setattr(harness.db, "connect", lambda: conn)
+    trigger = detect(said)[0]
+    record_stop_in_db(Stop(trigger, "call_1", SAM, SAM_PHONE, Stage.DISCUSS))
+    assert len(conn.sql) == len(expected)
+    for statement, wanted in zip(conn.sql, expected, strict=True):
+        assert wanted in statement, statement

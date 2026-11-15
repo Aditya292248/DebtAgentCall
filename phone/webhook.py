@@ -21,9 +21,10 @@ One caller turn, with call stages on (the default):
 2. Run the stop triggers (``compliance.triggers.detect``) on what the caller
    said, before anything else sees it. If one fires (a lawyer, bankruptcy, a
    death, "stop calling", a dispute, a recording objection, a wrong number):
-   save its flag (and for "stop calling", revoke the number's consent) with an
-   audit row (``kind="stop_trigger"``), all in one transaction; then move the
-   call to STOPPED, speak the trigger's fixed close and hang up. The model is
+   save its flag (for "stop calling", also revoke the number's consent; for a
+   dispute, mark the debt ``disputed`` so the dialer stops) and an audit row
+   (``kind="stop_trigger"``), all in one transaction; then move the call to
+   STOPPED, speak the trigger's fixed close and hang up. The model is
    not called. If saving fails, the close and hangup still happen and the
    failure is logged as an error for a person to fix: the call never goes on
    because a write failed.
@@ -179,15 +180,18 @@ def audit_to_db(decision: Decision, call_id: str, debt_id: str | None) -> None:
 
 
 def record_stop_in_db(stop: Stop) -> None:
-    """Save a stop trigger's flag, consent revocation and audit row in one transaction."""
+    """Save a stop trigger's flag, consent or debt status change and audit row together."""
     from compliance.audit import record
-    from harness.db import connect, revoke_phone, save_flag
+    from harness.db import connect, mark_disputed, revoke_phone, save_flag
 
     with connect() as conn:  # commits on a clean exit, rolls back on an error
         if (flag := stop.flag()) is not None:
             save_flag(conn, flag, stop.debtor.debtor_id)
         if stop.trigger.kind == "cease":
             revoke_phone(conn, stop.debtor.debtor_id, stop.phone)
+        if stop.trigger.kind == "dispute":
+            # The close promises a follow-up; until then the dialer must not call.
+            mark_disputed(conn, stop.debtor.debt_id)
         record(
             conn,
             stop.decision(),

@@ -15,7 +15,7 @@ debt: ``load_attempts``, ``load_phone`` and ``load_flags`` each read one thing,
 and ``load_call_facts(account_number)`` puts them together as ``CallFacts``.
 They only load; all the deciding stays in ``compliance/``.
 
-``save_flag`` and ``revoke_phone`` are what a stop trigger writes during a
+``save_flag``, ``revoke_phone`` and ``mark_disputed`` are what a stop trigger writes during a
 call (``phone/webhook.py``). Like ``compliance.audit.record`` they take an open
 connection and leave committing to the caller, so the flag and its audit row
 commit together.
@@ -214,6 +214,15 @@ REVOKE_PHONE_SQL = """
     update public.phone set revoked_at = now()
     where debtor_id = %s and e164 = %s and revoked_at is null
 """
+
+
+# Only an active debt moves: a closed or paused one keeps its status.
+MARK_DISPUTED_SQL = "update public.debt set status = 'disputed' where id = %s and status = 'active'"
+
+
+def mark_disputed(conn: psycopg.Connection, debt_id: str) -> None:
+    """Set the debt's status to ``disputed``. Committing is left to the caller."""
+    conn.execute(MARK_DISPUTED_SQL, (debt_id,))
 
 
 def save_flag(conn: psycopg.Connection, flag: Flag, debtor_id: str) -> None:
