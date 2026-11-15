@@ -1479,3 +1479,100 @@ def _demo_part19() -> None:
 
 ACCEPTANCE["part-19"] = lambda: ACCEPTANCE["part-13"]() and _accept_part19()
 DEMOS["part-19"] = _demo_part19
+
+
+# ----------------------------------------------------------------------------
+# chat panel in the web UI: the real API, a fake model, a fake phone
+# ----------------------------------------------------------------------------
+
+_PART24_CALL = r"^\s*(?:please\s+)?call\s+(.+?)[.!?\s]*$"
+
+
+def _part24_fake_model(messages: list[dict]):
+    """A stand-in operator model: "call <name>" -> find, check, ask to place the call.
+
+    It asks to place the call even when the check blocks it, so the page shows a
+    blocked approval card (no Approve button) as well as an allowed one.
+    """
+    import json
+    import re
+
+    from model.fake import tool_call, tool_reply
+
+    last = messages[-1]
+    call_id = f"demo_{len(messages)}"
+    if last.get("role") != "tool":
+        found = re.match(_PART24_CALL, str(last.get("content") or ""), re.IGNORECASE)
+        if not found:
+            return 'This is the fake model. Try "call Sam Doe" or "call Casey Morgan".'
+        return tool_reply(tool_call("find_debtor", call_id, query=found.group(1)))
+    asked = {
+        c["id"]: c["function"]["name"]
+        for m in messages
+        if m.get("role") == "assistant"
+        for c in m.get("tool_calls") or []
+    }
+    tool = asked.get(last.get("tool_call_id"))
+    body = str(last.get("content") or "")
+    if body.startswith("error"):
+        return f"That didn't work: {body}"
+    data = json.loads(body)
+    if tool == "find_debtor":
+        first = data["matches"][0]
+        return tool_reply(tool_call("check_call", call_id, debtor_id=first["id"]))
+    if tool == "check_call":
+        return tool_reply(tool_call("place_call", call_id, debtor_id=data["debtor_id"]))
+    if tool == "place_call":
+        return (
+            f"I asked to call {data['name']} ({data['debtor_id']}). Nothing has been dialed: "
+            "approve or deny it in the card below."
+        )
+    return "Done."
+
+
+def _demo_part24() -> None:
+    """Serve the real chat API with a fake model and a fake phone, for ``npm run dev``."""
+    import os
+    import tempfile
+
+    import uvicorn
+
+    from harness import api
+    from harness.memory import JsonlSession
+    from harness.operator import Operator
+    from model import fake
+    from phone.client import FakePhoneClient
+
+    real = _llm_configured()
+    provider = None if real else fake(scripted=_part24_fake_model)
+    root = tempfile.mkdtemp(prefix="chat-ui-demo-")
+    phone = FakePhoneClient()
+
+    def make_operator(session_id: str) -> Operator:
+        # Chat history in a temp folder instead of the session table; the tools
+        # still read the local Supabase, and approved calls go to the fake phone.
+        return Operator(
+            JsonlSession.for_call(root, f"chat-{session_id}"), provider=provider, phone=phone
+        )
+
+    api.make_operator = make_operator
+    port = int(os.environ.get("API_PORT", "8000"))
+    print("model:", "the real one from LLM_BASE_URL" if real else "fake (set LLM_BASE_URL)")
+    print("phone: fake, so an approved call rings nobody")
+    print(f"chat history: {root}")
+    print(
+        "\nTo use it:\n"
+        "  1. npx supabase start, with the synthetic seed loaded (debtors, phones)\n"
+        "  2. this terminal: uv run demo part-24   (serves /api on "
+        f"http://127.0.0.1:{port})\n"
+        "  3. another one: cd web && npm run dev, then open http://localhost:5173\n"
+        '  4. type "call Sam Doe" in the chat on the right; the approval card shows the\n'
+        "     masked phone and the check. During calling hours it can be approved; at\n"
+        '     night, or for a debtor the checks block (try "call Casey Morgan"), the\n'
+        "     card has only Deny.\n"
+        "Ctrl+C stops the server.\n"
+    )
+    uvicorn.run(api.app, host="127.0.0.1", port=port)
+
+
+DEMOS["part-24"] = _demo_part24

@@ -2,11 +2,14 @@ import { Clock, Moon, Sun } from 'lucide-react'
 import { useState } from 'react'
 
 import { AuditLog } from '@/components/AuditLog'
+import { ChatPanel } from '@/components/ChatPanel'
 import { DebtorDetail } from '@/components/DebtorDetail'
 import { DebtorList } from '@/components/DebtorList'
+import { LiveCallPlaceholder } from '@/components/LiveCall'
 import { Overview } from '@/components/Overview'
 import { Button } from '@/components/ui/button'
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable'
+import type { CheckView } from '@/lib/checks'
 import { useDebts } from '@/lib/debts'
 import { applyTheme, loadTheme, type Theme } from '@/lib/theme'
 
@@ -37,6 +40,16 @@ export default function App() {
     ? `Checked for ${new Date(at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}`
     : 'Checked for right now'
 
+  // The list's own check, but only when it is for right now: a check for some
+  // other chosen time says nothing about a call approved now.
+  const precallCheck = (debtorId: string): CheckView | null => {
+    if (at) return null
+    const check = debts.find((d) => d.account === debtorId)?.check
+    return check
+      ? { debtorId, allow: check.may_call, rules: check.decisions, source: 'precall' }
+      : null
+  }
+
   const toggle = () => {
     const next = theme === 'dark' ? 'light' : 'dark'
     applyTheme(next)
@@ -50,9 +63,6 @@ export default function App() {
           D
         </span>
         <span className="text-sm font-semibold">DebtAgentCall</span>
-        <span className="hidden rounded-full border px-2 py-0.5 text-[11px] text-muted-foreground sm:inline">
-          View only
-        </span>
         <div className="ml-auto flex items-center gap-2">
           <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
             <Clock className="size-3.5" />
@@ -79,7 +89,7 @@ export default function App() {
         </div>
       </header>
       <ResizablePanelGroup orientation="horizontal" className="min-h-0 flex-1">
-        <ResizablePanel defaultSize="28" minSize="20">
+        <ResizablePanel defaultSize="24" minSize="18">
           <DebtorList
             debts={debts}
             selected={selected}
@@ -89,16 +99,28 @@ export default function App() {
           />
         </ResizablePanel>
         <ResizableHandle withHandle />
-        <ResizablePanel defaultSize="44" minSize="25">
-          {selectedDebt ? (
-            <DebtorDetail debt={selectedDebt} atLabel={atLabel} onClose={() => setSelected(null)} />
-          ) : (
-            <Overview debts={debts} atLabel={atLabel} />
-          )}
+        <ResizablePanel defaultSize="42" minSize="25">
+          <ResizablePanelGroup orientation="vertical">
+            <ResizablePanel defaultSize="50" minSize="20">
+              {selectedDebt ? (
+                <DebtorDetail debt={selectedDebt} atLabel={atLabel} onClose={() => setSelected(null)} />
+              ) : (
+                <Overview debts={debts} atLabel={atLabel} />
+              )}
+            </ResizablePanel>
+            <ResizableHandle withHandle />
+            <ResizablePanel defaultSize="20" minSize="12">
+              <LiveCallPlaceholder />
+            </ResizablePanel>
+            <ResizableHandle withHandle />
+            <ResizablePanel defaultSize="30" minSize="12">
+              <AuditLog accounts={accounts} />
+            </ResizablePanel>
+          </ResizablePanelGroup>
         </ResizablePanel>
         <ResizableHandle withHandle />
-        <ResizablePanel defaultSize="28" minSize="18">
-          <AuditLog accounts={accounts} />
+        <ResizablePanel defaultSize="34" minSize="24">
+          <ChatPanel precallCheck={precallCheck} />
         </ResizablePanel>
       </ResizablePanelGroup>
     </div>

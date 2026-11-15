@@ -1,4 +1,3 @@
-import { PhoneCall } from 'lucide-react'
 
 import { blocksOf, money, type DebtView } from '@/lib/debts'
 import { ruleName } from '@/lib/rules'
@@ -71,11 +70,6 @@ export function Overview({ debts, atLabel }: { debts: DebtView[]; atLabel: strin
           How many debts each reason stops. One debt can have more than one reason.
         </p>
         <BlockedByRule debts={checked} />
-      </section>
-      <section className="flex items-center gap-3 rounded-lg border border-dashed p-4 text-xs text-muted-foreground">
-        <PhoneCall className="size-5 shrink-0" />
-        Calling isn't switched on yet. When it is, you'll be able to follow each call here as it
-        happens.
       </section>
     </div>
   )
