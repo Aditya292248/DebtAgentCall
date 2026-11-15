@@ -19,6 +19,7 @@ harness/
   db.py                 connect(), find_account(name) and the pre-call loaders, which read Postgres
   precall.py            check_and_record(conn, account, when): run the pre-call checks, log every decision
   memory.py             Session, JsonlSession and PostgresSession: each call's saved history
+  compact.py            compact_messages(): summarize the middle of a long call to stay in the context window
   api.py                `uv run api`: a small read-only web API for the UI (pre-call decisions, chain check)
   subagents.py          run_subagent, fan_out and the delegate / fan_out tools (after calls only)
   review.py             review_transcript(transcript, account): reviewer subagents check a finished call
@@ -362,6 +363,29 @@ uv run demo part-10
 
 The demo plays Sam Doe's call through the webhook. With the fake model, each reply says how many earlier messages of the call the model was sent.
 
+## Compaction
+
+A model can only read so much at once (its context window). A long call would sooner or later go past it, so before each caller turn the agent checks how big the next model call would be. Past 80% of `max_context_tokens`, it keeps the first `keep_head` messages (how the call opened) and the last `keep_tail` (what is being said now) word for word, and asks the model to summarize everything in between into one message. The system prompt isn't in the history at all, so it is never summarized.
+
+```
+keep_head=2, keep_tail=3:
+[hello] [hi] [a] [b] [c] [d] [e] [f] [g]  ->  [hello] [hi] [summary of a..d] [e] [f] [g]
+```
+
+- **Tool calls stay whole.** The cut points move a message or two so a tool request is never split from its result. The model API would reject a history like that.
+- **A second compaction** finds the first summary in its middle and folds it into the new one, so there is only ever one summary.
+- **It is saved.** The session gets a `compaction` record, so the next webhook's agent loads the shorter history. The old messages stay on record.
+- **If the summary fails** (the model errors), the history is left exactly as it was and the caller still gets an answer. `agent.compact_error` says what went wrong.
+- **Sizes** are the token count the server reported for the last call, plus about 4 characters per token for anything newer.
+
+Compliance never depends on the summary. Whether the person was verified, whether the debt collector disclosure was said, and whether they asked us to stop are kept by code outside the messages, and the summary message says it is not a record of them. A summary can drop or garble anything, so nothing should read those facts back out of the history.
+
+```bash
+uv run demo part-16
+```
+
+The demo plays a long made-up call with a small 300-token limit. It compacts twice, the second time folding in the first summary, and the agent can still answer a question about something said in the summarized middle.
+
 ## The sentence filter
 
 Once a sentence is spoken on a call, it can't be taken back. So every sentence the agent wants to say goes through `check_sentence(sentence, state)` first, and a blocked one is never sent. `state` is a `SpeechState`: whether the person is verified, whether the debt collector disclosure was said, the amounts on file, the creditor's name, whether legal action is authorized, whether the debt is time-barred, and whether we are in the validation period.
@@ -562,6 +586,8 @@ The dry run prints who would be called and why each of the others is blocked, an
 | `uv run demo part-14`     | No             | Prints the stop triggers, flags and close line for sample caller lines |
 | `uv run accept part-15`   | Yes            | Runs the earlier checks, then has reviewer subagents flag the threat in a sample call |
 | `uv run demo part-15`     | No             | Reviews a sample call with four reviewer subagents in parallel (real model if set, else the fake) |
+| `uv run accept part-16`   | Yes            | Runs the earlier checks, then a long call that must compact and still remember a detail from the summarized middle |
+| `uv run demo part-16`     | No             | Plays a long call with a small limit and shows each compaction (real model if set, else the fake) |
 | `uv run accept part-17`   | Yes            | Runs the earlier checks, then checks the model loads the hardship skill for a caller who lost their job |
 | `uv run demo part-17`     | No             | Prints the skills menu and a call where the model loads a playbook (real model if set, else the fake) |
 | `uv run accept part-18`   | Yes            | Runs the earlier checks, then a dialer dry run over every seeded debtor |

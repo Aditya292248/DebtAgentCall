@@ -953,3 +953,110 @@ ACCEPTANCE["part-18"] = lambda: (
     ACCEPTANCE["part-17"]() and _accept_part14_triggers() and _accept_part18()
 )
 DEMOS["part-18"] = _demo_part18
+
+
+# ----------------------------------------------------------------------------
+# compaction: a long call is summarized in the middle to stay inside the window
+# ----------------------------------------------------------------------------
+
+# A made-up long call. The colour is said in the middle, so after compaction the
+# model only knows it from the summary; the name is in the head, kept word for word.
+_PART16_CALLER = [
+    "Hi, this is Sam Doe.",
+    "I've had a long week, work has been busy and the kids have been sick.",
+    "By the way, my favourite colour is teal, my old bank card was teal too.",
+    "I moved house last month, so post has been going to the wrong place.",
+    "I usually get paid on the first and the fifteenth of the month.",
+    "My car needed new tyres too, so money has been tight lately.",
+    "What colour did I say was my favourite?",
+]
+_PART16_LIMIT = 300  # tokens; small on purpose so a short call needs compacting
+
+
+def _part16_agent(provider: Provider | None, root: str) -> Agent:
+    from pathlib import Path
+
+    from harness import Agent
+    from harness.memory import JsonlSession
+    from harness.tools import ToolRegistry
+
+    no_skills = Path(root) / "no-skills"  # keeps the skills menu out of the small budget
+    no_skills.mkdir(exist_ok=True)
+    return Agent(
+        provider=provider,
+        tools=ToolRegistry(),
+        skills_dir=no_skills,
+        session=JsonlSession.for_call(root, "call_long"),
+        max_context_tokens=_PART16_LIMIT,
+        keep_head=2,
+        keep_tail=2,
+    )
+
+
+def _accept_part16() -> bool:
+    import tempfile
+
+    from harness.memory import JsonlSession
+
+    with tempfile.TemporaryDirectory() as root:
+        agent = _part16_agent(None, root)
+        reply = ""
+        for line in _PART16_CALLER:
+            reply = agent.run(line)
+        reloaded = JsonlSession.for_call(root, "call_long").load()
+    print(f"  compactions: {agent.compactions}  last reply: {reply!r}")
+    return agent.compactions >= 1 and "teal" in reply.lower() and reloaded == agent.messages
+
+
+def _demo_compact_reply(messages: list[dict]) -> str:
+    """Stand-in answers when no model is set up, so the demo still runs."""
+    from harness.compact import SUMMARIZE_PROMPT, SUMMARY_HEADER
+
+    if messages[0].get("content") == SUMMARIZE_PROMPT:
+        text = messages[1]["content"]
+        return (
+            "Sam mentioned: "
+            + ("favourite colour is teal; " if "teal" in text else "")
+            + ("money is tight." if "money" in text else "a busy week.")
+        )
+    history = [m for m in messages if m["role"] != "system"]
+    summary = next((m["content"] for m in history if m["content"].startswith(SUMMARY_HEADER)), "")
+    if "what colour" in history[-1]["content"].lower():
+        return "You said teal." if "teal" in summary else "I'm not sure, sorry."
+    return "I understand, thank you for telling me."
+
+
+def _demo_part16() -> None:
+    import tempfile
+
+    from harness.compact import SUMMARY_HEADER
+    from harness.memory import JsonlSession
+    from model import fake
+
+    real = _llm_configured()
+    provider = None if real else fake(scripted=_demo_compact_reply)
+    print("model:", "the real one from LLM_BASE_URL" if real else "fake (set LLM_BASE_URL)")
+    print(
+        f"limit: {_PART16_LIMIT} tokens, compact past 80%, keep 2 at the start and 2 at the end\n"
+    )
+    with tempfile.TemporaryDirectory() as root:
+        agent = _part16_agent(provider, root)
+        for line in _PART16_CALLER:
+            before, done = agent.context_tokens(), agent.compactions
+            reply = agent.run(line)
+            if agent.compactions > done:
+                print(f"  -- compacted: ~{before} tokens of history became one summary --")
+            print(f"  caller> {line}\n  agent>  {reply}   (~{agent.context_tokens()} tokens)")
+        print("\n-- what the model is sent now --")
+        for m in agent.messages:
+            text = m["content"].replace(SUMMARY_HEADER + "\n", "[summary] ")
+            print(f"  {m['role']:<9} {text[:110]}")
+        records = JsonlSession.for_call(root, "call_long")._records()
+        print("\nsaved records:", ", ".join(r["type"] for r in records))
+    print(
+        "\n   # verification, disclosure and stop requests are kept by code, never by the summary"
+    )
+
+
+ACCEPTANCE["part-16"] = lambda: ACCEPTANCE["part-10"]() and _accept_part16()
+DEMOS["part-16"] = _demo_part16
