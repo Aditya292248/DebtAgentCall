@@ -1298,3 +1298,93 @@ ACCEPTANCE["part-20"] = lambda: (
     and _accept_part20()
 )
 DEMOS["part-20"] = _demo_part20
+
+
+# call tools: what the agent may do during a call, gated and then approved
+# ----------------------------------------------------------------------------
+
+
+def _part21_ctx(stage: str) -> tuple:
+    """A call with Sam in ``stage`` ("verify" or "discuss"), its store and its audit list."""
+    from dataclasses import replace
+    from datetime import UTC, datetime
+
+    from compliance import Contact
+    from harness.call_state import CallState, Stage
+    from harness.call_tools import CallContext, MemoryCallStore
+
+    sam = _part13_debtors()["+12135550101"]
+    state = CallState.new("demo-part21", sam)
+    if stage == "discuss":
+        state = replace(state, stage=Stage.DISCUSS, verified=True, disclosed=True)
+    else:
+        state = replace(state, stage=Stage.VERIFY)
+    audited: list = []
+    store = MemoryCallStore()
+    ctx = CallContext(
+        debtor=sam,
+        state=state,
+        store=store,
+        audit=lambda d, call_id, debt_id: audited.append(d),
+        contact=Contact(zip=sam.zip, phone_e164="+12135550101"),
+        flags=[],
+        clock=lambda: datetime(2026, 11, 16, 18, 0, tzinfo=UTC),
+    )
+    return ctx, store, audited
+
+
+def _accept_part21() -> bool:
+    from harness import Agent
+    from harness.call_tools import call_tools
+    from harness.tools import run_tool
+
+    # Without the model: no account data before verification.
+    ctx, _, _ = _part21_ctx("verify")
+    early = run_tool(call_tools(ctx), "lookup_account", "{}")
+    print("lookup before verification:", early)
+    good = early.startswith("error: blocked") and "1250" not in early
+
+    # With the real model: a plan outside the policy ends up pending, never approved.
+    ctx, store, audited = _part21_ctx("discuss")
+    agent = Agent(tools=call_tools(ctx))
+    reply = agent.run(
+        "The person is verified. They say: I can put fifty dollars down and pay the rest "
+        "monthly over 18 months. Use offer_payment_plan for exactly that plan, then tell "
+        "them the result in one sentence."
+    )
+    print("agent:", reply)
+    for d in audited:
+        print(f"  audit: {d.rule_id} {'allow' if d.allow else 'block'}: {d.reason}")
+    statuses = [r["status"] for r in store.rows if r["kind"] == "payment_plan"]
+    print("plans saved:", statuses)
+    return good and bool(statuses) and set(statuses) == {"pending"}
+
+
+def _demo_part21() -> None:
+    from harness.call_tools import call_tools
+    from harness.tools import run_tool
+
+    def show(ctx, name: str, **args: str) -> None:  # type: ignore[no-untyped-def]
+        print(f"  {name}({', '.join(f'{k}={v!r}' for k, v in args.items())})")
+        print(f"    -> {run_tool(call_tools(ctx), name, args)}")
+
+    print("-- still verifying who answered --")
+    ctx, _, _ = _part21_ctx("verify")
+    show(ctx, "lookup_account")
+    print("\n-- verified and disclosed --")
+    ctx, store, audited = _part21_ctx("discuss")
+    show(ctx, "lookup_account")
+    show(ctx, "offer_payment_plan", down_cents="25000", installments="10", frequency="monthly")
+    show(ctx, "offer_payment_plan", down_cents="5000", installments="18", frequency="monthly")
+    show(ctx, "schedule_callback", datetime="2026-11-17T07:30", tz="America/Los_Angeles")
+    show(ctx, "schedule_callback", datetime="2026-11-17T10:30", tz="America/Los_Angeles")
+    show(ctx, "log_dispute", reason="I already paid this")
+    show(ctx, "offer_payment_plan", down_cents="25000", installments="10", frequency="monthly")
+    print("\n  saved:", [f"{r['kind']}:{r.get('status', '')}".rstrip(":") for r in store.rows])
+    print(f"  audit rows: {len(audited)} ({sum(not d.allow for d in audited)} blocked or denied)")
+    print("\n   # the gate checks stage, dispute, cease and calling hours first; the approver")
+    print("   # then checks the plan policy. These tools are not on live calls yet.")
+
+
+ACCEPTANCE["part-21"] = _accept_part21
+DEMOS["part-21"] = _demo_part21
