@@ -119,7 +119,7 @@ class AgentPhoneClient:
             try:
                 from agentphone import AgentPhone  # type: ignore[import-not-found]
             except ImportError as exc:
-                raise RuntimeError("install the AgentPhone SDK: uv pip install agentphone") from exc
+                raise RuntimeError("the AgentPhone SDK is missing; run `uv sync`") from exc
             try:
                 self._sdk = AgentPhone(api_key=self.api_key, max_retries=0)
             except TypeError:

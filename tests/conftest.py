@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import os
+import uuid
+from collections.abc import Iterator
+from datetime import date
 from functools import cache
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from harness.call_state import Debtor
 
 
 @cache
@@ -29,8 +37,14 @@ def _database_unreachable() -> str | None:
 
 @pytest.fixture(autouse=True)
 def _skip_db_tests_without_a_database(request: pytest.FixtureRequest) -> None:
-    """Tests marked ``db`` use the real local database, or are skipped, never faked."""
+    """Tests marked ``db`` use the real local database, or are skipped, never faked.
+
+    With ``REQUIRE_DATABASE=1`` (CI sets it) a missing database fails them instead,
+    so CI can't go green with the database tests quietly skipped.
+    """
     if request.node.get_closest_marker("db") and (reason := _database_unreachable()):
+        if os.environ.get("REQUIRE_DATABASE") == "1":
+            pytest.fail(f"REQUIRE_DATABASE=1 but {reason}")
         pytest.skip(reason)
 
 
@@ -47,6 +61,49 @@ def no_default_skills(
     import harness.agent
 
     monkeypatch.setattr(harness.agent, "DEFAULT_SKILLS_DIR", tmp_path_factory.mktemp("no-skills"))
+
+
+@pytest.fixture
+def scratch_sam() -> Iterator[Debtor]:
+    """A copy of seed Sam with fresh ids, in the real database, deleted afterwards.
+
+    For ``db`` tests that write rows against a debt. They get their own debtor
+    and debt instead of a seed row, so they pass on a fresh database, on a
+    used one, and in CI, and never change the seed data or anything added by
+    hand. Deleting the debtor takes its debt and the rows that point at it
+    (plans, disputes, callbacks, ...) with it. Audit rows stay: that log can't be
+    edited, and they are ordinary, valid entries.
+    """
+    from harness.call_state import Debtor
+    from harness.db import connect
+
+    tag = uuid.uuid4().hex[:12]
+    sam = Debtor(
+        debtor_id=str(uuid.uuid4()),
+        debt_id=str(uuid.uuid4()),
+        first_name="Sam",
+        last_name=f"Doe-{tag}",
+        dob=date(1985, 4, 12),
+        zip="90012",
+        creditor="Northwind Furniture",
+        balance_cents=125000,
+    )
+    with connect() as conn:
+        conn.execute(
+            "insert into public.debtor (id, first_name, last_name, dob, address, zip, state)"
+            " values (%s, %s, %s, %s, '100 Example St, Los Angeles', %s, 'CA')",
+            (sam.debtor_id, sam.first_name, sam.last_name, sam.dob, sam.zip),
+        )
+        conn.execute(
+            "insert into public.debt (id, debtor_id, account_number, creditor, balance_cents)"
+            " values (%s, %s, %s, %s, %s)",
+            (sam.debt_id, sam.debtor_id, f"TEST-{tag}", sam.creditor, sam.balance_cents),
+        )
+    try:
+        yield sam
+    finally:
+        with connect() as conn:
+            conn.execute("delete from public.debtor where id = %s", (sam.debtor_id,))
 
 
 @pytest.fixture
