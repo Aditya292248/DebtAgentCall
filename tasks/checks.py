@@ -1699,3 +1699,50 @@ def _demo_part22() -> None:
 
 ACCEPTANCE["part-22"] = lambda: ACCEPTANCE["part-19"]() and _accept_part22()
 DEMOS["part-22"] = _demo_part22
+
+
+def _part27_decisions(test_numbers: frozenset[str]):
+    from datetime import UTC, datetime
+
+    from compliance import CallFacts, PhoneConsent, check_before_call
+
+    night = datetime(2026, 11, 5, 12, 0, tzinfo=UTC)  # 04:00 in Los Angeles
+    phone = PhoneConsent("+12135550101", consent_at=datetime(2025, 1, 15, tzinfo=UTC))
+    facts = CallFacts("demo", "90012", phone, [], [])
+    return check_before_call(facts, night, test_numbers=test_numbers)
+
+
+def _accept_part27() -> bool:
+    from compliance import may_call
+    from compliance.testnumbers import EXEMPTION_REASON, parse_test_numbers
+
+    listed = parse_test_numbers("*, +12135550101")
+    unlisted = _part27_decisions(frozenset())
+    exempt = _part27_decisions(listed)
+    hours = {d.rule_id: d for d in exempt}["calling_hours"]
+    good = (
+        listed == {"+12135550101"}
+        and not may_call(unlisted)
+        and may_call(exempt)
+        and hours.reason == EXEMPTION_REASON
+    )
+    print("unlisted blocked:", not may_call(unlisted), "| listed allowed:", may_call(exempt))
+    return good
+
+
+def _demo_part27() -> None:
+    from compliance import may_call
+    from compliance.testnumbers import parse_test_numbers
+
+    print("a call at 04:00 in Los Angeles (all numbers synthetic)\n")
+    for label, raw in (("TEST_NUMBERS unset", ""), ("TEST_NUMBERS=+12135550101", "+12135550101")):
+        decisions = _part27_decisions(parse_test_numbers(raw))
+        print(f"{label}: {'MAY CALL' if may_call(decisions) else 'DO NOT CALL'}")
+        for d in decisions[:3]:
+            print(f"  {'allow' if d.allow else 'BLOCK'}  {d.rule_id:<14} {d.reason}")
+        print()
+    print("   # only calling_hours is skipped; consent, 7-in-7, cease, DNC and the rest still run")
+
+
+ACCEPTANCE["part-27"] = _accept_part27
+DEMOS["part-27"] = _demo_part27
