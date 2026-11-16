@@ -1576,3 +1576,126 @@ def _demo_part24() -> None:
 
 
 DEMOS["part-24"] = _demo_part24
+
+
+# ----------------------------------------------------------------------------
+# call tools on live calls: the gate and the approver behind every tool call
+# ----------------------------------------------------------------------------
+
+_PART22_TO_DISCUSS = ["Hello?", "Yes, this is Sam Doe speaking.", "April 12, 1985, and 90012."]
+
+
+def _part22_call(lines: list[str], provider: Provider | None) -> tuple:
+    """Play ``lines`` through the signed simulator against the live webhook.
+
+    ``provider`` None means the real model. The tools write to memory, not the
+    database. Returns ``(turns, store, decisions, tool_results)``.
+    """
+    import secrets
+    import tempfile
+    from functools import partial
+    from pathlib import Path
+
+    from fastapi.testclient import TestClient
+
+    from harness.call_tools import MemoryCallStore
+    from harness.memory import JsonlSession
+    from phone.live_tools import ToolBackend
+    from phone.webhook import create_app
+    from sim.agentphone_sim import Script, run_script
+
+    store = MemoryCallStore()
+    decisions: list = []
+    folder = Path(tempfile.mkdtemp(prefix="debtagent-p22-"))
+    secret = secrets.token_hex(16)
+    app = create_app(
+        provider=provider,
+        secret=secret,
+        open_session=partial(JsonlSession.for_call, folder),
+        find_debtor=_part13_debtors().get,
+        audit=lambda decision, call_id, debt_id: None,
+        record_stop=lambda stop: None,
+        open_backend=lambda debtor: ToolBackend(
+            store, lambda d, call_id, debt_id: decisions.append(d), flags=[]
+        ),
+        supervisor_number="",
+    )
+    turns = run_script(Script("part22", lines), TestClient(app), secret)
+    results = [
+        m["content"]
+        for path in folder.glob("*.jsonl")
+        for m in JsonlSession(path).load()
+        if m.get("role") == "tool"
+    ]
+    return turns, store, decisions, results
+
+
+def _part22_lookup_model() -> Provider:
+    """A fake model that calls lookup_account, then reads out what it got."""
+    from model import fake
+    from model.fake import tool_call, tool_reply
+
+    def reply(messages: list):  # type: ignore[no-untyped-def]
+        last = messages[-1]
+        if last.get("role") == "tool":
+            return f"Here is what I found. {last['content']}"
+        return tool_reply(tool_call("lookup_account"))
+
+    return fake(scripted=reply)
+
+
+def _accept_part22() -> bool:
+    # Before verification: the lookup is blocked by the gate, no balance is said.
+    lines = _PART22_TO_DISCUSS[:2] + ["Why do you need that? How much do I owe?"]
+    turns, _, _, results = _part22_call(lines, _part22_lookup_model())
+    spoken = turns[-1][1]
+    early = bool(results) and results[0].startswith("error: blocked") and "1,250" not in spoken
+    print(f"  lookup before verification: {'ok' if early else 'BAD'} ({results[:1]})")
+
+    # The real model, verified: a plan outside the policy is saved as pending only.
+    ask = "Set up a plan for me: fifty dollars down and the rest monthly over eighteen months."
+    turns, store, decisions, _ = _part22_call([*_PART22_TO_DISCUSS, ask], None)
+    for caller, agent in turns[3:]:
+        print(f"  caller> {caller}\n   agent> {agent}")
+    statuses = [r["status"] for r in store.rows if r["kind"] == "payment_plan"]
+    print(f"  plans saved: {statuses}; decisions: {[(d.rule_id, d.allow) for d in decisions]}")
+    pending = bool(statuses) and set(statuses) == {"pending"}
+    return early and pending
+
+
+def _demo_part22() -> None:
+    from model import fake
+    from model.fake import tool_call, tool_reply
+
+    print("-- not verified yet: the model calls lookup_account anyway --")
+    lines = _PART22_TO_DISCUSS[:2] + ["Why do you need that? How much do I owe?"]
+    turns, _, decisions, results = _part22_call(lines, _part22_lookup_model())
+    for caller, agent in turns:
+        print(f"  caller> {caller}\n   agent> {agent}")
+    print(f"  tool result: {results[0]}")
+    for d in decisions:
+        print(f"  audit: {d.rule_id} {'allow' if d.allow else 'block'}: {d.reason}")
+
+    for label, down, count in (("inside", "25000", "10"), ("outside", "5000", "18")):
+        print(f"\n-- verified: a plan {label} the policy --")
+        plan = tool_call(
+            "offer_payment_plan", down_cents=down, installments=count, frequency="monthly"
+        )
+        model = fake(scripted=[tool_reply(plan), "Thanks, I have noted that plan."])
+        turns, store, decisions, results = _part22_call(
+            [*_PART22_TO_DISCUSS, "Can we set up a plan?"], model
+        )
+        print(f"  caller> {turns[-1][0]}\n   agent> {turns[-1][1]}")
+        print(f"  tool result: {results[0][:90]}")
+        print(f"  saved: {[r['status'] for r in store.rows]}")
+
+    print("\n-- the model ends the call --")
+    model = fake(scripted=[tool_reply(tool_call("end_call", reason="done")), "Goodbye."])
+    turns, _, _, _ = _part22_call([*_PART22_TO_DISCUSS, "That's all.", "Hello?"], model)
+    print(f"  caller> {turns[-1][0]}\n   agent> {turns[-1][1]} (hung up; 'Hello?' never sent)")
+    print("\n   # every tool call on a real call passes the gate, then the approver, and")
+    print("   # anything it saves is committed before the caller hears about it")
+
+
+ACCEPTANCE["part-22"] = lambda: ACCEPTANCE["part-19"]() and _accept_part22()
+DEMOS["part-22"] = _demo_part22

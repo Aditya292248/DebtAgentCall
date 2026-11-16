@@ -39,6 +39,7 @@ compliance/
 phone/
   signing.py            sign() and verify(), the HMAC check on every AgentPhone webhook
   webhook.py            create_app(), the FastAPI app with POST /webhooks/agentphone
+  live_tools.py         the call tools for one live turn: CallContext from the saved state, gate, approver
   replies.py            say(), say_and_hangup() and transfer(), the replies AgentPhone understands
   client.py             PhoneClient, AgentPhoneClient (make_call, never retried), FakePhoneClient, CallError
 dialer/
@@ -310,7 +311,7 @@ Every request is checked before anything else happens:
 - A request whose timestamp is more than five minutes off is refused too, so an old request can't be replayed.
 - Each webhook has an `X-Webhook-ID`. If the same id comes again, it gets the same reply as the first time, and the model isn't asked twice.
 
-Then the event decides what happens. `agent.message` on the voice channel runs one turn of the agent with the caller's words and replies `{"text": ...}`. `agent.call_ended` is accepted, but nothing more is stored for it yet. Any other event gets `{}`. `phone/replies.py` also has `say_and_hangup()` and `transfer()`, for ending the call or handing it to a person; nothing uses them yet.
+Then the event decides what happens. `agent.message` on the voice channel runs one turn of the agent with the caller's words and replies `{"text": ...}`. `agent.call_ended` is accepted, but nothing more is stored for it yet. Any other event gets `{}`. `phone/replies.py` also has `say_and_hangup()` and `transfer()`, for ending the call or handing it to a person. On a staged call the model gets the call tools from `harness/call_tools.py` (built per turn by `phone/live_tools.py`): each tool call passes the compliance gate and then `PolicyApprover`, saved rows are committed before the reply, `end_call` hangs up, and `escalate_to_human` transfers only when `SUPERVISOR_NUMBER` is set.
 
 Each turn builds a new agent, but on that call's saved session, so it remembers what was said earlier in the same call (see [Sessions](#sessions)).
 
