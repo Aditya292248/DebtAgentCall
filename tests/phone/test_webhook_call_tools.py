@@ -47,8 +47,8 @@ from model.fake import tool_call, tool_reply
 from model.provider import LLMResponse
 from phone import signed_headers
 from phone.live_tools import COMMITMENT_RULE, PENDING_LINE, ToolBackend
-from phone.webhook import CANT_CONTINUE, WEBHOOK_PATH, create_app, debt_as_found
-from sim.agentphone_sim import Script, run_script
+from phone.webhook import CANT_CONTINUE, SAFE_LINE, WEBHOOK_PATH, create_app, debt_as_found
+from sim.agentphone_sim import Script, reply_of, run_script
 
 SECRET = "whsec_test_only"
 SAM_PHONE = "+12135550101"
@@ -128,7 +128,7 @@ class Call:
         headers = signed_headers(body, SECRET, time.time(), webhook_id, "agent.message")
         resp = self.client.post(WEBHOOK_PATH, content=body, headers=headers)
         assert resp.status_code == 200
-        return resp.json()
+        return reply_of(resp)
 
     def records(self) -> list[dict]:
         (path,) = self.folder.glob("*.jsonl")
@@ -336,7 +336,8 @@ def test_pending_plan_spoken_as_approved_is_replaced(tmp_path: Path) -> None:
 def test_approval_claimed_without_any_tool_is_dropped(tmp_path: Path) -> None:
     call = Call(tmp_path, ["Your plan is all set. Anything else?"])
     to_discuss(call, "call_claim_plan")
-    assert call.turn("call_claim_plan", "So are we good?") == {"text": "Anything else?"}
+    # The first sentence is blocked, so the turn stops there with the safe line.
+    assert call.turn("call_claim_plan", "So are we good?") == {"text": SAFE_LINE}
     assert [d.rule_id for d in call.blocked] == [COMMITMENT_RULE]
 
 

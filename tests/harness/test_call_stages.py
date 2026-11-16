@@ -57,7 +57,7 @@ from phone.webhook import (
     create_app,
     debt_as_found,
 )
-from sim.agentphone_sim import Script, load_script, run_script
+from sim.agentphone_sim import Script, load_script, reply_of, run_script
 
 SECRET = "whsec_test_only"
 
@@ -137,7 +137,7 @@ class Call:
         )
         resp = self.client.post(WEBHOOK_PATH, content=body, headers=headers)
         assert resp.status_code == 200
-        return resp.json()
+        return reply_of(resp)
 
     def stages(self) -> list[Stage]:
         """The stage after each turn, from the one call's saved state records."""
@@ -276,7 +276,8 @@ def _ask_why_during_verify(call: Call, call_id: str) -> dict:
 def test_balance_said_during_verify_is_dropped(tmp_path: Path) -> None:
     call = Call(tmp_path, reply="I understand. Your balance is $1,250.00. What is your ZIP code?")
     reply = _ask_why_during_verify(call, "call_v")
-    assert reply == {"text": "I understand. What is your ZIP code?"}
+    # The reply streams: the first sentence is said, the blocked one stops the turn.
+    assert reply == {"text": f"I understand. {SAFE_LINE}"}
     assert [(d.rule_id, d.evidence["sentence"]) for d in call.audited] == [
         ("third_party_disclosure", "Your balance is $1,250.00.")
     ]
@@ -286,7 +287,7 @@ def test_balance_said_during_verify_is_dropped(tmp_path: Path) -> None:
     assert call.responder.kwargs[0].get("tools") is None
     # The saved history holds what the caller heard, not the blocked sentence.
     saved = JsonlSession.for_call(call.folder, "call_v").load()
-    assert saved[-1] == {"role": "assistant", "content": "I understand. What is your ZIP code?"}
+    assert saved[-1] == {"role": "assistant", "content": f"I understand. {SAFE_LINE}"}
 
 
 def test_no_skills_before_discuss(tmp_path: Path) -> None:
@@ -316,7 +317,7 @@ def test_blocked_sentence_is_written_to_the_audit_log(tmp_path: Path) -> None:
     )
     call_id = f"test_{uuid.uuid4().hex[:8]}_audit"
     reply = _ask_why_during_verify(call, call_id)
-    assert reply == {"text": "Could I get your ZIP code?"}
+    assert reply == {"text": SAFE_LINE}  # the first sentence is blocked: the turn stops there
     with connect() as conn:
         rows = conn.execute(
             "select kind, rule_id, decision, debt_id::text, evidence->>'sentence' "
