@@ -454,15 +454,15 @@ The demo plays three calls (verified, wrong date of birth, someone else answers)
 
 ## The UI
 
-A first, read-only page in the browser, laid out like Cursor: three panes you can resize, dark by default (the sun button switches to light).
+A page in the browser with two areas: the debtor list on the left and the agent chat filling the rest. It is light by default; the moon button in the top bar switches to dark, and the choice is remembered.
 
-![The UI: debtors on the left, the overview in the middle, the audit log on the right](docs/ui-part1.png)
+![The UI: debtors on the left, the agent chat on the right](docs/ui-part1.png)
 <!-- screenshot placeholder: add docs/ui-part1.png -->
 
-- **Top bar:** "Check at" picks the time every check is run for, so you can see who would be blocked at, say, 9:30pm. "Now" goes back to the current time.
-- **Left, debtors:** every made-up debt with its balance, creditor and a status: green "Ready to call", or red "Blocked" with the rule (such as `attorney`) and its reason. Tabs show All, Ready or Blocked, and the search box matches name, account, creditor or state.
-- **Middle:** with nothing picked, an overview: how many debts are ready or blocked, the total owed, and a bar chart of how many debts each rule blocks. Click a debtor to see all eight checks for them, passed and blocked. "Simulate call" stays disabled until the call view comes in a later step.
-- **Right, audit log:** the `audit_event` rows, newest first (rule, allow or block, reason, account and time), with a "chain OK" or "chain broken" badge and a "Blocks only" tab.
+- **Top bar:** "Check at" picks the time every check is run for, so you can see who would be blocked at, say, 9:30pm. "Now" goes back to the current time. "Overview" and "Compliance log" open the side panel.
+- **Left, debtors:** every made-up debt with its name, balance, account and creditor, and a small status dot with "Ready to call" or "Can't call". Hover a "Can't call" to see the blocking rules and reasons. Tabs show All, Ready or Can't call, and the search box matches name, account, creditor or state.
+- **Main, agent chat:** type a request such as `call Sam Doe`. Each tool the agent ran shows as a collapsed line you can open for its arguments and result. A call waits on an approval card: Approve only shows when a recent check passes, Deny always does, and the server runs every check again before it dials. Nothing dials from the browser.
+- **Side panel:** opens from the right over the page. Click a debtor to see all the checks for them, passed and blocked. "Overview" shows how many debts are ready or blocked, the total owed, and how many debts each rule blocks. "Compliance log" shows the `audit_event` rows, newest first (rule, allow or block, reason, account and time), with a "Verified" or "Log was changed" mark and a "Can't call only" filter.
 
 Nothing on the page is made up in the browser: every number and badge comes from the database or from the Python checks, so it changes when the data does.
 

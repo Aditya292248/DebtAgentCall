@@ -1,4 +1,4 @@
-import { Bot, ImageUp, LoaderCircle, SendHorizontal } from 'lucide-react'
+import { LoaderCircle, SendHorizontal } from 'lucide-react'
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
 
 import { ApprovalCard, DialResult, ToolCallCard } from '@/components/ChatCards'
@@ -110,21 +110,17 @@ export function ChatPanel({ precallCheck }: Props) {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex h-10 shrink-0 items-center gap-2 border-b px-3">
-        <Bot className="size-4 text-muted-foreground" />
-        <h2 className="text-sm font-semibold">Agent</h2>
-        <span className="ml-auto font-mono text-[10px] text-muted-foreground" title="Chat session id">
-          {sessionId}
-        </span>
-      </div>
       <ScrollArea className="min-h-0 flex-1">
-        <div className="space-y-3 p-3">
+        <div className="mx-auto max-w-3xl space-y-6 px-6 py-8">
           {items.length === 0 && (
-            <p className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">
-              Ask the agent to find someone, check them, or call them, for example{' '}
-              <span className="font-mono text-foreground">call Sam Doe</span>. A call always waits
-              for your approval here, and the checks run again before anything dials.
-            </p>
+            <div className="rounded-xl border border-dashed px-6 py-8 text-center">
+              <h2 className="text-base font-semibold">Ask the agent</h2>
+              <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-muted-foreground">
+                Find someone, check them, or call them, for example{' '}
+                <span className="font-medium text-foreground">call Sam Doe</span>. A call always
+                waits for your approval here, and the checks run again before anything dials.
+              </p>
+            </div>
           )}
           {items.map((item, i) => (
             <Message key={i} item={item} />
@@ -140,23 +136,18 @@ export function ChatPanel({ precallCheck }: Props) {
             />
           ))}
           {busy && (
-            <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <LoaderCircle className="size-3 animate-spin" /> Working
+            <p className="flex items-center gap-2 text-sm text-muted-foreground">
+              <LoaderCircle className="size-4 animate-spin" /> Working
             </p>
           )}
           <div ref={bottom} />
         </div>
       </ScrollArea>
-      <div className="space-y-2 border-t p-3">
-        <div
-          aria-disabled="true"
-          title="Bill upload isn't available yet"
-          className="flex items-center gap-2 rounded-md border border-dashed px-3 py-2 text-xs text-muted-foreground opacity-60"
+      <div className="px-6 pt-2 pb-5">
+        <form
+          onSubmit={(e) => void send(e)}
+          className="mx-auto flex max-w-3xl items-end gap-2 rounded-xl border bg-card p-2 shadow-sm focus-within:border-ring/60 focus-within:ring-3 focus-within:ring-ring/20"
         >
-          <ImageUp className="size-3.5" />
-          Drop a bill image here (coming soon)
-        </div>
-        <form onSubmit={(e) => void send(e)} className="flex items-end gap-2">
           <textarea
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
@@ -164,17 +155,18 @@ export function ChatPanel({ precallCheck }: Props) {
             rows={2}
             placeholder="Message the agent, e.g. call Sam Doe"
             aria-label="Message the agent"
-            className="min-h-10 flex-1 resize-none rounded-md border bg-transparent px-2.5 py-2 text-sm outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/50"
+            className="min-h-12 flex-1 resize-none bg-transparent px-2 py-1.5 text-sm leading-relaxed outline-none placeholder:text-muted-foreground"
           />
-          <Button
-            type="submit"
-            size="icon"
-            disabled={busy || !draft.trim()}
-            aria-label="Send"
-          >
+          <Button type="submit" size="icon-lg" disabled={busy || !draft.trim()} aria-label="Send">
             <SendHorizontal />
           </Button>
         </form>
+        <p
+          className="mx-auto mt-2 max-w-3xl px-1 text-xs text-muted-foreground"
+          title={`Chat session ${sessionId}`}
+        >
+          Enter to send, Shift+Enter for a new line.
+        </p>
       </div>
     </div>
   )
@@ -184,7 +176,7 @@ function Message({ item }: { item: Item }) {
   if (item.kind === 'user') {
     return (
       <div className="flex justify-end">
-        <p className="max-w-[85%] rounded-lg bg-primary px-3 py-2 text-sm whitespace-pre-wrap text-primary-foreground">
+        <p className="max-w-[80%] rounded-2xl rounded-br-md bg-primary-soft px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap">
           {item.text}
         </p>
       </div>
@@ -194,13 +186,13 @@ function Message({ item }: { item: Item }) {
     return <Notice message={item.text} detail={item.detail} />
   }
   return (
-    <div className="space-y-1.5">
+    <div className="space-y-2">
       {item.toolCalls.map((c, i) => (
         <ToolCallCard key={i} call={c} />
       ))}
       {item.dial && <DialResult dial={item.dial} />}
       {item.text && (
-        <p className="text-sm leading-relaxed whitespace-pre-wrap">{item.text}</p>
+        <p className="pt-1 text-[0.9375rem] leading-7 whitespace-pre-wrap">{item.text}</p>
       )}
     </div>
   )
