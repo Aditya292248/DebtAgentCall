@@ -1746,3 +1746,61 @@ def _demo_part27() -> None:
 
 ACCEPTANCE["part-27"] = _accept_part27
 DEMOS["part-27"] = _demo_part27
+
+
+def _part28_call(lines: list[str]) -> tuple[list[str], dict]:
+    """Play ``lines`` through next_stage for a made-up debtor (born 1990-01-15, ZIP 02115).
+
+    Returns what the agent says each turn and the call state at the end."""
+    from datetime import date
+
+    from harness.call_state import CallState, Debtor
+    from harness.stages import next_stage
+
+    debtor = Debtor("demo", "demo-debt", "Alex", "Rivera", date(1990, 1, 15), "02115", "Demo", 1)
+    state = CallState.new("demo-call", debtor)
+    said = []
+    for line in ["", *lines]:
+        state, fixed = next_stage(state, line, debtor)
+        said.append(fixed if fixed is not None else "(the model answers)")
+    return said, state.to_dict()
+
+
+def _accept_part28() -> bool:
+    from harness.stages import VERIFY_REASK, VERIFY_RETRY
+
+    yes = "Yes, speaking."
+    _, right = _part28_call([yes, "fifteenth January nineteen ninety", "oh two one one five"])
+    said, wrong = _part28_call([yes, "January sixteenth nineteen ninety, zero two one one five"])
+    cut, frag = _part28_call([yes, "yeah this is", "one fifteen nineteen ninety"])
+    good = (
+        right["verified"]
+        and right["stage"] == "DISCUSS"
+        and not wrong["verified"]
+        and wrong["verify_attempts"] == 1
+        and said[-1] == VERIFY_RETRY
+        and cut[-2:] == [VERIFY_REASK, VERIFY_REASK]
+        and frag["verify_attempts"] == 0
+    )
+    print("spoken right answer verified:", right["verified"])
+    print("spoken wrong DOB attempts:", wrong["verify_attempts"], "| fragments:", cut[-2:])
+    return bool(good)
+
+
+def _demo_part28() -> None:
+    lines = [
+        "Yeah. This is",
+        "Yes, speaking.",
+        "could",
+        "the fifteenth of January nineteen ninety",
+        "oh two, one, one, five",
+    ]
+    said, state = _part28_call(lines)
+    print("a made-up debtor: born 1990-01-15, ZIP 02115; no model is called below\n")
+    for caller, agent in zip(["(call connects)", *lines], said, strict=True):
+        print(f"  caller: {caller}\n  agent:  {agent}\n")
+    print("verified:", state["verified"], "| attempts:", state["verify_attempts"])
+
+
+ACCEPTANCE["part-28"] = _accept_part28
+DEMOS["part-28"] = _demo_part28
