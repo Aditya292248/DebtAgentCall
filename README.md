@@ -26,6 +26,7 @@ harness/
   subagents.py          run_subagent, fan_out and the delegate / fan_out tools (after calls only)
   review.py             review_transcript(transcript, account): reviewer subagents check a finished call
   skills.py             Skill, discover(), skills_prompt() and the load_skill tool
+  payments.py           the payment ledger: parsing, current balance checks, history and the on-time report
 compliance/
   decision.py           Decision (allow, rule_id, reason, evidence), the answer every rule gives
   timezones.py          zones_for(zip, phone), the time zones a debtor might be in
@@ -55,7 +56,7 @@ instructions/
 skills/                 short playbooks for hard conversations (hardship, angry caller, ...)
 supabase/
   config.toml           local Supabase settings (database on port 54322)
-  migrations/           the debtor, phone, debt, call_attempt, flags, audit_event and call_message tables
+  migrations/           the debtor, phone, debt, call_attempt, flags, audit_event, call_message and payment tables
   seed.sql              made-up debtors, with call history and flags for each pre-call check
 tasks/
   verify.py             offline checks: format, lint, types, tests, import
@@ -182,7 +183,9 @@ There are three tables:
 
 - `debtor`: name, date of birth, address, ZIP and state
 - `phone`: the debtor's numbers, whether each is a cell or a landline, and when consent was given or taken back
-- `debt`: the creditor, the balance in cents, and a status (`active`, `disputed`, `paused` or `closed`)
+- `debt`: the creditor, the balance it was placed with in cents (`balance_cents`), the day it was opened (`opened_on`), and a status (`active`, `disputed`, `paused` or `closed`)
+
+`balance_cents` never changes after a payment. The balance owed now is `public.current_balance_cents(debt)`, which subtracts payments and adds back reversals (see [Payments](#payments)). `lookup_account`, the live call and the web list all read that function.
 
 The app connects with `DATABASE_URL` (see `.env.example`). It defaults to the local database, `postgresql://postgres:postgres@127.0.0.1:54322/postgres`. Row level security is on for every table, with only a read rule for signed-in Supabase users. The app's own direct connection is not limited by it.
 
@@ -461,7 +464,7 @@ A page in the browser with two areas: the debtor list on the left and the agent 
 
 - **Top bar:** "Check at" picks the time every check is run for, so you can see who would be blocked at, say, 9:30pm. "Now" goes back to the current time. "Overview" and "Compliance log" open the side panel.
 - **Left, debtors:** every made-up debt with its name, balance, account and creditor, and a small status dot with "Ready to call" or "Can't call". Hover a "Can't call" to see the blocking rules and reasons. Tabs show All, Ready or Can't call, and the search box matches name, account, creditor or state.
-- **Main, agent chat:** type a request such as `call Sam Doe`. Each tool the agent ran shows as a collapsed line you can open for its arguments and result. A call waits on an approval card: Approve only shows when a recent check passes, Deny always does, and the server runs every check again before it dials. Nothing dials from the browser.
+- **Main, agent chat:** type a request such as `call Sam Doe`. Each tool the agent ran shows as a collapsed line you can open for its arguments and result. A call waits on an approval card: Approve only shows when a recent check passes, Deny always does, and the server runs every check again before it dials. Nothing dials from the browser. A payment or reversal waits on its own card that shows the debtor, amount, date (in the browser's time zone, which the chat sends) and the balance before and after; nothing is written until Approve.
 - **Side panel:** opens from the right over the page. Click a debtor to see all the checks for them, passed and blocked. "Overview" shows how many debts are ready or blocked, the total owed, and how many debts each rule blocks. "Compliance log" shows the `audit_event` rows, newest first (rule, allow or block, reason, account and time), with a "Verified" or "Log was changed" mark and a "Can't call only" filter.
 
 Nothing on the page is made up in the browser: every number and badge comes from the database or from the Python checks, so it changes when the data does.
@@ -559,6 +562,22 @@ uv run demo part-17
 ```
 
 The demo prints the skills menu, then plays a caller who lost their job: the model loads the `hardship` playbook before answering.
+
+## Payments
+
+The operator chat can record what a debtor paid and answer questions about it. "Testpay Ledger paid 20 yesterday" becomes a `record_payment` request, which writes nothing: code finds the debt (an account number, or a name with exactly one match), reads the amount and the day ("yesterday" is the operator's yesterday, in the time zone the browser sends, else `OPERATOR_TZ`, else New York), checks them, and opens an approval card. Only Approve writes the row.
+
+- **Refused in code, before any card:** an amount of zero or less, more than the current balance, or that doesn't parse; a day in the future or before the debt's `opened_on`; an unknown debtor or a name that matches more than one debt.
+- **Checked again on Approve,** inside one transaction with the debt row locked, against the balance as it is then. So two cards that each fit the balance can't both be approved if together they overpay: the second is refused. The payment row and its audit event (`kind = payment`) commit together; a refusal at that point writes no payment and is audited as a `block`.
+- **The ledger is append-only.** `public.payment` refuses `update`, `delete` and `truncate`, with those privileges revoked, like `audit_event`. A correction is `reverse_payment(payment_id, reason)`, which also needs approval and adds a reversing row; a payment can be reversed once. The table's insert trigger checks the balance, the dates and the reversal again, so a write that skips the Python checks is refused too.
+- **One balance everywhere.** `debt.balance_cents` stays the amount the debt was placed with. `public.current_balance_cents(debt)` = `balance_cents` - payments + reversals is the only place the current balance is computed. `find_debtor_by_phone` reads it on each call turn, so the call tools, `lookup_account` and the sentence filter's known amount all reflect a payment on the next turn, and the old amount is blocked as `amount_mismatch`.
+- **Read-only questions:** `payment_history(debtor_id, since)` ("last 3 days" is today and the two days before, in the operator's time zone) gives the rows and their total. `on_time_report()` compares each debt's newest approved or confirmed `payment_plan` with its due dates: the down payment is due the day the plan was made, installment `k` is due `k` weeks, `2k` weeks or `k` months later; payments dated on or after the plan's start fill the installments in order; each one due so far is on time, late (covered only by a later payment) or missed (not covered yet), with no grace period. Debts without a plan are listed apart.
+
+Debts that existed before the payments migration get the day it ran as `opened_on`, so a backdated payment on one of them is refused until a person sets the real date. The seed sets it for the made-up debts. On an existing local database run `supabase migration up` (never against a hosted project).
+
+```bash
+uv run demo part-31
+```
 
 ## Dialer: the one safe way every call is placed
 

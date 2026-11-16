@@ -50,7 +50,7 @@ class Debtor:
     dob: date
     zip: str
     creditor: str
-    balance_cents: int
+    balance_cents: int  # owed now: public.current_balance_cents, after payments
 
     @property
     def full_name(self) -> str:

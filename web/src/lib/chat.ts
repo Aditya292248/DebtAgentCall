@@ -10,6 +10,21 @@ export type ToolCall = {
   result: string | null
 }
 
+/** What the server is waiting on: a call, a payment, or a payment reversal. */
+export type ApprovalAction = 'place_call' | 'record_payment' | 'reverse_payment'
+
+/** Written by the server for a payment or reversal; shown as it is. */
+export type PaymentDetails = {
+  amount?: string
+  paid_on?: string
+  method?: string
+  balance_before?: string
+  balance_after?: string
+  time_zone?: string
+  payment_id?: string
+  reason?: string
+}
+
 export type Approval = {
   id: string
   debtor_id: string
@@ -17,6 +32,8 @@ export type Approval = {
   /** Masked to the last four digits by the server. */
   phone: string | null
   tool_call_id: string
+  action: ApprovalAction
+  details: PaymentDetails
 }
 
 export type Dial = {
@@ -99,8 +116,17 @@ export function decideFailure(
   }
 }
 
+/** The browser's IANA time zone, so "paid yesterday" means the operator's yesterday. */
+export function localTimeZone(): string | undefined {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || undefined
+  } catch {
+    return undefined
+  }
+}
+
 export function sendChat(sessionId: string, message: string): Promise<ChatTurn> {
-  return postJson<ChatTurn>('/api/chat', { session_id: sessionId, message })
+  return postJson<ChatTurn>('/api/chat', { session_id: sessionId, message, tz: localTimeZone() })
 }
 
 export function decideApproval(
@@ -112,6 +138,7 @@ export function decideApproval(
     session_id: sessionId,
     approval_id: approvalId,
     approve,
+    tz: localTimeZone(),
   })
 }
 
