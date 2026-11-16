@@ -58,19 +58,19 @@ insert into public.phone (debtor_id, e164, line_type, consent_source, consent_at
     ('00000000-0000-4000-8000-000000000012', '+16465550112', 'landline',
      'account application', '2025-01-02 14:00:00+00', null);
 
-insert into public.debt (debtor_id, account_number, creditor, balance_cents, status) values
-    ('00000000-0000-4000-8000-000000000001', 'ACC-1001', 'Northwind Furniture', 125000, 'active'),
-    ('00000000-0000-4000-8000-000000000002', 'ACC-1002', 'Bluebird Dental', 31045, 'active'),
-    ('00000000-0000-4000-8000-000000000003', 'ACC-1003', 'Maple Street Gym', 8999, 'active'),
-    ('00000000-0000-4000-8000-000000000004', 'ACC-1004', 'Harbor Light Utilities', 45210, 'active'),
-    ('00000000-0000-4000-8000-000000000005', 'ACC-1005', 'Peachtree Auto Repair', 72000, 'active'),
-    ('00000000-0000-4000-8000-000000000006', 'ACC-1006', 'Seabreeze Vet Clinic', 15075, 'active'),
-    ('00000000-0000-4000-8000-000000000007', 'ACC-1007', 'Lone Oak Hardware', 23400, 'active'),
-    ('00000000-0000-4000-8000-000000000008', 'ACC-1008', 'Summit Ski Rentals', 9800, 'active'),
-    ('00000000-0000-4000-8000-000000000009', 'ACC-1009', 'Desert Bloom Florist', 6150, 'active'),
-    ('00000000-0000-4000-8000-000000000010', 'ACC-1010', 'Evergreen Phone Co', 18999, 'active'),
-    ('00000000-0000-4000-8000-000000000011', 'ACC-1011', 'Golden Gate Gym', 54000, 'active'),
-    ('00000000-0000-4000-8000-000000000012', 'ACC-1012', 'Empire Medical Group', 210000, 'active');
+insert into public.debt (debtor_id, account_number, creditor, balance_cents, status, opened_on) values
+    ('00000000-0000-4000-8000-000000000001', 'ACC-1001', 'Northwind Furniture', 125000, 'active', '2026-01-15'),
+    ('00000000-0000-4000-8000-000000000002', 'ACC-1002', 'Bluebird Dental', 31045, 'active', '2026-01-15'),
+    ('00000000-0000-4000-8000-000000000003', 'ACC-1003', 'Maple Street Gym', 8999, 'active', '2026-01-15'),
+    ('00000000-0000-4000-8000-000000000004', 'ACC-1004', 'Harbor Light Utilities', 45210, 'active', '2026-01-15'),
+    ('00000000-0000-4000-8000-000000000005', 'ACC-1005', 'Peachtree Auto Repair', 72000, 'active', '2026-01-15'),
+    ('00000000-0000-4000-8000-000000000006', 'ACC-1006', 'Seabreeze Vet Clinic', 15075, 'active', '2026-01-15'),
+    ('00000000-0000-4000-8000-000000000007', 'ACC-1007', 'Lone Oak Hardware', 23400, 'active', '2026-01-15'),
+    ('00000000-0000-4000-8000-000000000008', 'ACC-1008', 'Summit Ski Rentals', 9800, 'active', '2026-01-15'),
+    ('00000000-0000-4000-8000-000000000009', 'ACC-1009', 'Desert Bloom Florist', 6150, 'active', '2026-01-15'),
+    ('00000000-0000-4000-8000-000000000010', 'ACC-1010', 'Evergreen Phone Co', 18999, 'active', '2026-01-15'),
+    ('00000000-0000-4000-8000-000000000011', 'ACC-1011', 'Golden Gate Gym', 54000, 'active', '2026-01-15'),
+    ('00000000-0000-4000-8000-000000000012', 'ACC-1012', 'Empire Medical Group', 210000, 'active', '2026-01-15');
 
 -- Every call we placed, answered or not.
 --   Sam:    one old conversation, long enough ago that it no longer counts.
@@ -124,7 +124,8 @@ left join public.debt d on d.account_number = f.account_number;
 -- the anon key. This lives in the seed, not in a migration, on purpose: the seed
 -- only runs on a local `supabase db reset`, and `supabase db push` never sends it
 -- to a hosted project, where anon read access would expose every debtor.
--- Only `select` on the four tables the UI reads; anon still can't write anything.
+-- Only `select` on the tables the UI reads; anon still can't write anything.
+-- `payment` is read by `current_balance_cents`, the balance the list shows.
 create policy "anon can read debtors (local dev)" on public.debtor
     for select to anon using (true);
 create policy "anon can read phones (local dev)" on public.phone
@@ -132,4 +133,6 @@ create policy "anon can read phones (local dev)" on public.phone
 create policy "anon can read debts (local dev)" on public.debt
     for select to anon using (true);
 create policy "anon can read audit events (local dev)" on public.audit_event
+    for select to anon using (true);
+create policy "anon can read payments (local dev)" on public.payment
     for select to anon using (true);

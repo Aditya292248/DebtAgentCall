@@ -10,6 +10,11 @@ without caring about case or extra spaces, or ``None``.
 ``find_debtor_by_phone(e164)`` is the person and debt behind a phone number,
 which the call stages compare the caller's answers against.
 
+Both give the balance owed now, ``public.current_balance_cents(debt)`` (the
+original ``balance_cents`` less payments, plus reversals; see
+``harness/payments.py``). That is the amount a call may say and the sentence
+filter checks against, so a recorded payment shows on the next turn.
+
 The pre-call loaders read what ``compliance.check_before_call`` needs for one
 debt: ``load_attempts``, ``load_phone`` and ``load_flags`` each read one thing,
 and ``load_call_facts(account_number)`` puts them together as ``CallFacts``.
@@ -39,7 +44,8 @@ DEFAULT_DATABASE_URL = "postgresql://postgres:postgres@127.0.0.1:54322/postgres"
 CONNECT_TIMEOUT = 3  # seconds; a database that isn't running should fail fast
 
 FIND_ACCOUNT_SQL = """
-    select d.account_number, p.first_name || ' ' || p.last_name, d.creditor, d.balance_cents
+    select d.account_number, p.first_name || ' ' || p.last_name, d.creditor,
+           public.current_balance_cents(d)
     from public.debt d
     join public.debtor p on p.id = d.debtor_id
     where lower(p.first_name || ' ' || p.last_name) = lower(%s)
@@ -78,7 +84,7 @@ def find_account(name: str) -> dict | None:
 # The debtor and debt behind a phone number: what the call stages check against.
 DEBTOR_BY_PHONE_SQL = """
     select p.id::text, d.id::text, p.first_name, p.last_name, p.dob, p.zip,
-           d.creditor, d.balance_cents
+           d.creditor, public.current_balance_cents(d)
     from public.phone ph
     join public.debtor p on p.id = ph.debtor_id
     join public.debt d on d.debtor_id = p.id
@@ -88,10 +94,15 @@ DEBTOR_BY_PHONE_SQL = """
 """
 
 
-def find_debtor_by_phone(e164: str) -> Debtor | None:
-    """Who a call to ``e164`` is for, and their debt, or None if the number is unknown."""
-    with connect() as conn:
-        row = conn.execute(DEBTOR_BY_PHONE_SQL, (e164.strip(),)).fetchone()
+def find_debtor_by_phone(e164: str, conn: psycopg.Connection | None = None) -> Debtor | None:
+    """Who a call to ``e164`` is for, and their debt, or None if the number is unknown.
+
+    Pass ``conn`` to read inside a transaction you already have open.
+    """
+    if conn is None:
+        with connect() as own:
+            return find_debtor_by_phone(e164, own)
+    row = conn.execute(DEBTOR_BY_PHONE_SQL, (e164.strip(),)).fetchone()
     if row is None:
         return None
     debtor_id, debt_id, first, last, dob, zip_code, creditor, balance_cents = row

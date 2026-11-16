@@ -1,7 +1,12 @@
 import { LoaderCircle, SendHorizontal } from 'lucide-react'
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
 
-import { ApprovalCard, DialResult, ToolCallCard } from '@/components/ChatCards'
+import {
+  ApprovalCard,
+  DialResult,
+  PaymentApprovalCard,
+  ToolCallCard,
+} from '@/components/ChatCards'
 import { Notice } from '@/components/Notice'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -125,16 +130,25 @@ export function ChatPanel({ precallCheck }: Props) {
           {items.map((item, i) => (
             <Message key={i} item={item} />
           ))}
-          {pending.map((a) => (
-            <ApprovalCard
-              key={a.id}
-              approval={a}
-              check={checkFor(a.debtor_id)}
-              now={now}
-              busy={busy}
-              onDecide={(approve) => void decide(a, approve)}
-            />
-          ))}
+          {pending.map((a) =>
+            a.action === 'record_payment' || a.action === 'reverse_payment' ? (
+              <PaymentApprovalCard
+                key={a.id}
+                approval={a}
+                busy={busy}
+                onDecide={(approve) => void decide(a, approve)}
+              />
+            ) : (
+              <ApprovalCard
+                key={a.id}
+                approval={a}
+                check={checkFor(a.debtor_id)}
+                now={now}
+                busy={busy}
+                onDecide={(approve) => void decide(a, approve)}
+              />
+            ),
+          )}
           {busy && (
             <p className="flex items-center gap-2 text-sm text-muted-foreground">
               <LoaderCircle className="size-4 animate-spin" /> Working

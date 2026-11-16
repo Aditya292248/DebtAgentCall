@@ -1548,7 +1548,7 @@ def _demo_part24() -> None:
     root = tempfile.mkdtemp(prefix="chat-ui-demo-")
     phone = FakePhoneClient()
 
-    def make_operator(session_id: str) -> Operator:
+    def make_operator(session_id: str, tz: str | None = None) -> Operator:
         # Chat history in a temp folder instead of the session table; the tools
         # still read the local Supabase, and approved calls go to the fake phone.
         return Operator(
@@ -1804,3 +1804,159 @@ def _demo_part28() -> None:
 
 ACCEPTANCE["part-28"] = _accept_part28
 DEMOS["part-28"] = _demo_part28
+
+
+# ----------------------------------------------------------------------------
+# payments: "Testpay Ledger paid 20 yesterday" waits for approval, then is written
+# ----------------------------------------------------------------------------
+
+
+def _part31_debtor(conn) -> str:
+    """A made-up debtor with a $100.00 debt, inside ``conn``'s open transaction."""
+    import secrets
+
+    (person,) = conn.execute(
+        "insert into public.debtor (first_name, last_name, dob, address, zip, state) values "
+        "('Testpay', 'Ledger', '1980-01-01', '1 Made Up Way', '00000', 'CA') returning id"
+    ).fetchone()
+    account = f"TST-{secrets.token_hex(4)}"
+    conn.execute(
+        "insert into public.debt (debtor_id, account_number, creditor, balance_cents, opened_on)"
+        " values (%s, %s, 'Made Up Store', 10000, '2026-01-01')",
+        (person, account),
+    )
+    return account
+
+
+def _part31_one(conn, sql: str, account: str):
+    row = conn.execute(sql, (account,)).fetchone()
+    return row[0] if row else None
+
+
+def _part31_run(provider: Provider | None, *, approve: bool) -> tuple[list, dict]:
+    """Ask the operator to record a payment, approve it, then ask for the history.
+
+    Runs in one transaction on the local database that is rolled back, so the
+    made-up debtor and its append-only payment are never kept.
+    """
+    import tempfile
+    from contextlib import nullcontext
+    from datetime import UTC, datetime
+
+    from harness.db import connect
+    from harness.memory import JsonlSession
+    from harness.operator import Operator, operator_tz
+
+    now = datetime.now(UTC)
+    out: dict = {}
+    with tempfile.TemporaryDirectory() as root, connect() as conn:
+        conn.execute("select 1")  # everything below is one transaction, rolled back
+        try:
+            account = _part31_debtor(conn)
+            op = Operator(
+                JsonlSession.for_call(root, "chat-pay"),
+                provider=provider,
+                connect=lambda: nullcontext(conn),
+                clock=lambda: now,
+                tz=operator_tz("America/New_York"),
+            )
+            turns = [op.chat(f"Testpay Ledger ({account}) paid 20 yesterday, cash.")]
+            out["written_before"] = _part31_one(
+                conn,
+                "select count(*) from public.payment p join public.debt d on d.id = p.debt_id "
+                "where d.account_number = %s",
+                account,
+            )
+            pending = [a for a in turns[0].pending_approvals if a.action == "record_payment"]
+            out["pending"] = pending
+            if approve and pending:
+                turns.append(op.decide(pending[0].id, approve=True))
+                turns.append(op.chat("How much did Testpay Ledger pay in the last 3 days?"))
+            out["balance"] = _part31_one(
+                conn,
+                "select public.current_balance_cents(d) from public.debt d "
+                "where account_number = %s",
+                account,
+            )
+            out["account"] = account
+            out["today"] = now.astimezone(operator_tz("America/New_York")).date()
+        finally:
+            conn.rollback()
+    return turns, out
+
+
+def _accept_part31() -> bool:
+    """The real model turns "paid 20 yesterday" into one approval with the exact
+    amount and New York's yesterday, writes nothing before approval, and after
+    approval answers the 3-day question with $20."""
+    from datetime import timedelta
+
+    turns, out = _part31_run(None, approve=True)
+    for t in turns:
+        print("tools:", [c["name"] for c in t.tool_calls], "| reply:", t.reply)
+    pending = out["pending"]
+    yesterday = (out["today"] - timedelta(days=1)).isoformat()
+    good = (
+        out["written_before"] == 0
+        and len(pending) == 1
+        and pending[0].details.get("amount") == "$20.00"
+        and pending[0].details.get("paid_on") == yesterday
+        and out["balance"] == 8000
+        and len(turns) == 3
+        and "20" in turns[2].reply
+    )
+    if not good:
+        print("BAD:", {k: v for k, v in out.items() if k != "pending"}, pending)
+    return good
+
+
+def _demo_part31() -> None:
+    from model import fake
+    from model.fake import tool_call, tool_reply
+
+    real = _llm_configured()
+    print("model:", "the real one from LLM_BASE_URL" if real else "fake (set LLM_BASE_URL)\n")
+    provider = None
+    # The fake model can't know the made-up account number in advance, so it
+    # asks by name; record_payment takes a name with one match too.
+    if not real:
+        provider = fake(
+            scripted=[
+                tool_reply(
+                    tool_call(
+                        "record_payment",
+                        "c1",
+                        debtor_id="Testpay Ledger",
+                        amount="20",
+                        paid_on="yesterday",
+                        method="cash",
+                    )
+                ),
+                "Recording $20.00 from Testpay Ledger, paid yesterday. It is waiting for "
+                "your approval; nothing has been written.",
+                tool_reply(
+                    tool_call(
+                        "payment_history", "c2", debtor_id="Testpay Ledger", since="last 3 days"
+                    )
+                ),
+                "Testpay Ledger paid $20.00 in the last 3 days. The balance is now $80.00.",
+            ]
+        )
+    turns, out = _part31_run(provider, approve=True)
+    print("you>   Testpay Ledger paid 20 yesterday, cash.")
+    for i, t in enumerate(turns):
+        if i == 1:
+            print("\n[approve]")
+        elif i == 2:
+            print("\nyou>   How much did Testpay Ledger pay in the last 3 days?")
+        for c in t.tool_calls:
+            print(f"  tool  {c['name']}({c['arguments']}) -> {str(c['result'])[:140]}")
+        print("agent>", t.reply)
+        if i == 0:
+            print("payments written before approval:", out["written_before"])
+    print("\nbalance after:", f"${out['balance'] / 100:.2f}", "(was $100.00)")
+    print("   # the model asks, the person approves the exact amount and date, code writes it")
+
+
+ACCEPTANCE["part-31"] = lambda: ACCEPTANCE["part-20"]() and _accept_part31()
+DEMOS["part-31"] = _demo_part31

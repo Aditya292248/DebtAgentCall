@@ -31,7 +31,8 @@ type DebtorRow = {
     id: string
     account_number: string
     creditor: string
-    balance_cents: number
+    /** Owed now: public.current_balance_cents, after payments. */
+    current_balance_cents: number
     status: string
   }[]
 }
@@ -72,7 +73,7 @@ export function useDebts(at: string | null) {
       .from('debtor')
       .select(
         'first_name, last_name, state, zip, phone(e164, line_type), ' +
-          'debt(id, account_number, creditor, balance_cents, status)',
+          'debt(id, account_number, creditor, current_balance_cents, status)',
       )
       .order('last_name')
       .then(({ data, error }) => {
@@ -116,7 +117,7 @@ export function useDebts(at: string | null) {
       zip: p.zip,
       state: p.state,
       creditor: d.creditor,
-      balanceCents: d.balance_cents,
+      balanceCents: d.current_balance_cents,
       status: d.status,
       phones: p.phone,
       check: current?.checks.get(d.account_number),

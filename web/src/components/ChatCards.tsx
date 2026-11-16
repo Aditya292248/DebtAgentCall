@@ -1,4 +1,12 @@
-import { ChevronRight, CircleCheck, CircleHelp, CircleX, Phone, Wrench } from 'lucide-react'
+import {
+  ChevronRight,
+  CircleCheck,
+  CircleHelp,
+  CircleX,
+  Phone,
+  Receipt,
+  Wrench,
+} from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
 import { prettyJson, type Approval, type Dial, type ToolCall } from '@/lib/chat'
@@ -131,6 +139,85 @@ export function DialResult({ dial }: { dial: Dial }) {
         Outcome <span className="font-medium text-foreground">{dial.outcome ?? 'unknown'}</span>
       </span>
       {dial.call_id && <span>call {dial.call_id}</span>}
+    </div>
+  )
+}
+
+type PaymentApprovalProps = {
+  approval: Approval
+  busy: boolean
+  onDecide: (approve: boolean) => void
+}
+
+/** A record_payment or reverse_payment waiting on the person: the exact debtor,
+ *  amount and date the server will write. Nothing is written until Approve, and
+ *  the server checks the balance again then. */
+export function PaymentApprovalCard({ approval, busy, onDecide }: PaymentApprovalProps) {
+  const d = approval.details
+  const reversal = approval.action === 'reverse_payment'
+  return (
+    <div
+      className="space-y-4 rounded-xl border border-primary/40 bg-card p-5 shadow-sm ring-4 ring-primary-soft"
+      data-approval={approval.id}
+    >
+      <div className="flex items-center gap-2.5">
+        <span className="flex size-7 items-center justify-center rounded-full bg-primary-soft text-primary">
+          <Receipt className="size-3.5" />
+        </span>
+        <span className="text-sm font-semibold">
+          {reversal ? 'Payment reversal' : 'Payment'} waiting for your approval
+        </span>
+      </div>
+      <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-2 text-sm">
+        <dt className="text-muted-foreground">Debtor</dt>
+        <dd className="font-medium">
+          {approval.name}{' '}
+          <span className="font-normal text-muted-foreground">{approval.debtor_id}</span>
+        </dd>
+        <dt className="text-muted-foreground">Amount</dt>
+        <dd className="font-medium tabular-nums">{d.amount ?? 'unknown'}</dd>
+        <dt className="text-muted-foreground">{reversal ? 'Paid on' : 'Date'}</dt>
+        <dd className="tabular-nums">
+          {d.paid_on ?? 'unknown'}
+          {d.time_zone && !reversal && (
+            <span className="text-xs text-muted-foreground"> ({d.time_zone})</span>
+          )}
+        </dd>
+        <dt className="text-muted-foreground">Method</dt>
+        <dd>{d.method ?? 'unknown'}</dd>
+        {reversal ? (
+          <>
+            <dt className="text-muted-foreground">Reason</dt>
+            <dd>{d.reason}</dd>
+          </>
+        ) : (
+          <>
+            <dt className="text-muted-foreground">Balance</dt>
+            <dd className="tabular-nums">
+              {d.balance_before} to {d.balance_after}
+            </dd>
+          </>
+        )}
+      </dl>
+      <div className="flex flex-wrap items-center gap-2 border-t pt-4">
+        <Button size="lg" className="px-4" disabled={busy} onClick={() => onDecide(true)}>
+          Approve
+        </Button>
+        <Button
+          size="lg"
+          variant="outline"
+          className="px-4"
+          disabled={busy}
+          onClick={() => onDecide(false)}
+        >
+          Deny
+        </Button>
+        <p className="ml-auto text-xs text-muted-foreground">
+          {reversal
+            ? 'Adds a reversing entry. The payment itself is kept.'
+            : 'The server checks the balance again before it writes.'}
+        </p>
+      </div>
     </div>
   )
 }
