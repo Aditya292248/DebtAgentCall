@@ -7,12 +7,18 @@ answer, with this stage's instructions".
 
     GREETING     First turn: ask for the person by full name, nothing else.
                  "Yes, speaking" -> VERIFY. "He's not here" -> THIRD_PARTY.
-                 "Wrong number" -> WRAP. Anything else: the model answers.
+                 "Wrong number" -> WRAP. A question ("Who is this?") goes to
+                 the model; anything else, such as a cut-off "Yeah. This is",
+                 gets a fixed re-ask and no model call.
     VERIFY       Ask for date of birth and ZIP and compare them with the
                  database here, in code (FDCPA 805(b): no debt talk with anyone
                  but the debtor). They may come in one turn or two. A match
                  -> DISCLOSE. Two full answers that don't match -> WRAP, with a
-                 polite close and nothing about a debt.
+                 polite close and nothing about a debt. Answers may be spoken
+                 in words ("the fifteenth of January nineteen ninety", "zero
+                 two one one five"). A turn with no answer in it is not an
+                 attempt: a question goes to the model, anything else gets a
+                 fixed re-ask.
     DISCLOSE     Fixed text: recording notice, "automated assistant", and the
                  mini-Miranda (FDCPA 807(11)). Then DISCUSS. It never waits for
                  the caller, so it is said in the same turn the match happened.
@@ -24,8 +30,10 @@ answer, with this stage's instructions".
                  function (``compliance/triggers.py``). Fixed close only.
 
 The text matching is kept small and cautious: when unsure, the call does not
-move forward. A "yes" with a "no" or "not" in it is not a yes. The full list of
-stop phrases (lawyer, bankruptcy, "stop calling") is ``compliance/triggers.py``.
+move forward. A spoken date that could be read two ways, or is not a real date,
+is no answer at all, never a match. A "yes" with a "no" or "not" in it is not a
+yes. The full list of stop phrases (lawyer, bankruptcy, "stop calling") is
+``compliance/triggers.py``.
 """
 
 from __future__ import annotations
@@ -55,6 +63,12 @@ VERIFY_RETRY = (
 )
 ASK_DOB = "Thanks. And your date of birth?"
 ASK_ZIP = "Thanks. And your ZIP code?"
+# Said when a turn has nothing code can use (speech-to-text often sends half a
+# sentence as its own turn). None of them says anything was checked.
+GREETING_REASK = "Sorry, I didn't catch that. Am I speaking with {full_name}?"
+VERIFY_REASK = "Sorry, I didn't catch that. Could you tell me your date of birth and ZIP code?"
+REASK_DOB = "Sorry, I didn't catch that. Could you tell me your date of birth?"
+REASK_ZIP = "Sorry, I didn't catch that. Could you tell me your ZIP code?"
 VERIFY_FAILED = (
     "I'm sorry, I wasn't able to confirm who I'm speaking with, so I can't go any further "
     "today. Thank you for your time. Goodbye."
@@ -97,6 +111,13 @@ _YES = _any(
 )
 _NEGATION = _any(r"\b(?:no|nope|not|isn'?t|wrong|nobody|never)\b", r"n't\b")
 _QUESTION = _any(r"\?", r"^\W*(?:who|what|why|where|which|how)\b")
+# A turn that stops mid-sentence: "Yeah. This is", "My birthday is the", "Yes, and".
+# Only endings no finished answer has ("Yes I am" and "What's it for?" are finished).
+_CUT_OFF = re.compile(
+    r"\b(?:this is|it'?s|i'?m|name is|birthday is|zip is|code is|my|the|an?|and|or|but|"
+    r"um+|uh+|er)[^\w?]*$",
+    re.IGNORECASE,
+)
 
 _MONTHS = {
     "jan": 1,
@@ -124,6 +145,223 @@ _DATES = [  # (pattern, order of the groups: y=year, m=month, d=day)
 _ZIP = re.compile(r"(?<![\d/-])(\d{5})(?:-\d{4})?(?![\d/-])")
 
 
+# --- spoken numbers: what speech-to-text sends ("zero two one one five") ---------
+
+_UNIT = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9,
+}  # fmt: skip
+_ZERO = {"zero", "oh", "o"}
+_TEEN = {
+    "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14,
+    "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19,
+}  # fmt: skip
+_TENS = {
+    "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
+    "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90,
+}  # fmt: skip
+_ORDINAL = {
+    "first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5, "sixth": 6,
+    "seventh": 7, "eighth": 8, "ninth": 9, "tenth": 10, "eleventh": 11, "twelfth": 12,
+    "thirteenth": 13, "fourteenth": 14, "fifteenth": 15, "sixteenth": 16,
+    "seventeenth": 17, "eighteenth": 18, "nineteenth": 19, "twentieth": 20, "thirtieth": 30,
+}  # fmt: skip
+_MONTH_WORDS = (
+    "january february march april may june july august september october november december"
+)
+_MONTH_NAMES = {
+    name: i + 1 for i, full in enumerate(_MONTH_WORDS.split()) for name in (full, full[:3])
+} | {"sept": 9}
+_TOKEN = re.compile(r"[a-z]+(?:'[a-z]+)?|\d+[a-z]*")
+_DIGIT_DAY = re.compile(r"(\d{1,2})(?:st|nd|rd|th)?")
+
+Words = list[str]
+
+
+def _at(words: Words, i: int) -> str:
+    return words[i] if 0 <= i < len(words) else ""
+
+
+def _days(words: Words, i: int) -> list[tuple[int, int]]:
+    """Every way a day of the month could start at ``words[i]``: (day, next index)."""
+    w = _at(words, i)
+    if m := _DIGIT_DAY.fullmatch(w):
+        return [(int(m.group(1)), i + 1)]
+    if w in _TENS:
+        nxt = _at(words, i + 1)
+        unit = _UNIT.get(nxt) or (_ORDINAL[nxt] if _ORDINAL.get(nxt, 10) < 10 else 0)
+        whole = [(_TENS[w] + unit, i + 2)] if unit else []  # "twenty second", "thirty one"
+        return [*whole, (_TENS[w], i + 1)]
+    for table in (_ORDINAL, _TEEN, _UNIT):
+        if w in table:
+            return [(table[w], i + 1)]
+    return []
+
+
+def _two_digits(words: Words, i: int) -> tuple[int, int] | None:
+    """1 to 99 in words: "four", "fifteen", "ninety", "twenty three"."""
+    w = _at(words, i)
+    if w in _TENS:
+        if (nxt := _at(words, i + 1)) in _UNIT:
+            return _TENS[w] + _UNIT[nxt], i + 2
+        return _TENS[w], i + 1
+    for table in (_TEEN, _UNIT):
+        if w in table:
+            return table[w], i + 1
+    return None
+
+
+UNCLEAR_YEAR = -1  # a year whose last digit might be the first digit of the ZIP
+
+
+def _digit(w: str) -> str | None:
+    """One digit said as a word or written: "oh", "zero", "five", "5"."""
+    if w in _ZERO:
+        return "0"
+    return str(_UNIT[w]) if w in _UNIT else (w if re.fullmatch(r"\d", w) else None)
+
+
+def _run_length(words: Words, k: int) -> int:
+    """How many single digits are said in a row from ``words[k]`` ("and" between is fine)."""
+    n = 0
+    while True:
+        if _digit(_at(words, k)) is not None:
+            n, k = n + 1, k + 1
+        elif _at(words, k) == "and" and n and _digit(_at(words, k + 1)) is not None:
+            k += 1
+        else:
+            return n
+
+
+def _last_digit_of_year(words: Words, glued: frozenset[int], k: int) -> bool | None:
+    """Whether the single digit at ``words[k]`` ends the year (True), starts the ZIP
+    (False), or could be either (None). The five digits of a ZIP decide: in
+    "nineteen ninety nine oh two one oh" five digits follow "ninety", so the nine
+    starts the ZIP (1990, 90210); in "... nine oh two one one five" six follow, so it
+    ends the year (1999, 02115); a lone "nine" ends it too. Any other count is unclear,
+    unless a pause ("ninety, nine oh two") ends the year first."""
+    run = _run_length(words, k)
+    if run in (1, 6):
+        return True
+    if run == 5:
+        return False
+    return False if k not in glued else None
+
+
+def _year_tail(
+    words: Words, glued: frozenset[int], k: int
+) -> tuple[int, int] | tuple[None, int] | None:
+    """The 1 to 99 part of a year at ``words[k]`` ("ninety", "ninety one", "four"),
+    ``None`` if there is none, or ``(None, end)`` if its last digit is unclear."""
+    w = _at(words, k)
+    if w in _TEEN:
+        return _TEEN[w], k + 1
+    if w in _TENS:
+        if _at(words, k + 1) not in _UNIT:
+            return _TENS[w], k + 1
+        ends = _last_digit_of_year(words, glued, k + 1)
+        if ends is None:
+            return None, k + 2
+        return (_TENS[w] + _UNIT[words[k + 1]], k + 2) if ends else (_TENS[w], k + 1)
+    if w in _UNIT:  # only after "two thousand": "two thousand four"
+        ends = _last_digit_of_year(words, glued, k)
+        if ends is None:
+            return None, k + 1
+        return (_UNIT[w], k + 1) if ends else None
+    return None
+
+
+def _year(words: Words, glued: frozenset[int], i: int) -> tuple[int, int] | None:
+    """A whole year at ``words[i]``: "1990", "nineteen ninety", "two thousand (and)
+    four", "twenty oh four". A bare "ninety" is not a year. The year is
+    ``UNCLEAR_YEAR`` when its last digit might belong to the ZIP."""
+    w, nxt = _at(words, i), _at(words, i + 1)
+    if re.fullmatch(r"\d{4}", w):
+        return int(w), i + 1
+    if w == "two" and nxt == "thousand":
+        j = i + 3 if _at(words, i + 2) == "and" else i + 2
+        if (tail := _year_tail(words, glued, j)) is None:
+            return 2000, i + 2
+        return (UNCLEAR_YEAR if tail[0] is None else 2000 + tail[0]), tail[1]
+    century = _TEEN.get(w) or (20 if w == "twenty" else None)
+    if century is None:
+        return None
+    if nxt == "hundred":
+        return century * 100, i + 2
+    if nxt in _ZERO and (unit := _at(words, i + 2)) in _UNIT:
+        return century * 100 + _UNIT[unit], i + 3
+    if (nxt in _TEEN or nxt in _TENS) and (tail := _year_tail(words, glued, i + 1)):
+        return (UNCLEAR_YEAR if tail[0] is None else century * 100 + tail[0]), tail[1]
+    return None
+
+
+def _spoken_dates(
+    words: Words, glued: frozenset[int], i: int
+) -> list[tuple[tuple[int, int, int], int]]:
+    """Every (year, month, day) a spoken date starting at ``words[i]`` could mean,
+    with the index just past it."""
+    found = []
+    if month := _MONTH_NAMES.get(words[i]):  # "January (the) fifteenth nineteen ninety"
+        j = i + 2 if _at(words, i + 1) == "the" else i + 1
+        for day, k in _days(words, j):
+            if year := _year(words, glued, k):
+                found.append(((year[0], month, day), year[1]))
+    for day, j in _days(words, i):  # "(the) fifteenth (of) January nineteen ninety"
+        j += _at(words, j) == "of"
+        if month := _MONTH_NAMES.get(_at(words, j)):
+            k = j + 2 if _at(words, j + 1) == "of" else j + 1
+            if year := _year(words, glued, k):
+                found.append(((year[0], month, day), year[1]))
+    return found
+
+
+def _find_spoken_dob(text: str) -> tuple[date | None, str] | None:
+    """A date said in words, or ``None`` if none was said. One that reads two ways,
+    has an impossible day or month, or a year outside 1900 to today is said, but
+    gives no date."""
+    toks = list(_TOKEN.finditer(text.lower()))
+    words = [t.group() for t in toks]
+    # Words said with no comma or full stop before them: "ninety, nine" is not 99.
+    glued = frozenset(
+        k
+        for k in range(1, len(toks))
+        if not re.search(r"[,.;:!?]", text[toks[k - 1].end() : toks[k].start()])
+    )
+    for i in range(len(words)):
+        if not (found := _spoken_dates(words, glued, i)):
+            continue
+        end = max(e for _, e in found)
+        rest = text[: toks[i].start()] + " " + text[toks[end - 1].end() :]
+        if len({ymd for ymd, _ in found}) != 1:
+            return None, rest  # "January twenty one nineteen ninety one ...": unclear
+        y, m, d = found[0][0]
+        if y == UNCLEAR_YEAR:
+            return None, rest  # "nineteen ninety nine oh two": 1999, or 1990 and a ZIP?
+        try:
+            said = date(y, m, d)
+        except ValueError:
+            return None, rest  # "thirty second of January"
+        return (said if y >= 1900 and said <= date.today() else None), rest
+    return None
+
+
+def _find_spoken_zip(text: str) -> str | None:
+    """Exactly five digits said one by one: "zero two one one five", "oh two, one,
+    one and five". A run of four or six digits is no ZIP."""
+    words = [t.group() for t in _TOKEN.finditer(text.lower())] + [""]
+    run: list[str] = []
+    for i, w in enumerate(words):
+        if (d := _digit(w)) is not None:
+            run.append(d)
+        elif w == "and" and run and _digit(words[i + 1]) is not None:
+            continue
+        elif len(run) == 5:
+            return "".join(run)
+        else:
+            run = []
+    return None
+
+
 def _part(value: str) -> int:
     return _MONTHS[value[:3].lower()] if value[:1].isalpha() else int(value)
 
@@ -141,12 +379,13 @@ def find_dob(text: str) -> tuple[date | None, str]:
                 return date(parts["y"], parts["m"], parts["d"]), rest
             except ValueError:
                 return None, rest  # "13/45/1985": said a date, but not a real one
-    return None, text
+    return _find_spoken_dob(text) or (None, text)
 
 
 def find_zip(text: str) -> str | None:
+    """Five digits, as digits ("02115", "02115-1234") or said one by one in words."""
     m = _ZIP.search(text)
-    return m.group(1) if m else None
+    return m.group(1) if m else _find_spoken_zip(text)
 
 
 def said_yes(text: str, debtor: Debtor) -> bool:
@@ -176,15 +415,21 @@ def next_stage(state: CallState, caller_text: str, debtor: Debtor) -> tuple[Call
             return replace(state, stage=Stage.WRAP), WRONG_NUMBER_CLOSE
         if _NOT_HERE.search(text):
             return replace(state, stage=Stage.THIRD_PARTY), LOCATION_ASK.format(**names)
+        if _CUT_OFF.search(text):
+            return state, GREETING_REASK.format(**names)  # "Yeah. This is": half a sentence
         if said_yes(text, debtor):
             return replace(state, stage=Stage.VERIFY), VERIFY_ASK
-        return state, None  # "Who is this?": the model answers, still in GREETING
+        if _QUESTION.search(text):
+            return state, None  # "Who is this?": the model answers, still in GREETING
+        return state, GREETING_REASK.format(**names)  # "could": nothing to go on
 
     if state.stage == Stage.VERIFY:
         dob, rest = find_dob(text)
         zip_code = find_zip(rest)
-        if dob is None and zip_code is None:
-            return state, None  # "Why do you need that?": the model answers
+        if dob is None and zip_code is None:  # no answer, so not an attempt either
+            if _QUESTION.search(text) and not _CUT_OFF.search(text):
+                return state, None  # "Why do you need that?": the model answers
+            return state, _verify_reask(state)  # "zero two one", "hold on": ask again
         # Keep only whether each answer matched (never the answer itself), so the
         # caller can give the two in separate turns.
         if dob is not None:
@@ -212,6 +457,15 @@ def next_stage(state: CallState, caller_text: str, debtor: Debtor) -> tuple[Call
         return replace(state, stage=Stage.WRAP), THIRD_PARTY_CLOSE
 
     return state, None  # DISCUSS and WRAP: the model answers
+
+
+def _verify_reask(state: CallState) -> str:
+    """Ask again for whatever is still missing, with no word on what was said before."""
+    if state.dob_ok is not None and state.zip_ok is None:
+        return REASK_ZIP
+    if state.zip_ok is not None and state.dob_ok is None:
+        return REASK_DOB
+    return VERIFY_REASK
 
 
 def _disclose(state: CallState, names: dict[str, str]) -> tuple[CallState, str]:

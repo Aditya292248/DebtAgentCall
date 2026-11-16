@@ -182,7 +182,7 @@ def test_model_saying_verified_unlocks_nothing(tmp_path: Path) -> None:
     call = Call(tmp_path, [claims, "Your balance is $1,250.00 with Northwind Furniture."])
     for line in TO_VERIFY:
         call.turn("call_claim", line)
-    reply = call.turn("call_claim", "I already told you who I am.")
+    reply = call.turn("call_claim", "Why? I already told you who I am.")  # a question: the model
 
     assert call.tool_results()[0].startswith("error: blocked")
     for leak in LEAKS:
