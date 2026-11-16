@@ -1118,7 +1118,13 @@ def _staged_call(script_name: str, provider: Provider | None, *, use_db: bool) -
 
     from harness.call_state import Stage
     from harness.memory import JsonlSession
-    from phone.webhook import audit_to_db, create_app, find_debtor_in_db
+    from phone.webhook import (
+        audit_to_db,
+        create_app,
+        debt_as_found,
+        find_debtor_in_db,
+        read_debt_in_db,
+    )
     from sim.agentphone_sim import load_script, run_script
 
     folder = Path(tempfile.mkdtemp(prefix="debtagent-stages-"))
@@ -1136,6 +1142,7 @@ def _staged_call(script_name: str, provider: Provider | None, *, use_db: bool) -
         open_session=partial(JsonlSession.for_call, folder),
         find_debtor=find_debtor_in_db if use_db else _part13_debtors().get,
         audit=audit,
+        read_debt=read_debt_in_db if use_db else debt_as_found,
     )
     turns = run_script(load_script(script_name), TestClient(app), secret)
     (path,) = folder.glob("*.jsonl")
@@ -1166,11 +1173,12 @@ def _accept_part13() -> bool:
         if name == "sam_verified":
             said = DISCLOSURE.format(first_name="Sam")
             first_amount = next((i for i, r in enumerate(replies) if "$" in r), None)
+            disclosed = next((i for i, r in enumerate(replies) if r.startswith(said)), None)
+            # The first amount is the purpose line from the debt row, after the mini-Miranda.
             good = (
-                said in replies
-                and first_amount is not None
-                and first_amount > replies.index(said)
-                and "1,250" in replies[first_amount]
+                disclosed is not None
+                and first_amount == disclosed
+                and "$1250.00" in replies[disclosed][len(said) :]
             )
         else:
             good = "DISCUSS" not in stages and not any(debt_talk.search(r) for r in replies)
@@ -1411,7 +1419,7 @@ def _part19_call(script_name: str, reply: str | None) -> tuple:
 
     from harness.memory import JsonlSession
     from model import fake
-    from phone.webhook import create_app
+    from phone.webhook import create_app, debt_as_found
     from sim.agentphone_sim import load_script, run_script
 
     model_calls: list[str] = []
@@ -1432,6 +1440,7 @@ def _part19_call(script_name: str, reply: str | None) -> tuple:
         ),
         find_debtor=_part13_debtors().get,
         audit=lambda decision, call_id, debt_id: blocked.append(decision),
+        read_debt=debt_as_found,
         record_stop=stops.append,
     )
     turns = run_script(load_script(script_name), TestClient(app), secret)
@@ -1601,7 +1610,7 @@ def _part22_call(lines: list[str], provider: Provider | None) -> tuple:
     from harness.call_tools import MemoryCallStore
     from harness.memory import JsonlSession
     from phone.live_tools import ToolBackend
-    from phone.webhook import create_app
+    from phone.webhook import create_app, debt_as_found
     from sim.agentphone_sim import Script, run_script
 
     store = MemoryCallStore()
@@ -1615,6 +1624,7 @@ def _part22_call(lines: list[str], provider: Provider | None) -> tuple:
         find_debtor=_part13_debtors().get,
         audit=lambda decision, call_id, debt_id: None,
         record_stop=lambda stop: None,
+        read_debt=debt_as_found,
         open_backend=lambda debtor: ToolBackend(
             store, lambda d, call_id, debt_id: decisions.append(d), flags=[]
         ),
@@ -2072,3 +2082,81 @@ def _demo_operator_reads() -> None:
 
 ACCEPTANCE["operator-reads"] = _accept_operator_reads
 DEMOS["operator-reads"] = _demo_operator_reads
+
+
+# --- the call's purpose after the disclosure (part-29) ----------------------------
+
+_P29_LINES = ["Hello?", "Yes, this is Morgan.", "March seventh nineteen eighty two", "30309"]
+
+
+def _part29_call(status: str | None, lines: list[str] | None = None) -> list[str]:
+    """A signed simulated call for a made-up debtor. ``status`` is the debt row's
+    status as read at the disclosure; None means the row can't be read."""
+    import secrets
+    import tempfile
+    from datetime import date
+    from functools import partial
+    from pathlib import Path
+
+    from fastapi.testclient import TestClient
+
+    from harness.call_state import Debtor, DebtRow
+    from harness.memory import JsonlSession
+    from model import fake
+    from phone.webhook import create_app
+    from sim.agentphone_sim import Script, run_script
+
+    phone = "+16175550142"
+    debtor = Debtor(
+        "demo", "demo-debt", "Morgan", "Ellis", date(1982, 3, 7), "30309",
+        "Lakeside Appliance Co", 73450,
+    )  # fmt: skip
+    row = None if status is None else DebtRow(debtor.creditor, debtor.balance_cents, status)
+    secret = secrets.token_hex(16)
+    app = create_app(
+        provider=fake(default="Thanks. Goodbye."),
+        secret=secret,
+        open_session=partial(JsonlSession.for_call, Path(tempfile.mkdtemp(prefix="p29-"))),
+        find_debtor={phone: debtor}.get,
+        read_debt=lambda d: row,
+        audit=lambda decision, call_id, debt_id: None,
+        record_stop=lambda stop: None,
+    )
+    script = Script("part29", lines or _P29_LINES, from_number=phone)
+    return [reply for _, reply in run_script(script, TestClient(app), secret)]
+
+
+def _accept_part29() -> bool:
+    from harness.stages import DISCLOSURE
+
+    said = DISCLOSURE.format(first_name="Morgan")
+    active = _part29_call("active")[-1]
+    paused = _part29_call("paused")[-1]
+    unread = _part29_call(None)[-1]
+    good = (
+        active.startswith(said)
+        and "how can i help" not in active.lower()
+        and "Lakeside Appliance Co" in active
+        and "$734.50" in active
+        and "$" not in paused
+        and "plan" not in paused
+        and "$" not in unread
+        and "Goodbye" in unread
+    )
+    for name, line in (("active", active), ("paused", paused), ("unreadable", unread)):
+        print(f"  {name}: {line[len(said) :].strip()}")
+    return good
+
+
+def _demo_part29() -> None:
+    print("a made-up debtor; the debt row says Lakeside Appliance Co, 73450 cents\n")
+    for status in ("active", "disputed", None):
+        print(f"debt row: {status or 'cannot be read'}")
+        lines = _P29_LINES
+        for caller, agent in zip(lines, _part29_call(status, lines), strict=False):
+            print(f"  caller: {caller}\n  agent:  {agent}")
+        print()
+
+
+ACCEPTANCE["part-29"] = _accept_part29
+DEMOS["part-29"] = _demo_part29

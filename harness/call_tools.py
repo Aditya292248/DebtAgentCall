@@ -56,7 +56,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from compliance.decision import Decision, allow, block
 from compliance.flags import Flag, check_cease
 from compliance.hours import Contact, check_calling_hours
-from harness.call_state import CallState, Debtor, Stage
+from harness.call_state import CallState, Debtor, Stage, money
 from harness.tools import Tool, ToolRegistry
 
 AuditWriter = Callable[[Decision, str, str | None], None]  # (decision, call_id, debt_id)
@@ -395,7 +395,7 @@ class CallTools:
         return json.dumps(
             {
                 "creditor": d.creditor,
-                "balance": f"{d.balance_cents // 100}.{d.balance_cents % 100:02d}",
+                "balance": money(d.balance_cents),
                 "currency": "USD",
                 "disputed": self.disputed(),
             }

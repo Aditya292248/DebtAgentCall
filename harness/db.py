@@ -37,7 +37,7 @@ import os
 import psycopg
 
 from compliance import Attempt, CallFacts, Flag, PhoneConsent
-from harness.call_state import Debtor
+from harness.call_state import Debtor, DebtRow
 from model.provider import _load_dotenv
 
 DEFAULT_DATABASE_URL = "postgresql://postgres:postgres@127.0.0.1:54322/postgres"
@@ -116,6 +116,24 @@ def find_debtor_by_phone(e164: str, conn: psycopg.Connection | None = None) -> D
         creditor=creditor,
         balance_cents=balance_cents,
     )
+
+
+DEBT_ROW_SQL = (
+    "select d.creditor, public.current_balance_cents(d), d.status from public.debt d"
+    " where d.id = %s"
+)
+
+
+def read_debt_row(debt_id: str, conn: psycopg.Connection | None = None) -> DebtRow | None:
+    """The debt's creditor, balance owed now (after payments) and status, or None.
+
+    Pass ``conn`` to read inside a transaction you already have open.
+    """
+    if conn is None:
+        with connect() as own:
+            return read_debt_row(debt_id, own)
+    row = conn.execute(DEBT_ROW_SQL, (debt_id,)).fetchone()
+    return DebtRow(*row) if row else None
 
 
 # --- pre-call loaders ----------------------------------------------------------

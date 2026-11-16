@@ -47,7 +47,7 @@ from model.fake import tool_call, tool_reply
 from model.provider import LLMResponse
 from phone import signed_headers
 from phone.live_tools import COMMITMENT_RULE, PENDING_LINE, ToolBackend
-from phone.webhook import CANT_CONTINUE, WEBHOOK_PATH, create_app
+from phone.webhook import CANT_CONTINUE, WEBHOOK_PATH, create_app, debt_as_found
 from sim.agentphone_sim import Script, run_script
 
 SECRET = "whsec_test_only"
@@ -100,6 +100,7 @@ class Call:
             agent_factory=lambda s: Agent(provider=provider, session=s, tools=tools),
             open_session=lambda cid: JsonlSession.for_call(self.folder, cid),
             find_debtor={SAM_PHONE: SAM}.get,
+            read_debt=debt_as_found,
             audit=lambda d, call_id, debt_id: self.blocked.append(d),
             record_stop=lambda stop: None,
             open_backend=open_backend or self._open,
