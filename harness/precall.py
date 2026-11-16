@@ -20,6 +20,7 @@ import psycopg
 
 from compliance import Decision, check_before_call
 from compliance.audit import record
+from compliance.testnumbers import was_exempted
 from harness.db import load_call_facts
 
 
@@ -42,4 +43,7 @@ def check_and_record(
     debt_id = facts.debt_id if facts else None
     for d in decisions:
         record(conn, d, kind="gate", call_id=call_id, debt_id=debt_id)
+        if was_exempted(d):
+            # A second, separate row so every skipped hours check is easy to find.
+            record(conn, d, kind="test_number_exemption", call_id=call_id, debt_id=debt_id)
     return decisions
