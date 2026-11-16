@@ -211,19 +211,78 @@ def _two_digits(words: Words, i: int) -> tuple[int, int] | None:
     return None
 
 
-def _year(words: Words, i: int) -> tuple[int, int] | None:
+UNCLEAR_YEAR = -1  # a year whose last digit might be the first digit of the ZIP
+
+
+def _digit(w: str) -> str | None:
+    """One digit said as a word or written: "oh", "zero", "five", "5"."""
+    if w in _ZERO:
+        return "0"
+    return str(_UNIT[w]) if w in _UNIT else (w if re.fullmatch(r"\d", w) else None)
+
+
+def _run_length(words: Words, k: int) -> int:
+    """How many single digits are said in a row from ``words[k]`` ("and" between is fine)."""
+    n = 0
+    while True:
+        if _digit(_at(words, k)) is not None:
+            n, k = n + 1, k + 1
+        elif _at(words, k) == "and" and n and _digit(_at(words, k + 1)) is not None:
+            k += 1
+        else:
+            return n
+
+
+def _last_digit_of_year(words: Words, glued: frozenset[int], k: int) -> bool | None:
+    """Whether the single digit at ``words[k]`` ends the year (True), starts the ZIP
+    (False), or could be either (None). The five digits of a ZIP decide: in
+    "nineteen ninety nine oh two one oh" five digits follow "ninety", so the nine
+    starts the ZIP (1990, 90210); in "... nine oh two one one five" six follow, so it
+    ends the year (1999, 02115); a lone "nine" ends it too. Any other count is unclear,
+    unless a pause ("ninety, nine oh two") ends the year first."""
+    run = _run_length(words, k)
+    if run in (1, 6):
+        return True
+    if run == 5:
+        return False
+    return False if k not in glued else None
+
+
+def _year_tail(
+    words: Words, glued: frozenset[int], k: int
+) -> tuple[int, int] | tuple[None, int] | None:
+    """The 1 to 99 part of a year at ``words[k]`` ("ninety", "ninety one", "four"),
+    ``None`` if there is none, or ``(None, end)`` if its last digit is unclear."""
+    w = _at(words, k)
+    if w in _TEEN:
+        return _TEEN[w], k + 1
+    if w in _TENS:
+        if _at(words, k + 1) not in _UNIT:
+            return _TENS[w], k + 1
+        ends = _last_digit_of_year(words, glued, k + 1)
+        if ends is None:
+            return None, k + 2
+        return (_TENS[w] + _UNIT[words[k + 1]], k + 2) if ends else (_TENS[w], k + 1)
+    if w in _UNIT:  # only after "two thousand": "two thousand four"
+        ends = _last_digit_of_year(words, glued, k)
+        if ends is None:
+            return None, k + 1
+        return (_UNIT[w], k + 1) if ends else None
+    return None
+
+
+def _year(words: Words, glued: frozenset[int], i: int) -> tuple[int, int] | None:
     """A whole year at ``words[i]``: "1990", "nineteen ninety", "two thousand (and)
-    four", "twenty oh four". A bare "ninety" is not a year."""
+    four", "twenty oh four". A bare "ninety" is not a year. The year is
+    ``UNCLEAR_YEAR`` when its last digit might belong to the ZIP."""
     w, nxt = _at(words, i), _at(words, i + 1)
     if re.fullmatch(r"\d{4}", w):
         return int(w), i + 1
     if w == "two" and nxt == "thousand":
-        j = i + 2
-        if _at(words, j) == "and" and _two_digits(words, j + 1):
-            j += 1
-        if rest := _two_digits(words, j):
-            return 2000 + rest[0], rest[1]
-        return 2000, j
+        j = i + 3 if _at(words, i + 2) == "and" else i + 2
+        if (tail := _year_tail(words, glued, j)) is None:
+            return 2000, i + 2
+        return (UNCLEAR_YEAR if tail[0] is None else 2000 + tail[0]), tail[1]
     century = _TEEN.get(w) or (20 if w == "twenty" else None)
     if century is None:
         return None
@@ -231,25 +290,27 @@ def _year(words: Words, i: int) -> tuple[int, int] | None:
         return century * 100, i + 2
     if nxt in _ZERO and (unit := _at(words, i + 2)) in _UNIT:
         return century * 100 + _UNIT[unit], i + 3
-    if (nxt in _TEEN or nxt in _TENS) and (rest := _two_digits(words, i + 1)):
-        return century * 100 + rest[0], rest[1]
+    if (nxt in _TEEN or nxt in _TENS) and (tail := _year_tail(words, glued, i + 1)):
+        return (UNCLEAR_YEAR if tail[0] is None else century * 100 + tail[0]), tail[1]
     return None
 
 
-def _spoken_dates(words: Words, i: int) -> list[tuple[tuple[int, int, int], int]]:
+def _spoken_dates(
+    words: Words, glued: frozenset[int], i: int
+) -> list[tuple[tuple[int, int, int], int]]:
     """Every (year, month, day) a spoken date starting at ``words[i]`` could mean,
     with the index just past it."""
     found = []
     if month := _MONTH_NAMES.get(words[i]):  # "January (the) fifteenth nineteen ninety"
         j = i + 2 if _at(words, i + 1) == "the" else i + 1
         for day, k in _days(words, j):
-            if year := _year(words, k):
+            if year := _year(words, glued, k):
                 found.append(((year[0], month, day), year[1]))
     for day, j in _days(words, i):  # "(the) fifteenth (of) January nineteen ninety"
         j += _at(words, j) == "of"
         if month := _MONTH_NAMES.get(_at(words, j)):
             k = j + 2 if _at(words, j + 1) == "of" else j + 1
-            if year := _year(words, k):
+            if year := _year(words, glued, k):
                 found.append(((year[0], month, day), year[1]))
     return found
 
@@ -260,14 +321,22 @@ def _find_spoken_dob(text: str) -> tuple[date | None, str] | None:
     gives no date."""
     toks = list(_TOKEN.finditer(text.lower()))
     words = [t.group() for t in toks]
+    # Words said with no comma or full stop before them: "ninety, nine" is not 99.
+    glued = frozenset(
+        k
+        for k in range(1, len(toks))
+        if not re.search(r"[,.;:!?]", text[toks[k - 1].end() : toks[k].start()])
+    )
     for i in range(len(words)):
-        if not (found := _spoken_dates(words, i)):
+        if not (found := _spoken_dates(words, glued, i)):
             continue
         end = max(e for _, e in found)
         rest = text[: toks[i].start()] + " " + text[toks[end - 1].end() :]
         if len({ymd for ymd, _ in found}) != 1:
             return None, rest  # "January twenty one nineteen ninety one ...": unclear
         y, m, d = found[0][0]
+        if y == UNCLEAR_YEAR:
+            return None, rest  # "nineteen ninety nine oh two": 1999, or 1990 and a ZIP?
         try:
             said = date(y, m, d)
         except ValueError:
@@ -279,18 +348,12 @@ def _find_spoken_dob(text: str) -> tuple[date | None, str] | None:
 def _find_spoken_zip(text: str) -> str | None:
     """Exactly five digits said one by one: "zero two one one five", "oh two, one,
     one and five". A run of four or six digits is no ZIP."""
-
-    def digit(w: str) -> str | None:
-        if w in _ZERO:
-            return "0"
-        return str(_UNIT[w]) if w in _UNIT else (w if re.fullmatch(r"\d", w) else None)
-
     words = [t.group() for t in _TOKEN.finditer(text.lower())] + [""]
     run: list[str] = []
     for i, w in enumerate(words):
-        if (d := digit(w)) is not None:
+        if (d := _digit(w)) is not None:
             run.append(d)
-        elif w == "and" and run and digit(words[i + 1]) is not None:
+        elif w == "and" and run and _digit(words[i + 1]) is not None:
             continue
         elif len(run) == 5:
             return "".join(run)

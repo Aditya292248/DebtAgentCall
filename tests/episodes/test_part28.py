@@ -20,6 +20,7 @@ All offline, with the fake model. Only made-up people, dates and ZIP codes.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
@@ -159,6 +160,57 @@ def test_date_and_zip_in_one_spoken_turn() -> None:
     assert find_zip(rest) == "02115"
     dob, rest = find_dob("fifteenth January 1990 oh two one one five")
     assert (dob, find_zip(rest)) == (date(1990, 1, 15), "02115")
+
+
+@pytest.mark.parametrize(
+    "said, dob, zip_code",
+    [
+        # The year's last word could be the ZIP's first digit: the ZIP's five digits decide.
+        ("January fifteenth nineteen ninety, nine oh two one oh", date(1990, 1, 15), "90210"),
+        ("January fifteenth nineteen ninety nine oh two one oh", date(1990, 1, 15), "90210"),
+        ("January fifteenth nineteen ninety. Nine zero two one zero.", date(1990, 1, 15), "90210"),
+        (
+            "January fifteenth nineteen ninety nine zero two one one five",
+            date(1999, 1, 15),
+            "02115",
+        ),
+        ("January fifteenth nineteen ninety nine", date(1999, 1, 15), None),
+        ("March first nineteen eighty, six oh six oh one", date(1980, 3, 1), "60601"),
+        ("the first of March two thousand, nine oh two one oh", date(2000, 3, 1), "90210"),
+        ("the first of March two thousand, four", date(2004, 3, 1), None),
+        (
+            "the first of March two thousand twenty one oh two one one five",
+            date(2021, 3, 1),
+            "02115",
+        ),
+    ],
+)
+def test_a_zip_said_right_after_the_year(said: str, dob: date, zip_code: str | None) -> None:
+    got, rest = find_dob(said)
+    assert (got, find_zip(rest)) == (dob, zip_code)
+
+
+@pytest.mark.parametrize(
+    "said",
+    [
+        "January fifteenth nineteen ninety nine oh two",  # 1999, or 1990 and half a ZIP
+        "January fifteenth nineteen ninety one one one five",
+    ],
+)
+def test_a_year_that_might_end_in_a_zip_digit_is_no_answer(said: str) -> None:
+    assert find_dob(said)[0] is None
+
+
+def test_right_answer_with_a_zip_starting_nine_verifies() -> None:
+    debtor = replace(ALEX, zip="90210")
+    state, fixed = next_stage(
+        _verifying(), "January fifteenth nineteen ninety, nine oh two one oh", debtor
+    )
+    assert state.verified and fixed == DISCLOSURE.format(**NAMES)
+    state, fixed = next_stage(
+        _verifying(), "January fifteenth nineteen ninety nine oh two one oh", debtor
+    )
+    assert state.verified and state.verify_attempts == 0
 
 
 @pytest.mark.parametrize(
