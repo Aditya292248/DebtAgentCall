@@ -1118,7 +1118,13 @@ def _staged_call(script_name: str, provider: Provider | None, *, use_db: bool) -
 
     from harness.call_state import Stage
     from harness.memory import JsonlSession
-    from phone.webhook import audit_to_db, create_app, find_debtor_in_db
+    from phone.webhook import (
+        audit_to_db,
+        create_app,
+        debt_as_found,
+        find_debtor_in_db,
+        read_debt_in_db,
+    )
     from sim.agentphone_sim import load_script, run_script
 
     folder = Path(tempfile.mkdtemp(prefix="debtagent-stages-"))
@@ -1136,6 +1142,7 @@ def _staged_call(script_name: str, provider: Provider | None, *, use_db: bool) -
         open_session=partial(JsonlSession.for_call, folder),
         find_debtor=find_debtor_in_db if use_db else _part13_debtors().get,
         audit=audit,
+        read_debt=read_debt_in_db if use_db else debt_as_found,
     )
     turns = run_script(load_script(script_name), TestClient(app), secret)
     (path,) = folder.glob("*.jsonl")
@@ -1166,11 +1173,12 @@ def _accept_part13() -> bool:
         if name == "sam_verified":
             said = DISCLOSURE.format(first_name="Sam")
             first_amount = next((i for i, r in enumerate(replies) if "$" in r), None)
+            disclosed = next((i for i, r in enumerate(replies) if r.startswith(said)), None)
+            # The first amount is the purpose line from the debt row, after the mini-Miranda.
             good = (
-                said in replies
-                and first_amount is not None
-                and first_amount > replies.index(said)
-                and "1,250" in replies[first_amount]
+                disclosed is not None
+                and first_amount == disclosed
+                and "$1250.00" in replies[disclosed][len(said) :]
             )
         else:
             good = "DISCUSS" not in stages and not any(debt_talk.search(r) for r in replies)
@@ -1411,7 +1419,7 @@ def _part19_call(script_name: str, reply: str | None) -> tuple:
 
     from harness.memory import JsonlSession
     from model import fake
-    from phone.webhook import create_app
+    from phone.webhook import create_app, debt_as_found
     from sim.agentphone_sim import load_script, run_script
 
     model_calls: list[str] = []
@@ -1432,6 +1440,7 @@ def _part19_call(script_name: str, reply: str | None) -> tuple:
         ),
         find_debtor=_part13_debtors().get,
         audit=lambda decision, call_id, debt_id: blocked.append(decision),
+        read_debt=debt_as_found,
         record_stop=stops.append,
     )
     turns = run_script(load_script(script_name), TestClient(app), secret)
@@ -1481,10 +1490,682 @@ ACCEPTANCE["part-19"] = lambda: ACCEPTANCE["part-13"]() and _accept_part19()
 DEMOS["part-19"] = _demo_part19
 
 
+# ----------------------------------------------------------------------------
+# chat panel in the web UI: the real API, a fake model, a fake phone
+# ----------------------------------------------------------------------------
+
+_PART24_CALL = r"^\s*(?:please\s+)?call\s+(.+?)[.!?\s]*$"
+
+
+def _part24_fake_model(messages: list[dict]):
+    """A stand-in operator model: "call <name>" -> find, check, ask to place the call.
+
+    It asks to place the call even when the check blocks it, so the page shows a
+    blocked approval card (no Approve button) as well as an allowed one.
+    """
+    import json
+    import re
+
+    from model.fake import tool_call, tool_reply
+
+    last = messages[-1]
+    call_id = f"demo_{len(messages)}"
+    if last.get("role") != "tool":
+        found = re.match(_PART24_CALL, str(last.get("content") or ""), re.IGNORECASE)
+        if not found:
+            return 'This is the fake model. Try "call Sam Doe" or "call Casey Morgan".'
+        return tool_reply(tool_call("find_debtor", call_id, query=found.group(1)))
+    asked = {
+        c["id"]: c["function"]["name"]
+        for m in messages
+        if m.get("role") == "assistant"
+        for c in m.get("tool_calls") or []
+    }
+    tool = asked.get(last.get("tool_call_id"))
+    body = str(last.get("content") or "")
+    if body.startswith("error"):
+        return f"That didn't work: {body}"
+    data = json.loads(body)
+    if tool == "find_debtor":
+        first = data["matches"][0]
+        return tool_reply(tool_call("check_call", call_id, debtor_id=first["id"]))
+    if tool == "check_call":
+        return tool_reply(tool_call("place_call", call_id, debtor_id=data["debtor_id"]))
+    if tool == "place_call":
+        return (
+            f"I asked to call {data['name']} ({data['debtor_id']}). Nothing has been dialed: "
+            "approve or deny it in the card below."
+        )
+    return "Done."
+
+
+def _demo_part24() -> None:
+    """Serve the real chat API with a fake model and a fake phone, for ``npm run dev``."""
+    import os
+    import tempfile
+
+    import uvicorn
+
+    from harness import api
+    from harness.memory import JsonlSession
+    from harness.operator import Operator
+    from model import fake
+    from phone.client import FakePhoneClient
+
+    real = _llm_configured()
+    provider = None if real else fake(scripted=_part24_fake_model)
+    root = tempfile.mkdtemp(prefix="chat-ui-demo-")
+    phone = FakePhoneClient()
+
+    def make_operator(session_id: str, tz: str | None = None) -> Operator:
+        # Chat history in a temp folder instead of the session table; the tools
+        # still read the local Supabase, and approved calls go to the fake phone.
+        return Operator(
+            JsonlSession.for_call(root, f"chat-{session_id}"), provider=provider, phone=phone
+        )
+
+    api.make_operator = make_operator
+    port = int(os.environ.get("API_PORT", "8000"))
+    print("model:", "the real one from LLM_BASE_URL" if real else "fake (set LLM_BASE_URL)")
+    print("phone: fake, so an approved call rings nobody")
+    print(f"chat history: {root}")
+    print(
+        "\nTo use it:\n"
+        "  1. npx supabase start, with the synthetic seed loaded (debtors, phones)\n"
+        "  2. this terminal: uv run demo part-24   (serves /api on "
+        f"http://127.0.0.1:{port})\n"
+        "  3. another one: cd web && npm run dev, then open http://localhost:5173\n"
+        '  4. type "call Sam Doe" in the chat on the right; the approval card shows the\n'
+        "     masked phone and the check. During calling hours it can be approved; at\n"
+        '     night, or for a debtor the checks block (try "call Casey Morgan"), the\n'
+        "     card has only Deny.\n"
+        "Ctrl+C stops the server.\n"
+    )
+    uvicorn.run(api.app, host="127.0.0.1", port=port)
+
+
+DEMOS["part-24"] = _demo_part24
+
+
+# ----------------------------------------------------------------------------
+# call tools on live calls: the gate and the approver behind every tool call
+# ----------------------------------------------------------------------------
+
+_PART22_TO_DISCUSS = ["Hello?", "Yes, this is Sam Doe speaking.", "April 12, 1985, and 90012."]
+
+
+def _part22_call(lines: list[str], provider: Provider | None) -> tuple:
+    """Play ``lines`` through the signed simulator against the live webhook.
+
+    ``provider`` None means the real model. The tools write to memory, not the
+    database. Returns ``(turns, store, decisions, tool_results)``.
+    """
+    import secrets
+    import tempfile
+    from functools import partial
+    from pathlib import Path
+
+    from fastapi.testclient import TestClient
+
+    from harness.call_tools import MemoryCallStore
+    from harness.memory import JsonlSession
+    from phone.live_tools import ToolBackend
+    from phone.webhook import create_app, debt_as_found
+    from sim.agentphone_sim import Script, run_script
+
+    store = MemoryCallStore()
+    decisions: list = []
+    folder = Path(tempfile.mkdtemp(prefix="debtagent-p22-"))
+    secret = secrets.token_hex(16)
+    app = create_app(
+        provider=provider,
+        secret=secret,
+        open_session=partial(JsonlSession.for_call, folder),
+        find_debtor=_part13_debtors().get,
+        audit=lambda decision, call_id, debt_id: None,
+        record_stop=lambda stop: None,
+        read_debt=debt_as_found,
+        open_backend=lambda debtor: ToolBackend(
+            store, lambda d, call_id, debt_id: decisions.append(d), flags=[]
+        ),
+        supervisor_number="",
+    )
+    turns = run_script(Script("part22", lines), TestClient(app), secret)
+    results = [
+        m["content"]
+        for path in folder.glob("*.jsonl")
+        for m in JsonlSession(path).load()
+        if m.get("role") == "tool"
+    ]
+    return turns, store, decisions, results
+
+
+def _part22_lookup_model() -> Provider:
+    """A fake model that calls lookup_account, then reads out what it got."""
+    from model import fake
+    from model.fake import tool_call, tool_reply
+
+    def reply(messages: list):  # type: ignore[no-untyped-def]
+        last = messages[-1]
+        if last.get("role") == "tool":
+            return f"Here is what I found. {last['content']}"
+        return tool_reply(tool_call("lookup_account"))
+
+    return fake(scripted=reply)
+
+
+def _accept_part22() -> bool:
+    # Before verification: the lookup is blocked by the gate, no balance is said.
+    lines = _PART22_TO_DISCUSS[:2] + ["Why do you need that? How much do I owe?"]
+    turns, _, _, results = _part22_call(lines, _part22_lookup_model())
+    spoken = turns[-1][1]
+    early = bool(results) and results[0].startswith("error: blocked") and "1,250" not in spoken
+    print(f"  lookup before verification: {'ok' if early else 'BAD'} ({results[:1]})")
+
+    # The real model, verified: a plan outside the policy is saved as pending only.
+    ask = "Set up a plan for me: fifty dollars down and the rest monthly over eighteen months."
+    turns, store, decisions, _ = _part22_call([*_PART22_TO_DISCUSS, ask], None)
+    for caller, agent in turns[3:]:
+        print(f"  caller> {caller}\n   agent> {agent}")
+    statuses = [r["status"] for r in store.rows if r["kind"] == "payment_plan"]
+    print(f"  plans saved: {statuses}; decisions: {[(d.rule_id, d.allow) for d in decisions]}")
+    pending = bool(statuses) and set(statuses) == {"pending"}
+    return early and pending
+
+
+def _demo_part22() -> None:
+    from model import fake
+    from model.fake import tool_call, tool_reply
+
+    print("-- not verified yet: the model calls lookup_account anyway --")
+    lines = _PART22_TO_DISCUSS[:2] + ["Why do you need that? How much do I owe?"]
+    turns, _, decisions, results = _part22_call(lines, _part22_lookup_model())
+    for caller, agent in turns:
+        print(f"  caller> {caller}\n   agent> {agent}")
+    print(f"  tool result: {results[0]}")
+    for d in decisions:
+        print(f"  audit: {d.rule_id} {'allow' if d.allow else 'block'}: {d.reason}")
+
+    for label, down, count in (("inside", "25000", "10"), ("outside", "5000", "18")):
+        print(f"\n-- verified: a plan {label} the policy --")
+        plan = tool_call(
+            "offer_payment_plan", down_cents=down, installments=count, frequency="monthly"
+        )
+        model = fake(scripted=[tool_reply(plan), "Thanks, I have noted that plan."])
+        turns, store, decisions, results = _part22_call(
+            [*_PART22_TO_DISCUSS, "Can we set up a plan?"], model
+        )
+        print(f"  caller> {turns[-1][0]}\n   agent> {turns[-1][1]}")
+        print(f"  tool result: {results[0][:90]}")
+        print(f"  saved: {[r['status'] for r in store.rows]}")
+
+    print("\n-- the model ends the call --")
+    model = fake(scripted=[tool_reply(tool_call("end_call", reason="done")), "Goodbye."])
+    turns, _, _, _ = _part22_call([*_PART22_TO_DISCUSS, "That's all.", "Hello?"], model)
+    print(f"  caller> {turns[-1][0]}\n   agent> {turns[-1][1]} (hung up; 'Hello?' never sent)")
+    print("\n   # every tool call on a real call passes the gate, then the approver, and")
+    print("   # anything it saves is committed before the caller hears about it")
+
+
+ACCEPTANCE["part-22"] = lambda: ACCEPTANCE["part-19"]() and _accept_part22()
+DEMOS["part-22"] = _demo_part22
+
+
+def _part27_decisions(test_numbers: frozenset[str]):
+    from datetime import UTC, datetime
+
+    from compliance import CallFacts, PhoneConsent, check_before_call
+
+    night = datetime(2026, 11, 5, 12, 0, tzinfo=UTC)  # 04:00 in Los Angeles
+    phone = PhoneConsent("+12135550101", consent_at=datetime(2025, 1, 15, tzinfo=UTC))
+    facts = CallFacts("demo", "90012", phone, [], [])
+    return check_before_call(facts, night, test_numbers=test_numbers)
+
+
+def _accept_part27() -> bool:
+    from compliance import may_call
+    from compliance.testnumbers import EXEMPTION_REASON, parse_test_numbers
+
+    listed = parse_test_numbers("*, +12135550101")
+    unlisted = _part27_decisions(frozenset())
+    exempt = _part27_decisions(listed)
+    hours = {d.rule_id: d for d in exempt}["calling_hours"]
+    good = (
+        listed == {"+12135550101"}
+        and not may_call(unlisted)
+        and may_call(exempt)
+        and hours.reason == EXEMPTION_REASON
+    )
+    print("unlisted blocked:", not may_call(unlisted), "| listed allowed:", may_call(exempt))
+    return good
+
+
+def _demo_part27() -> None:
+    from compliance import may_call
+    from compliance.testnumbers import parse_test_numbers
+
+    print("a call at 04:00 in Los Angeles (all numbers synthetic)\n")
+    for label, raw in (("TEST_NUMBERS unset", ""), ("TEST_NUMBERS=+12135550101", "+12135550101")):
+        decisions = _part27_decisions(parse_test_numbers(raw))
+        print(f"{label}: {'MAY CALL' if may_call(decisions) else 'DO NOT CALL'}")
+        for d in decisions[:3]:
+            print(f"  {'allow' if d.allow else 'BLOCK'}  {d.rule_id:<14} {d.reason}")
+        print()
+    print("   # only calling_hours is skipped; consent, 7-in-7, cease, DNC and the rest still run")
+
+
+ACCEPTANCE["part-27"] = _accept_part27
+DEMOS["part-27"] = _demo_part27
+
+
+def _part28_call(lines: list[str]) -> tuple[list[str], dict]:
+    """Play ``lines`` through next_stage for a made-up debtor (born 1990-01-15, ZIP 02115).
+
+    Returns what the agent says each turn and the call state at the end."""
+    from datetime import date
+
+    from harness.call_state import CallState, Debtor
+    from harness.stages import next_stage
+
+    debtor = Debtor("demo", "demo-debt", "Alex", "Rivera", date(1990, 1, 15), "02115", "Demo", 1)
+    state = CallState.new("demo-call", debtor)
+    said = []
+    for line in ["", *lines]:
+        state, fixed = next_stage(state, line, debtor)
+        said.append(fixed if fixed is not None else "(the model answers)")
+    return said, state.to_dict()
+
+
+def _accept_part28() -> bool:
+    from harness.stages import VERIFY_REASK, VERIFY_RETRY
+
+    yes = "Yes, speaking."
+    _, right = _part28_call([yes, "fifteenth January nineteen ninety", "oh two one one five"])
+    said, wrong = _part28_call([yes, "January sixteenth nineteen ninety, zero two one one five"])
+    cut, frag = _part28_call([yes, "yeah this is", "one fifteen nineteen ninety"])
+    good = (
+        right["verified"]
+        and right["stage"] == "DISCUSS"
+        and not wrong["verified"]
+        and wrong["verify_attempts"] == 1
+        and said[-1] == VERIFY_RETRY
+        and cut[-2:] == [VERIFY_REASK, VERIFY_REASK]
+        and frag["verify_attempts"] == 0
+    )
+    print("spoken right answer verified:", right["verified"])
+    print("spoken wrong DOB attempts:", wrong["verify_attempts"], "| fragments:", cut[-2:])
+    return bool(good)
+
+
+def _demo_part28() -> None:
+    lines = [
+        "Yeah. This is",
+        "Yes, speaking.",
+        "could",
+        "the fifteenth of January nineteen ninety",
+        "oh two, one, one, five",
+    ]
+    said, state = _part28_call(lines)
+    print("a made-up debtor: born 1990-01-15, ZIP 02115; no model is called below\n")
+    for caller, agent in zip(["(call connects)", *lines], said, strict=True):
+        print(f"  caller: {caller}\n  agent:  {agent}\n")
+    print("verified:", state["verified"], "| attempts:", state["verify_attempts"])
+
+
+ACCEPTANCE["part-28"] = _accept_part28
+DEMOS["part-28"] = _demo_part28
+
+
+# ----------------------------------------------------------------------------
+# payments: "Testpay Ledger paid 20 yesterday" waits for approval, then is written
+# ----------------------------------------------------------------------------
+
+
+def _part31_debtor(conn) -> str:
+    """A made-up debtor with a $100.00 debt, inside ``conn``'s open transaction."""
+    import secrets
+
+    (person,) = conn.execute(
+        "insert into public.debtor (first_name, last_name, dob, address, zip, state) values "
+        "('Testpay', 'Ledger', '1980-01-01', '1 Made Up Way', '00000', 'CA') returning id"
+    ).fetchone()
+    account = f"TST-{secrets.token_hex(4)}"
+    conn.execute(
+        "insert into public.debt (debtor_id, account_number, creditor, balance_cents, opened_on)"
+        " values (%s, %s, 'Made Up Store', 10000, '2026-01-01')",
+        (person, account),
+    )
+    return account
+
+
+def _part31_one(conn, sql: str, account: str):
+    row = conn.execute(sql, (account,)).fetchone()
+    return row[0] if row else None
+
+
+def _part31_run(provider: Provider | None, *, approve: bool) -> tuple[list, dict]:
+    """Ask the operator to record a payment, approve it, then ask for the history.
+
+    Runs in one transaction on the local database that is rolled back, so the
+    made-up debtor and its append-only payment are never kept.
+    """
+    import tempfile
+    from contextlib import nullcontext
+    from datetime import UTC, datetime
+
+    from harness.db import connect
+    from harness.memory import JsonlSession
+    from harness.operator import Operator, operator_tz
+
+    now = datetime.now(UTC)
+    out: dict = {}
+    with tempfile.TemporaryDirectory() as root, connect() as conn:
+        conn.execute("select 1")  # everything below is one transaction, rolled back
+        try:
+            account = _part31_debtor(conn)
+            op = Operator(
+                JsonlSession.for_call(root, "chat-pay"),
+                provider=provider,
+                connect=lambda: nullcontext(conn),
+                clock=lambda: now,
+                tz=operator_tz("America/New_York"),
+            )
+            turns = [op.chat(f"Testpay Ledger ({account}) paid 20 yesterday, cash.")]
+            out["written_before"] = _part31_one(
+                conn,
+                "select count(*) from public.payment p join public.debt d on d.id = p.debt_id "
+                "where d.account_number = %s",
+                account,
+            )
+            pending = [a for a in turns[0].pending_approvals if a.action == "record_payment"]
+            out["pending"] = pending
+            if approve and pending:
+                turns.append(op.decide(pending[0].id, approve=True))
+                turns.append(op.chat("How much did Testpay Ledger pay in the last 3 days?"))
+            out["balance"] = _part31_one(
+                conn,
+                "select public.current_balance_cents(d) from public.debt d "
+                "where account_number = %s",
+                account,
+            )
+            out["account"] = account
+            out["today"] = now.astimezone(operator_tz("America/New_York")).date()
+        finally:
+            conn.rollback()
+    return turns, out
+
+
+def _accept_part31() -> bool:
+    """The real model turns "paid 20 yesterday" into one approval with the exact
+    amount and New York's yesterday, writes nothing before approval, and after
+    approval answers the 3-day question with $20."""
+    from datetime import timedelta
+
+    turns, out = _part31_run(None, approve=True)
+    for t in turns:
+        print("tools:", [c["name"] for c in t.tool_calls], "| reply:", t.reply)
+    pending = out["pending"]
+    yesterday = (out["today"] - timedelta(days=1)).isoformat()
+    good = (
+        out["written_before"] == 0
+        and len(pending) == 1
+        and pending[0].details.get("amount") == "$20.00"
+        and pending[0].details.get("paid_on") == yesterday
+        and out["balance"] == 8000
+        and len(turns) == 3
+        and "20" in turns[2].reply
+    )
+    if not good:
+        print("BAD:", {k: v for k, v in out.items() if k != "pending"}, pending)
+    return good
+
+
+def _demo_part31() -> None:
+    from model import fake
+    from model.fake import tool_call, tool_reply
+
+    real = _llm_configured()
+    print("model:", "the real one from LLM_BASE_URL" if real else "fake (set LLM_BASE_URL)\n")
+    provider = None
+    # The fake model can't know the made-up account number in advance, so it
+    # asks by name; record_payment takes a name with one match too.
+    if not real:
+        provider = fake(
+            scripted=[
+                tool_reply(
+                    tool_call(
+                        "record_payment",
+                        "c1",
+                        debtor_id="Testpay Ledger",
+                        amount="20",
+                        paid_on="yesterday",
+                        method="cash",
+                    )
+                ),
+                "Recording $20.00 from Testpay Ledger, paid yesterday. It is waiting for "
+                "your approval; nothing has been written.",
+                tool_reply(
+                    tool_call(
+                        "payment_history", "c2", debtor_id="Testpay Ledger", since="last 3 days"
+                    )
+                ),
+                "Testpay Ledger paid $20.00 in the last 3 days. The balance is now $80.00.",
+            ]
+        )
+    turns, out = _part31_run(provider, approve=True)
+    print("you>   Testpay Ledger paid 20 yesterday, cash.")
+    for i, t in enumerate(turns):
+        if i == 1:
+            print("\n[approve]")
+        elif i == 2:
+            print("\nyou>   How much did Testpay Ledger pay in the last 3 days?")
+        for c in t.tool_calls:
+            print(f"  tool  {c['name']}({c['arguments']}) -> {str(c['result'])[:140]}")
+        print("agent>", t.reply)
+        if i == 0:
+            print("payments written before approval:", out["written_before"])
+    print("\nbalance after:", f"${out['balance'] / 100:.2f}", "(was $100.00)")
+    print("   # the model asks, the person approves the exact amount and date, code writes it")
+
+
+ACCEPTANCE["part-31"] = lambda: ACCEPTANCE["part-20"]() and _accept_part31()
+DEMOS["part-31"] = _demo_part31
+
+
+# ----------------------------------------------------------------------------
+# operator account tools: reads, notes, callbacks and stops, from the chat
+# ----------------------------------------------------------------------------
+
+
+def _operator_reads_run(provider: Provider | None, questions: list[str], at: str) -> list:
+    """Ask the operator ``questions`` about two made-up debtors (one with a cease),
+    inside one transaction on the local database that is rolled back afterwards."""
+    import tempfile
+    from contextlib import nullcontext
+    from datetime import datetime
+
+    from harness.db import connect
+    from harness.memory import JsonlSession
+    from harness.operator import Operator, operator_tz
+
+    when = datetime.fromisoformat(at)
+    turns = []
+    with tempfile.TemporaryDirectory() as root, connect() as conn:
+        conn.execute("select 1")  # one transaction, rolled back at the end
+        try:
+            for last, balance, cease in (("Bigowe", 9_000_000_00, False), ("Quietly", 100, True)):
+                (person,) = conn.execute(
+                    "insert into public.debtor (first_name, last_name, dob, address, zip, state)"
+                    " values ('Testread', %s, '1980-01-01', '1 Made Up Way', '90012', 'CA')"
+                    " returning id",
+                    (last,),
+                ).fetchone() or (None,)
+                conn.execute(
+                    "insert into public.phone (debtor_id, e164, line_type, consent_source,"
+                    " consent_at) values (%s, '+12135550199', 'cell', 'made-up', '2026-01-01')",
+                    (person,),
+                )
+                conn.execute(
+                    "insert into public.debt (debtor_id, account_number, creditor, balance_cents,"
+                    " opened_on) values (%s, %s, 'Made Up Store', %s, '2026-01-01')",
+                    (person, f"TST-{last.upper()}", balance),
+                )
+                if cease:
+                    conn.execute(
+                        "insert into public.flags (debtor_id, kind, source) "
+                        "values (%s, 'cease', 'made-up')",
+                        (person,),
+                    )
+            op = Operator(
+                JsonlSession.for_call(root, "chat-reads"),
+                provider=provider,
+                connect=lambda: nullcontext(conn),
+                clock=lambda: when,
+                tz=operator_tz("America/Los_Angeles"),
+            )
+            turns = [op.chat(q) for q in questions]
+        finally:
+            conn.rollback()
+    return turns
+
+
+_OPERATOR_READS_QUESTIONS = [
+    "Who has the highest debt?",
+    "When can we next call Testread Quietly?",
+]
+
+
+def _accept_operator_reads() -> bool:
+    """The real model answers "who has the highest debt" from list_debtors, and
+    says Testread Quietly can't be called (a cease) from next_allowed_call."""
+    turns = _operator_reads_run(None, _OPERATOR_READS_QUESTIONS, _PART07_WHEN)
+    for t in turns:
+        print("tools:", [c["name"] for c in t.tool_calls], "| reply:", t.reply)
+    if len(turns) != 2:
+        return False
+    first_tools = [c["name"] for c in turns[0].tool_calls]
+    second_tools = [c["name"] for c in turns[1].tool_calls]
+    return (
+        "list_debtors" in first_tools
+        and "Bigowe" in turns[0].reply
+        and ("next_allowed_call" in second_tools or "check_call" in second_tools)
+        and any(w in turns[1].reply.lower() for w in ("cease", "stop", "can't", "cannot", "not"))
+    )
+
+
+def _demo_operator_reads() -> None:
+    from model import fake
+    from model.fake import tool_call, tool_reply
+
+    real = _llm_configured()
+    print("model:", "the real one from LLM_BASE_URL" if real else "fake (set LLM_BASE_URL)\n")
+    provider = None
+    if not real:
+        provider = fake(
+            scripted=[
+                tool_reply(
+                    tool_call("list_debtors", "c1", sort="balance", filter="", limit="1000")
+                ),
+                "Testread Bigowe owes the most: $9,000,000.00.",
+                tool_reply(tool_call("next_allowed_call", "c2", debtor_id="Testread Quietly")),
+                "Testread Quietly asked us to stop (cease), so there is no time we can call.",
+            ]
+        )
+    turns = _operator_reads_run(provider, _OPERATOR_READS_QUESTIONS, _PART07_WHEN)
+    for question, t in zip(_OPERATOR_READS_QUESTIONS, turns, strict=True):
+        print("you>  ", question)
+        for c in t.tool_calls:
+            print(f"  tool  {c['name']}({c['arguments']}) -> {str(c['result'])[:160]}")
+        print("agent>", t.reply, "\n")
+    print("   # a limit of 1000 comes back capped; the cease means no time, not a workaround")
+
+
+ACCEPTANCE["operator-reads"] = _accept_operator_reads
+DEMOS["operator-reads"] = _demo_operator_reads
+
+
+# --- the call's purpose after the disclosure (part-29) ----------------------------
+
+_P29_LINES = ["Hello?", "Yes, this is Morgan.", "March seventh nineteen eighty two", "30309"]
+
+
+def _part29_call(status: str | None, lines: list[str] | None = None) -> list[str]:
+    """A signed simulated call for a made-up debtor. ``status`` is the debt row's
+    status as read at the disclosure; None means the row can't be read."""
+    import secrets
+    import tempfile
+    from datetime import date
+    from functools import partial
+    from pathlib import Path
+
+    from fastapi.testclient import TestClient
+
+    from harness.call_state import Debtor, DebtRow
+    from harness.memory import JsonlSession
+    from model import fake
+    from phone.webhook import create_app
+    from sim.agentphone_sim import Script, run_script
+
+    phone = "+16175550142"
+    debtor = Debtor(
+        "demo", "demo-debt", "Morgan", "Ellis", date(1982, 3, 7), "30309",
+        "Lakeside Appliance Co", 73450,
+    )  # fmt: skip
+    row = None if status is None else DebtRow(debtor.creditor, debtor.balance_cents, status)
+    secret = secrets.token_hex(16)
+    app = create_app(
+        provider=fake(default="Thanks. Goodbye."),
+        secret=secret,
+        open_session=partial(JsonlSession.for_call, Path(tempfile.mkdtemp(prefix="p29-"))),
+        find_debtor={phone: debtor}.get,
+        read_debt=lambda d: row,
+        audit=lambda decision, call_id, debt_id: None,
+        record_stop=lambda stop: None,
+    )
+    script = Script("part29", lines or _P29_LINES, from_number=phone)
+    return [reply for _, reply in run_script(script, TestClient(app), secret)]
+
+
+def _accept_part29() -> bool:
+    from harness.stages import DISCLOSURE
+
+    said = DISCLOSURE.format(first_name="Morgan")
+    active = _part29_call("active")[-1]
+    paused = _part29_call("paused")[-1]
+    unread = _part29_call(None)[-1]
+    good = (
+        active.startswith(said)
+        and "how can i help" not in active.lower()
+        and "Lakeside Appliance Co" in active
+        and "$734.50" in active
+        and "$" not in paused
+        and "plan" not in paused
+        and "$" not in unread
+        and "Goodbye" in unread
+    )
+    for name, line in (("active", active), ("paused", paused), ("unreadable", unread)):
+        print(f"  {name}: {line[len(said) :].strip()}")
+    return good
+
+
+def _demo_part29() -> None:
+    print("a made-up debtor; the debt row says Lakeside Appliance Co, 73450 cents\n")
+    for status in ("active", "disputed", None):
+        print(f"debt row: {status or 'cannot be read'}")
+        lines = _P29_LINES
+        for caller, agent in zip(lines, _part29_call(status, lines), strict=False):
+            print(f"  caller: {caller}\n  agent:  {agent}")
+        print()
+
+
+ACCEPTANCE["part-29"] = _accept_part29
+DEMOS["part-29"] = _demo_part29
+
+
 # bill upload: the model reads a bill into a draft, a person confirms it
 # ----------------------------------------------------------------------------
 
-_PART23_REPLY = (
+_BILLS_REPLY = (
     '{"fields": {"first_name": "Riley", "last_name": "Example", '
     '"address": "100 Test Street, Los Angeles", "zip": "90012", "state": "CA", '
     '"phone": "(213) 555-0199", "creditor": "Northbank Utilities", "balance": "$1,234.56", '
@@ -1492,7 +2173,7 @@ _PART23_REPLY = (
 )
 
 
-def _part23_png() -> bytes:
+def _bills_png() -> bytes:
     """A synthetic 1x1 white PNG standing in for a photo of a bill."""
     import struct
     import zlib
@@ -1510,7 +2191,7 @@ def _part23_png() -> bytes:
     )
 
 
-def _part23_run(provider: Provider | None) -> bool:
+def _bills_run(provider: Provider | None) -> bool:
     """Upload, a bad confirm, a good confirm, then the pre-call checks. Prints each step."""
     import tempfile
     from datetime import UTC, datetime
@@ -1521,7 +2202,7 @@ def _part23_run(provider: Provider | None) -> bool:
     db = MemoryBillDb()
     with tempfile.TemporaryDirectory() as root:
         bills = Bills(store=LocalBillStore(root), db=db, provider=provider)
-        draft = bills.upload(_part23_png(), "image/png")
+        draft = bills.upload(_bills_png(), "image/png")
     print("draft", draft.id)
     for name, value in draft.fields.items():
         flag = draft.flags.get(name)
@@ -1576,21 +2257,21 @@ def _part23_run(provider: Provider | None) -> bool:
     )
 
 
-def _accept_part23() -> bool:
+def _accept_bills() -> bool:
     # A real vision model on the synthetic bill: whatever it reads, nothing is
     # saved before confirm, anything that wouldn't pass is flagged, and the
     # saved debtor still can't be called.
-    return _part23_run(None)
+    return _bills_run(None)
 
 
-def _demo_part23() -> None:
+def _demo_bills() -> None:
     from model import fake
 
     real = _llm_configured()
     print("model:", "the real one from LLM_BASE_URL" if real else "fake (set LLM_BASE_URL)\n")
-    _part23_run(None if real else fake(default=_PART23_REPLY))
+    _bills_run(None if real else fake(default=_BILLS_REPLY))
     print("\n   # the model reads, the code checks, the person confirms; a bill is not consent")
 
 
-ACCEPTANCE["part-23"] = _accept_part23
-DEMOS["part-23"] = _demo_part23
+ACCEPTANCE["bills"] = _accept_bills
+DEMOS["bills"] = _demo_bills

@@ -1,15 +1,16 @@
 <!doctype html>
-<html lang="en" class="dark">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>DebtAgentCall</title>
     <script>
-      // Apply the saved theme before the first paint, so light mode doesn't flash dark.
+      // Light is the default. Apply a saved dark theme before the first paint,
+      // so it doesn't flash light.
       try {
-        if (localStorage.getItem('debtagentcall-theme') === 'light') {
-          document.documentElement.classList.remove('dark')
+        if (localStorage.getItem('debtagentcall-theme') === 'dark') {
+          document.documentElement.classList.add('dark')
         }
       } catch {}
     </script>

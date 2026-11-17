@@ -7,15 +7,24 @@ answer, with this stage's instructions".
 
     GREETING     First turn: ask for the person by full name, nothing else.
                  "Yes, speaking" -> VERIFY. "He's not here" -> THIRD_PARTY.
-                 "Wrong number" -> WRAP. Anything else: the model answers.
+                 "Wrong number" -> WRAP. A question ("Who is this?") goes to
+                 the model; anything else, such as a cut-off "Yeah. This is",
+                 gets a fixed re-ask and no model call.
     VERIFY       Ask for date of birth and ZIP and compare them with the
                  database here, in code (FDCPA 805(b): no debt talk with anyone
                  but the debtor). They may come in one turn or two. A match
                  -> DISCLOSE. Two full answers that don't match -> WRAP, with a
-                 polite close and nothing about a debt.
+                 polite close and nothing about a debt. Answers may be spoken
+                 in words ("the fifteenth of January nineteen ninety", "zero
+                 two one one five"). A turn with no answer in it is not an
+                 attempt: a question goes to the model, anything else gets a
+                 fixed re-ask.
     DISCLOSE     Fixed text: recording notice, "automated assistant", and the
                  mini-Miranda (FDCPA 807(11)). Then DISCUSS. It never waits for
                  the caller, so it is said in the same turn the match happened.
+                 The webhook adds ``purpose_line`` after it: why we called, with
+                 the creditor and balance from the debt's database row, so the
+                 call does not open with "How can I help you?".
     DISCUSS      The model talks; every sentence still goes through the filter.
     THIRD_PARTY  Fixed question: a good time to reach the person. Their answer
                  gets a fixed goodbye -> WRAP. A question back goes to the model.
@@ -24,19 +33,21 @@ answer, with this stage's instructions".
                  function (``compliance/triggers.py``). Fixed close only.
 
 The text matching is kept small and cautious: when unsure, the call does not
-move forward. A "yes" with a "no" or "not" in it is not a yes. The full list of
-stop phrases (lawyer, bankruptcy, "stop calling") is ``compliance/triggers.py``.
+move forward. A spoken date that could be read two ways, or is not a real date,
+is no answer at all, never a match. A "yes" with a "no" or "not" in it is not a
+yes. The full list of stop phrases (lawyer, bankruptcy, "stop calling") is
+``compliance/triggers.py``. Dates and ZIP codes are read by ``harness/spoken.py``.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import replace
-from datetime import date
 from pathlib import Path
 
 from compliance.triggers import CLOSES
-from harness.call_state import CallState, Debtor, Stage
+from harness.call_state import CallState, Debtor, DebtRow, Stage, money
+from harness.spoken import find_dob, find_zip  # also imported from here by tests
 
 STAGES_DIR = Path(__file__).resolve().parent.parent / "instructions" / "stages"
 MAX_VERIFY_ATTEMPTS = 2
@@ -55,6 +66,12 @@ VERIFY_RETRY = (
 )
 ASK_DOB = "Thanks. And your date of birth?"
 ASK_ZIP = "Thanks. And your ZIP code?"
+# Said when a turn has nothing code can use (speech-to-text often sends half a
+# sentence as its own turn). None of them says anything was checked.
+GREETING_REASK = "Sorry, I didn't catch that. Am I speaking with {full_name}?"
+VERIFY_REASK = "Sorry, I didn't catch that. Could you tell me your date of birth and ZIP code?"
+REASK_DOB = "Sorry, I didn't catch that. Could you tell me your date of birth?"
+REASK_ZIP = "Sorry, I didn't catch that. Could you tell me your ZIP code?"
 VERIFY_FAILED = (
     "I'm sorry, I wasn't able to confirm who I'm speaking with, so I can't go any further "
     "today. Thank you for your time. Goodbye."
@@ -63,7 +80,24 @@ DISCLOSURE = (
     "Thank you, {first_name}. This call is being recorded. "
     "You're speaking with an automated assistant. "
     "This is a debt collector. This is an attempt to collect a debt, and any information "
-    "obtained will be used for that purpose. How can I help you today?"
+    "obtained will be used for that purpose."
+)
+# Said right after the disclosure, in the same turn. We placed the call, so we say
+# why; the creditor and balance come from the database row, never from the model.
+# No "today" or "now": the sentence filter's overshadowing rule would block that.
+PURPOSE = (
+    "I'm calling about your account with {creditor}, which has a balance of {balance}. "
+    "Would you like to pay it in full, or would a payment plan work better for you?"
+)
+# A disputed, paused or closed debt: no amount and no payment ask.
+PURPOSE_ON_HOLD = (
+    "I'm calling about your account with {creditor}. I'm not asking for a payment on this call."
+)
+# The debt row could not be read, or doesn't match what this call was set up with:
+# no amount, nothing for the model to fill in, and the call ends.
+PURPOSE_UNREAD = (
+    "I'm sorry, I can't bring up your account details right now, so I'll end the call "
+    "here. Thank you for your time. Goodbye."
 )
 LOCATION_ASK = "Okay, thank you. Is there a good time to reach {full_name}?"
 THIRD_PARTY_CLOSE = "Thank you for your help. Goodbye."
@@ -97,56 +131,13 @@ _YES = _any(
 )
 _NEGATION = _any(r"\b(?:no|nope|not|isn'?t|wrong|nobody|never)\b", r"n't\b")
 _QUESTION = _any(r"\?", r"^\W*(?:who|what|why|where|which|how)\b")
-
-_MONTHS = {
-    "jan": 1,
-    "feb": 2,
-    "mar": 3,
-    "apr": 4,
-    "may": 5,
-    "jun": 6,
-    "jul": 7,
-    "aug": 8,
-    "sep": 9,
-    "oct": 10,
-    "nov": 11,
-    "dec": 12,
-}
-_MONTH = r"(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?"
-_DAY = r"(\d{1,2})(?:st|nd|rd|th)?"
-_YEAR = r"(\d{4}|\d{2})"  # "85" works too
-_DATES = [  # (pattern, order of the groups: y=year, m=month, d=day)
-    (re.compile(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b"), "ymd"),
-    (re.compile(r"\b(\d{1,2})[/-](\d{1,2})[/-](\d{4}|\d{2})\b"), "mdy"),
-    (re.compile(rf"\b{_MONTH}\s+{_DAY},?\s+'?{_YEAR}\b", re.IGNORECASE), "mdy"),
-    (re.compile(rf"\b{_DAY}\s+(?:of\s+)?{_MONTH},?\s+'?{_YEAR}\b", re.IGNORECASE), "dmy"),
-]
-_ZIP = re.compile(r"(?<![\d/-])(\d{5})(?:-\d{4})?(?![\d/-])")
-
-
-def _part(value: str) -> int:
-    return _MONTHS[value[:3].lower()] if value[:1].isalpha() else int(value)
-
-
-def find_dob(text: str) -> tuple[date | None, str]:
-    """The first date in ``text``, and the text with that date cut out."""
-    for pattern, order in _DATES:
-        if m := pattern.search(text):
-            parts = dict(zip(order, (_part(g) for g in m.groups()), strict=True))
-            rest = text[: m.start()] + " " + text[m.end() :]
-            if parts["y"] < 100:  # "4/12/85": the most recent such year that has passed
-                year = 2000 + parts["y"]
-                parts["y"] = year if year <= date.today().year else year - 100
-            try:
-                return date(parts["y"], parts["m"], parts["d"]), rest
-            except ValueError:
-                return None, rest  # "13/45/1985": said a date, but not a real one
-    return None, text
-
-
-def find_zip(text: str) -> str | None:
-    m = _ZIP.search(text)
-    return m.group(1) if m else None
+# A turn that stops mid-sentence: "Yeah. This is", "My birthday is the", "Yes, and".
+# Only endings no finished answer has ("Yes I am" and "What's it for?" are finished).
+_CUT_OFF = re.compile(
+    r"\b(?:this is|it'?s|i'?m|name is|birthday is|zip is|code is|my|the|an?|and|or|but|"
+    r"um+|uh+|er)[^\w?]*$",
+    re.IGNORECASE,
+)
 
 
 def said_yes(text: str, debtor: Debtor) -> bool:
@@ -176,15 +167,21 @@ def next_stage(state: CallState, caller_text: str, debtor: Debtor) -> tuple[Call
             return replace(state, stage=Stage.WRAP), WRONG_NUMBER_CLOSE
         if _NOT_HERE.search(text):
             return replace(state, stage=Stage.THIRD_PARTY), LOCATION_ASK.format(**names)
+        if _CUT_OFF.search(text):
+            return state, GREETING_REASK.format(**names)  # "Yeah. This is": half a sentence
         if said_yes(text, debtor):
             return replace(state, stage=Stage.VERIFY), VERIFY_ASK
-        return state, None  # "Who is this?": the model answers, still in GREETING
+        if _QUESTION.search(text):
+            return state, None  # "Who is this?": the model answers, still in GREETING
+        return state, GREETING_REASK.format(**names)  # "could": nothing to go on
 
     if state.stage == Stage.VERIFY:
         dob, rest = find_dob(text)
         zip_code = find_zip(rest)
-        if dob is None and zip_code is None:
-            return state, None  # "Why do you need that?": the model answers
+        if dob is None and zip_code is None:  # no answer, so not an attempt either
+            if _QUESTION.search(text) and not _CUT_OFF.search(text):
+                return state, None  # "Why do you need that?": the model answers
+            return state, _verify_reask(state)  # "zero two one", "hold on": ask again
         # Keep only whether each answer matched (never the answer itself), so the
         # caller can give the two in separate turns.
         if dob is not None:
@@ -214,11 +211,39 @@ def next_stage(state: CallState, caller_text: str, debtor: Debtor) -> tuple[Call
     return state, None  # DISCUSS and WRAP: the model answers
 
 
+def _verify_reask(state: CallState) -> str:
+    """Ask again for whatever is still missing, with no word on what was said before."""
+    if state.dob_ok is not None and state.zip_ok is None:
+        return REASK_ZIP
+    if state.zip_ok is not None and state.dob_ok is None:
+        return REASK_DOB
+    return VERIFY_REASK
+
+
 def _disclose(state: CallState, names: dict[str, str]) -> tuple[CallState, str]:
     """Say the disclosure, then move on to talking about the debt."""
     if not state.verified:  # can't happen through next_stage; refuse rather than leak
         return replace(state, stage=Stage.WRAP), VERIFY_FAILED
     return replace(state, disclosed=True, stage=Stage.DISCUSS), DISCLOSURE.format(**names)
+
+
+def purpose_line(debtor: Debtor, row: DebtRow | None) -> tuple[str, bool]:
+    """What to say after the disclosure, and whether the call ends there.
+
+    ``row`` is the debt read again from the database (None: the read failed). The
+    amount is said only if the row agrees with what the call tools and the sentence
+    filter know (``debtor``), so the caller never hears a balance they can't repeat.
+    """
+    if (
+        row is None
+        or not isinstance(row.balance_cents, int)
+        or not row.creditor.strip()
+        or (row.creditor, row.balance_cents) != (debtor.creditor, debtor.balance_cents)
+    ):
+        return PURPOSE_UNREAD, True
+    if row.status != "active" or row.balance_cents <= 0:
+        return PURPOSE_ON_HOLD.format(creditor=row.creditor), False
+    return PURPOSE.format(creditor=row.creditor, balance=f"${money(row.balance_cents)}"), False
 
 
 def instructions_path(stage: Stage) -> Path:

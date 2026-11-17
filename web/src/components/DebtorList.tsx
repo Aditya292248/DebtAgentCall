@@ -6,19 +6,10 @@ import { StatusPill } from '@/components/StatusPill'
 import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { blocksOf, money, type DebtView } from '@/lib/debts'
+import { money, type DebtView } from '@/lib/debts'
 import { cn } from '@/lib/utils'
 
 type Filter = 'all' | 'ready' | 'blocked'
-
-function initials(name: string) {
-  return name
-    .split(' ')
-    .map((part) => part[0])
-    .join('')
-    .slice(0, 2)
-    .toUpperCase()
-}
 
 type Props = {
   debts: DebtView[]
@@ -44,76 +35,70 @@ export function DebtorList({ debts, selected, onSelect, dbError, apiError }: Pro
 
   return (
     <div className="flex h-full flex-col">
-      <div className="space-y-3 p-3">
+      <div className="space-y-3 px-4 pt-5 pb-4">
         <div className="flex items-baseline justify-between">
           <h2 className="text-sm font-semibold">Debtors</h2>
-          <span className="text-xs text-muted-foreground">{debts.length} debts</span>
+          <span className="text-xs text-muted-foreground tabular-nums">{debts.length} debts</span>
         </div>
-        <Tabs value={filter} onValueChange={(v) => setFilter(v as Filter)}>
-          <TabsList className="w-full">
-            <TabsTrigger value="all">All {debts.length}</TabsTrigger>
-            <TabsTrigger value="ready">Ready {ready.length}</TabsTrigger>
-            <TabsTrigger value="blocked">Can&apos;t call {blocked.length}</TabsTrigger>
-          </TabsList>
-        </Tabs>
         <div className="relative">
-          <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
+          <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
           <Input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search name, account, creditor"
-            aria-label="Search debtors"
-            className="h-8 pl-8 text-xs"
+            placeholder="Search debtors"
+            aria-label="Search debtors by name, account or creditor"
+            className="h-9 bg-background pl-9"
           />
         </div>
+        <Tabs value={filter} onValueChange={(v) => setFilter(v as Filter)}>
+          <TabsList className="w-full">
+            <TabsTrigger value="all" className="text-xs">
+              All <span className="text-muted-foreground tabular-nums">{debts.length}</span>
+            </TabsTrigger>
+            <TabsTrigger value="ready" className="text-xs">
+              Ready <span className="text-muted-foreground tabular-nums">{ready.length}</span>
+            </TabsTrigger>
+            <TabsTrigger value="blocked" className="text-xs">
+              Can&apos;t call <span className="text-muted-foreground tabular-nums">{blocked.length}</span>
+            </TabsTrigger>
+          </TabsList>
+        </Tabs>
         {apiError && (
           <Notice message="Can't check who may be called right now. Try again shortly." detail={apiError} />
         )}
         {dbError && <Notice message="Can't load the debtors right now." detail={dbError} />}
       </div>
       <ScrollArea className="min-h-0 flex-1 border-t">
-        <ul className="p-1.5">
+        <ul className="space-y-0.5 p-2">
           {shown.map((d) => (
             <li key={d.account}>
               <button
                 type="button"
                 data-account={d.account}
                 onClick={() => onSelect(d.account)}
+                aria-current={selected === d.account ? 'true' : undefined}
                 className={cn(
-                  'flex w-full gap-3 rounded-md p-2.5 text-left transition-colors hover:bg-muted/60',
-                  selected === d.account && 'bg-muted',
+                  'flex w-full flex-col gap-1 rounded-lg px-3 py-2.5 text-left transition-colors hover:bg-sidebar-accent focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none',
+                  selected === d.account && 'bg-sidebar-accent',
                 )}
               >
-                <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-muted text-[11px] font-semibold text-muted-foreground">
-                  {initials(d.name)}
+                <span className="flex items-baseline justify-between gap-3">
+                  <span className="text-sm font-medium">{d.name}</span>
+                  <span className="shrink-0 text-sm tabular-nums">
+                    {money.format(d.balanceCents / 100)}
+                  </span>
                 </span>
-                <span className="min-w-0 flex-1 space-y-1">
-                  <span className="flex items-baseline justify-between gap-2">
-                    <span className="truncate text-sm font-medium">{d.name}</span>
-                    <span className="shrink-0 text-sm tabular-nums">
-                      {money.format(d.balanceCents / 100)}
-                    </span>
+                <span className="flex items-baseline justify-between gap-3">
+                  <span className="text-xs text-muted-foreground">
+                    {d.account} · {d.creditor}
                   </span>
-                  <span className="flex items-baseline justify-between gap-2 text-[11px] text-muted-foreground">
-                    <span className="truncate font-mono">
-                      {d.account} · {d.state}
-                    </span>
-                    <span className="truncate">{d.creditor}</span>
-                  </span>
-                  <span className="block">
-                    <StatusPill debt={d} />
-                  </span>
-                  {blocksOf(d)[0] && (
-                    <span className="line-clamp-2 block text-[11px] text-muted-foreground">
-                      {blocksOf(d)[0].reason}
-                    </span>
-                  )}
+                  <StatusPill debt={d} className="shrink-0" />
                 </span>
               </button>
             </li>
           ))}
           {shown.length === 0 && !dbError && (
-            <li className="p-4 text-center text-xs text-muted-foreground">No debts match.</li>
+            <li className="p-6 text-center text-sm text-muted-foreground">No debts match.</li>
           )}
         </ul>
       </ScrollArea>

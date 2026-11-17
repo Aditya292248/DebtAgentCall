@@ -17,7 +17,8 @@ no second table to keep in step, and the old records show how the call moved
 through its stages.
 
 ``Debtor`` is what the stages compare against: the person and the one debt the
-call is about, read from the database by phone number.
+call is about, read from the database by phone number. ``DebtRow`` is that debt
+read again from its own row when the disclosure is said, for the purpose line.
 """
 
 from __future__ import annotations
@@ -50,11 +51,25 @@ class Debtor:
     dob: date
     zip: str
     creditor: str
-    balance_cents: int
+    balance_cents: int  # owed now: public.current_balance_cents, after payments
 
     @property
     def full_name(self) -> str:
         return f"{self.first_name} {self.last_name}"
+
+
+@dataclass(frozen=True)
+class DebtRow:
+    """One ``public.debt`` row: what the purpose line after the disclosure may say."""
+
+    creditor: str
+    balance_cents: int  # owed now: public.current_balance_cents, after payments
+    status: str  # 'active', 'disputed', 'paused' or 'closed'
+
+
+def money(cents: int) -> str:
+    """An amount the way the account tools give it: "1250.00"."""
+    return f"{cents // 100}.{cents % 100:02d}"
 
 
 @dataclass(frozen=True)

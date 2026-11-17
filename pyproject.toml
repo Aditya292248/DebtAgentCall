@@ -3,8 +3,20 @@ name = "debt-agent-call"
 version = "0.1.0"
 description = "A compliance-first debt-collection voice agent, built one part at a time."
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Aditya Bisht" }]
+keywords = ["voice-agent", "debt-collection", "compliance", "fastapi", "agentphone"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Framework :: FastAPI",
+    "Topic :: Communications :: Telephony",
+]
 requires-python = ">=3.11"
 dependencies = [
+    "agentphone>=0.20.5",
     "fastapi>=0.162.0",
     "httpx>=0.27",
     "psycopg[binary]>=3.3.7",
@@ -13,6 +25,10 @@ dependencies = [
     "tzdata>=2026.6",
     "uvicorn>=0.54.0",
 ]
+
+[project.urls]
+Repository = "https://github.com/Aditya292248/DebtAgentCall"
+Issues = "https://github.com/Aditya292248/DebtAgentCall/issues"
 
 [project.scripts]
 verify = "tasks.verify:main"

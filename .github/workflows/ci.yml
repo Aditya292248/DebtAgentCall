@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python (verify, with the database)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      # The local Supabase database `supabase db start` brings up, the same
+      # default harness/db.py uses. No hosted project, no secrets.
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
+      # Fail, don't skip, a `db` test that can't reach the database.
+      REQUIRE_DATABASE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - uses: supabase/setup-cli@45a513f8c64c0bc8e0e3dfe572b5c95be85f6359 # v3.0.1
+        with:
+          version: 2.122.0
+
+      - name: Start the database (migrations and seed)
+        run: supabase db start
+
+      - name: Verify (format, lint, types, tests, smoke import)
+        run: uv run verify
+
+  web:
+    name: Web (typecheck, lint, test, build)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          # Exact, so the bundled npm (11.19.1) does not drift and reject the lockfile.
+          node-version: 24.22.2
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - run: npm ci
+      - name: Typecheck
+        run: npx tsc -b
+      - name: Lint
+        run: npm run lint
+      - name: Test
+        run: npm test
+      - name: Build
+        run: npm run build

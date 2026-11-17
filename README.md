@@ -1,5 +1,7 @@
 # DebtAgentCall
 
+[![CI](https://github.com/Aditya292248/DebtAgentCall/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Aditya292248/DebtAgentCall/actions/workflows/ci.yml)
+
 A debt-collection voice agent that puts compliance first, built one small step at a time.
 
 Right now the project can send messages to a language model and get a reply back, and it has an agent that remembers the conversation, follows a system prompt kept in a file, and can look up an account with a tool. The made-up debtors live in a local Postgres database run by Supabase. The pre-call compliance rules (calling hours, the 7-in-7 call limit, consent, stop requests, do-not-call, lawyers, bankruptcy and death) are here as plain Python checks; they are not wired into the agent yet. Every decision they make can be written to an append-only audit log that the database won't let anyone edit. There is a webhook that AgentPhone can call during a phone call, and a fake caller to test it without a phone. Each call's conversation is saved as it happens, so every turn of a call sees the turns before it. A first read-only web page shows the debtors with their pre-call result and the audit log. A dialer checks each debt right before dialing, writes the call to the ledger first, and places it once. The call flow and the other rules come later, each in its own step.
@@ -26,6 +28,8 @@ harness/
   subagents.py          run_subagent, fan_out and the delegate / fan_out tools (after calls only)
   review.py             review_transcript(transcript, account): reviewer subagents check a finished call
   skills.py             Skill, discover(), skills_prompt() and the load_skill tool
+  payments.py           the payment ledger: parsing, current balance checks, history and the on-time report
+  operator_reads.py     the operator chat's account reads, notes, callbacks and stops (capped, phones masked)
 compliance/
   decision.py           Decision (allow, rule_id, reason, evidence), the answer every rule gives
   timezones.py          zones_for(zip, phone), the time zones a debtor might be in
@@ -39,6 +43,7 @@ compliance/
 phone/
   signing.py            sign() and verify(), the HMAC check on every AgentPhone webhook
   webhook.py            create_app(), the FastAPI app with POST /webhooks/agentphone
+  live_tools.py         the call tools for one live turn: CallContext from the saved state, gate, approver
   replies.py            say(), say_and_hangup() and transfer(), the replies AgentPhone understands
   client.py             PhoneClient, AgentPhoneClient (make_call, never retried), FakePhoneClient, CallError
 dialer/
@@ -54,7 +59,7 @@ instructions/
 skills/                 short playbooks for hard conversations (hardship, angry caller, ...)
 supabase/
   config.toml           local Supabase settings (database on port 54322)
-  migrations/           the debtor, phone, debt, call_attempt, flags, audit_event and call_message tables
+  migrations/           the debtor, phone, debt, call_attempt, flags, audit_event, call_message, payment and debt_note tables
   seed.sql              made-up debtors, with call history and flags for each pre-call check
 tasks/
   verify.py             offline checks: format, lint, types, tests, import
@@ -65,7 +70,7 @@ tasks/
   serve.py              `uv run serve`, which runs the webhook on this machine
 web/                    the browser UI (Vite, React, TypeScript, Tailwind, shadcn/ui), read-only for now
 tests/
-  episodes/             offline tests that use the fake provider
+  <area>/               offline tests by feature, in the same folders as the code
 ```
 
 The rest of the code will only use `chat` and `Provider`. That means you can switch from LM Studio to Ollama, OpenRouter or OpenAI without changing any calling code.
@@ -181,13 +186,15 @@ There are three tables:
 
 - `debtor`: name, date of birth, address, ZIP and state
 - `phone`: the debtor's numbers, whether each is a cell or a landline, and when consent was given or taken back
-- `debt`: the creditor, the balance in cents, and a status (`active`, `disputed`, `paused` or `closed`)
+- `debt`: the creditor, the balance it was placed with in cents (`balance_cents`), the day it was opened (`opened_on`), and a status (`active`, `disputed`, `paused` or `closed`)
+
+`balance_cents` never changes after a payment. The balance owed now is `public.current_balance_cents(debt)`, which subtracts payments and adds back reversals (see [Payments](#payments)). `lookup_account`, the live call and the web list all read that function.
 
 The app connects with `DATABASE_URL` (see `.env.example`). It defaults to the local database, `postgresql://postgres:postgres@127.0.0.1:54322/postgres`. Row level security is on for every table, with only a read rule for signed-in Supabase users. The app's own direct connection is not limited by it.
 
 `harness/db.py` has `find_account(name)`, which `lookup_account` uses. It matches the full name, ignoring case and extra spaces. If the database is down, the tool returns an `error: lookup_account failed: ...` message instead of crashing.
 
-The tests in `tests/episodes/test_part06.py` that need the database are marked `db`. They run against the real local database. When it isn't running, they are skipped with "run `supabase start`", so `uv run verify` still works offline.
+The tests in `tests/harness/test_account_lookup_db.py` that need the database are marked `db`. They run against the real local database. When it isn't running, they are skipped with "run `supabase start`", so `uv run verify` still works offline. CI (`.github/workflows/ci.yml`) starts the database with `supabase db start` and sets `REQUIRE_DATABASE=1`, which turns that skip into a failure, so the database tests always run there. A `db` test that writes against a debt uses the `scratch_sam` fixture (`tests/conftest.py`): its own debtor and debt with fresh ids, deleted afterwards, so it passes on a fresh or a used database and leaves the seed rows alone.
 
 ```bash
 uv run pytest -m db -v
@@ -257,6 +264,14 @@ uv run demo part-07
 
 The demo checks every made-up debtor at a fixed time (2026-11-05, 14:00 in New York), so the seeded call history always gives the same answers. This is not legal advice.
 
+## Test numbers
+
+`TEST_NUMBERS` (in the environment or `.env`; unset by default) is a comma-separated list of E.164 numbers, for the repo owner's own phone only, so a real test call can be placed outside calling hours. A listed number skips the `calling_hours` rule and nothing else: consent, 7-in-7, cease, DNC, attorney, bankruptcy and deceased still run and still block. Every skip shows as an allow with the reason `skipped: test number (TEST_NUMBERS)` and, when the decision is recorded, as a `test_number_exemption` row in the audit log. A malformed entry is ignored and logged; there are no wildcards or prefixes. The dialer, the operator agent and `/api/precall` share the same check, and the phone webhook and live-call rules are not affected.
+
+```bash
+uv run demo part-27
+```
+
 ## The audit log
 
 Regulators can ask why a call was or wasn't placed, so every check's decision is kept in the `audit_event` table: when, which debt, which rule, allow or block, the reason and the evidence. `check_and_record` runs the pre-call checks and writes one row per decision, allowed and blocked alike:
@@ -288,7 +303,7 @@ uv run audit-verify
 
 If Windows blocks the generated `audit-verify.exe`, `uv run python -m tasks.audit_verify` runs the same check.
 
-`compliance/audit.py` explains exactly how a hash is made, so anyone can check the log with their own code. The tests in `tests/episodes/test_part08.py` run inside transactions that are rolled back, so they never leave rows behind.
+`compliance/audit.py` explains exactly how a hash is made, so anyone can check the log with their own code. The tests in `tests/compliance/test_audit_log.py` run inside transactions that are rolled back, so they never leave rows behind.
 
 ```bash
 uv run demo part-08
@@ -310,7 +325,7 @@ Every request is checked before anything else happens:
 - A request whose timestamp is more than five minutes off is refused too, so an old request can't be replayed.
 - Each webhook has an `X-Webhook-ID`. If the same id comes again, it gets the same reply as the first time, and the model isn't asked twice.
 
-Then the event decides what happens. `agent.message` on the voice channel runs one turn of the agent with the caller's words and replies `{"text": ...}`. `agent.call_ended` is accepted, but nothing more is stored for it yet. Any other event gets `{}`. `phone/replies.py` also has `say_and_hangup()` and `transfer()`, for ending the call or handing it to a person; nothing uses them yet.
+Then the event decides what happens. `agent.message` on the voice channel runs one turn of the agent with the caller's words and replies `{"text": ...}`. `agent.call_ended` is accepted, but nothing more is stored for it yet. Any other event gets `{}`. `phone/replies.py` also has `say_and_hangup()` and `transfer()`, for ending the call or handing it to a person. On a staged call the model gets the call tools from `harness/call_tools.py` (built per turn by `phone/live_tools.py`): each tool call passes the compliance gate and then `PolicyApprover`, saved rows are committed before the reply, `end_call` hangs up, and `escalate_to_human` transfers only when `SUPERVISOR_NUMBER` is set.
 
 Each turn builds a new agent, but on that call's saved session, so it remembers what was said earlier in the same call (see [Sessions](#sessions)).
 
@@ -445,15 +460,15 @@ The demo plays three calls (verified, wrong date of birth, someone else answers)
 
 ## The UI
 
-A first, read-only page in the browser, laid out like Cursor: three panes you can resize, dark by default (the sun button switches to light).
+A page in the browser with two areas: the debtor list on the left and the agent chat filling the rest. It is light by default; the moon button in the top bar switches to dark, and the choice is remembered.
 
-![The UI: debtors on the left, the overview in the middle, the audit log on the right](docs/ui-part1.png)
+![The UI: debtors on the left, the agent chat on the right](docs/ui-part1.png)
 <!-- screenshot placeholder: add docs/ui-part1.png -->
 
-- **Top bar:** "Check at" picks the time every check is run for, so you can see who would be blocked at, say, 9:30pm. "Now" goes back to the current time.
-- **Left, debtors:** every made-up debt with its balance, creditor and a status: green "Ready to call", or red "Blocked" with the rule (such as `attorney`) and its reason. Tabs show All, Ready or Blocked, and the search box matches name, account, creditor or state.
-- **Middle:** with nothing picked, an overview: how many debts are ready or blocked, the total owed, and a bar chart of how many debts each rule blocks. Click a debtor to see all eight checks for them, passed and blocked. "Simulate call" stays disabled until the call view comes in a later step.
-- **Right, audit log:** the `audit_event` rows, newest first (rule, allow or block, reason, account and time), with a "chain OK" or "chain broken" badge and a "Blocks only" tab.
+- **Top bar:** "Check at" picks the time every check is run for, so you can see who would be blocked at, say, 9:30pm. "Now" goes back to the current time. "Overview" and "Compliance log" open the side panel.
+- **Left, debtors:** every made-up debt with its name, balance, account and creditor, and a small status dot with "Ready to call" or "Can't call". Hover a "Can't call" to see the blocking rules and reasons. Tabs show All, Ready or Can't call, and the search box matches name, account, creditor or state.
+- **Main, agent chat:** type a request such as `call Sam Doe`. Each tool the agent ran shows as a collapsed line you can open for its arguments and result. A call waits on an approval card: Approve only shows when a recent check passes, Deny always does, and the server runs every check again before it dials. Nothing dials from the browser. A payment or reversal waits on its own card that shows the debtor, amount, date (in the browser's time zone, which the chat sends) and the balance before and after; nothing is written until Approve.
+- **Side panel:** opens from the right over the page. Click a debtor to see all the checks for them, passed and blocked. "Overview" shows how many debts are ready or blocked, the total owed, and how many debts each rule blocks. "Compliance log" shows the `audit_event` rows, newest first (rule, allow or block, reason, account and time), with a "Verified" or "Log was changed" mark and a "Can't call only" filter.
 
 Nothing on the page is made up in the browser: every number and badge comes from the database or from the Python checks, so it changes when the data does.
 
@@ -478,7 +493,7 @@ cd web && npm install && npm run dev
 
 Before the first run, copy `web/.env.example` to `web/.env.local` and paste in the anon key that `npx supabase status` prints. Then open http://localhost:5173. The dev server forwards `/api` to the API on port 8000. If Windows blocks `api.exe`, `uv run python -m harness.api` starts the same thing.
 
-You need Node.js 18 or newer for `web/`. `npm run build` and `npm run lint` check it. The API's tests are in `tests/episodes/test_part12.py`; one checks that Robin Hale, who has a lawyer, comes back blocked by `attorney`.
+You need Node.js 18 or newer for `web/`. `npm run build` and `npm run lint` check it. The API's tests are in `tests/harness/test_api.py`; one checks that Robin Hale, who has a lawyer, comes back blocked by `attorney`.
 
 ```bash
 uv run demo part-12
@@ -551,6 +566,56 @@ uv run demo part-17
 
 The demo prints the skills menu, then plays a caller who lost their job: the model loads the `hardship` playbook before answering.
 
+## Account questions from the chat
+
+The operator chat answers questions about accounts from the database, through read-only tools in `harness/operator_reads.py`:
+
+- `list_debtors(sort, filter, limit)`: sort by balance, last payment, status or name; filter by `state:XX`, `status:...`, `ready` or `blocked` (ready and blocked come from the dialer's own dry run). At most 25 rows, whatever limit is asked for, and the answer says when it was cut short.
+- `account_summary`, `call_history` (attempts, outcomes and the 7-in-7 count as the rule sees it), `portfolio_summary(period)` and `audit_for(debtor_id, limit)` (at most 50 rows). Phone numbers are masked to the last four digits everywhere, including inside audit evidence.
+- `next_allowed_call(debtor_id)`: steps forward 15 minutes at a time through `compliance.check_before_call` with the facts the dialer loads, for up to 14 days, and confirms the time it finds with `dialer.service.plan_queue`. It gives the time in the operator's zone too (`next_allowed_local`), so the model doesn't convert it. A block that waiting can't clear (cease, consent, attorney, a disputed debt) gives no time at all. It only answers a question; the dialer still runs every check when a call is approved.
+
+Three tools write:
+
+- `add_note(debtor_id, text)` and `schedule_callback(debtor_id, when)` open an approval card like a call does. Nothing is written until Approve. A callback is refused, both when asked and on Approve, if the pre-call checks would block a call at that moment (calling hours, a cease, and the rest). Notes go in `debt_note`, which is append-only like `payment`. Each approved write has an audit row.
+- `record_stop(debtor_id, kind)` (cease, dispute, attorney or bankruptcy) writes at once with an audit row (`kind = stop`). It needs no approval because a stop can only mean fewer calls, but for that reason it takes only an exact account id, never a name: there is no card to catch a wrong match.
+
+There is no chat tool to remove a stop flag, record consent, edit a balance or delete anything; a test checks the tool names, the code, and that running every tool leaves a stop in place.
+
+```bash
+uv run demo operator-reads
+```
+
+## Payments
+
+The operator chat can record what a debtor paid and answer questions about it. "Testpay Ledger paid 20 yesterday" becomes a `record_payment` request, which writes nothing: code finds the debt (an account number, or a name with exactly one match), reads the amount and the day ("yesterday" is the operator's yesterday, in the time zone the browser sends, else `OPERATOR_TZ`, else New York), checks them, and opens an approval card. Only Approve writes the row.
+
+- **Refused in code, before any card:** an amount of zero or less, more than the current balance, or that doesn't parse; a day in the future or before the debt's `opened_on`; an unknown debtor or a name that matches more than one debt.
+- **Checked again on Approve,** inside one transaction with the debt row locked, against the balance as it is then. So two cards that each fit the balance can't both be approved if together they overpay: the second is refused. The payment row and its audit event (`kind = payment`) commit together; a refusal at that point writes no payment and is audited as a `block`.
+- **The ledger is append-only.** `public.payment` refuses `update`, `delete` and `truncate`, with those privileges revoked, like `audit_event`. A correction is `reverse_payment(payment_id, reason)`, which also needs approval and adds a reversing row; a payment can be reversed once. The table's insert trigger checks the balance, the dates and the reversal again, so a write that skips the Python checks is refused too.
+- **One balance everywhere.** `debt.balance_cents` stays the amount the debt was placed with. `public.current_balance_cents(debt)` = `balance_cents` - payments + reversals is the only place the current balance is computed. `find_debtor_by_phone` reads it on each call turn, so the call tools, `lookup_account` and the sentence filter's known amount all reflect a payment on the next turn, and the old amount is blocked as `amount_mismatch`.
+- **Read-only questions:** `payment_history(debtor_id, since)` ("last 3 days" is today and the two days before, in the operator's time zone) gives the rows and their total. `on_time_report()` compares each debt's newest approved or confirmed `payment_plan` with its due dates: the down payment is due the day the plan was made, installment `k` is due `k` weeks, `2k` weeks or `k` months later; payments dated on or after the plan's start fill the installments in order; each one due so far is on time, late (covered only by a later payment) or missed (not covered yet), with no grace period. Debts without a plan are listed apart.
+
+Debts that existed before the payments migration get the day it ran as `opened_on`, so a backdated payment on one of them is refused until a person sets the real date. The seed sets it for the made-up debts. On an existing local database run `supabase migration up` (never against a hosted project).
+
+```bash
+uv run demo part-31
+```
+
+## Bill upload
+
+A bill (PNG, JPEG, WebP or PDF) can be read into a draft, and nothing is saved until a person confirms it. A wrong amount read off a bill would become a false statement on a call, so the model only reads.
+
+- `POST /api/bills` (multipart, field `file`) checks the file type from its first bytes, stores the file (the private `bills` bucket when `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are set, else the folder in `BILLS_DIR`, default `.bills/`), has the vision model read the fields and returns a draft. Code turns the printed balance into cents and a US number into E.164, and flags every field that is missing, unsure or fails a check. Date of birth and line type are never on a bill, so they are always flagged. No debtor, phone or debt row is written, only the draft (`bill_draft`) and an audit row (`kind = bill`).
+- `POST /api/bills/{id}/confirm` takes `{fields}` as the person edited them and checks them again, strictly: the balance must be a positive whole number of cents, the phone must already be E.164, and the ZIP, state, date of birth and line type must be valid (422 with each problem otherwise). It refuses (409) a draft already confirmed, an account number already saved, and a phone number already on file, since a call finds its debtor by the number. Then it saves the debtor, phone and debt with an audit row in one transaction.
+- A bill is not consent to be called. The phone is saved with no consent, so `tcpa_consent` blocks every call to it until consent is recorded.
+- The operator chat's `read_bill(draft_id)` shows a draft with the phone masked. It never saves.
+
+The web UI has no upload entry point yet; the API is ready for one.
+
+```bash
+uv run demo bills
+```
+
 ## Dialer: the one safe way every call is placed
 
 `dial_one(conn, account_number, when, phone)` in `dialer/service.py` is the only code that asks AgentPhone to place a call. `dial_queue(debtors, when, phone, conn)` runs it for a list of debts in a fixed order (the one whose last call is oldest goes first), and a later `place_call` tool for an operator agent will call it for one debt. Each time, for that debt:
@@ -568,7 +633,7 @@ The demo prints the skills menu, then plays a caller who lost their job: the mod
 - **Not done yet:** nothing marks a call as answered or as a conversation with the debtor afterwards. That needs the after-call step, so for now the "no calls for 7 days after a conversation" rule only sees conversations already in the ledger.
 - `max_parallel` (default 1) works on several debts at once, each with its own database connection.
 - **Recording:** there is no recording-consent decision yet, so the dialer leaves AgentPhone's default. A TODO in `dial_one` marks where `disableRecording` goes.
-- `AgentPhoneClient` needs the `agentphone` SDK (`uv pip install agentphone`) and `AGENTPHONE_API_KEY`, `AGENTPHONE_AGENT_ID` and `AGENTPHONE_FROM_NUMBER_ID` (see `.env.example`). It sends no system prompt, so calls run in webhook mode, and it turns the SDK's own retries off.
+- `AgentPhoneClient` uses the `agentphone` SDK (a project dependency, installed by `uv sync`) and `AGENTPHONE_API_KEY`, `AGENTPHONE_AGENT_ID` and `AGENTPHONE_FROM_NUMBER_ID` (see `.env.example`). It sends no system prompt, so calls run in webhook mode, and it turns the SDK's own retries off.
 
 ```bash
 uv run dialer --dry-run

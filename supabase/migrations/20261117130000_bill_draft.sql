@@ -4,6 +4,8 @@
 -- person must look at. Nothing goes into debtor, phone or debt until confirm,
 -- which stores the person's own `confirmed_fields` and the new debt's id.
 -- RLS is on with no policy: only the server (the database owner) reads these.
+-- The files themselves go in the private `bills` bucket, set up in
+-- supabase/config.toml, or in a local folder (harness/bills.py).
 
 create table public.bill_draft (
     id text primary key check (id ~ '^bill_[0-9a-f]{32}$'),
@@ -23,10 +25,3 @@ create table public.bill_draft (
 
 alter table public.bill_draft enable row level security;
 
--- The uploaded files: a private bucket, read and written only with the service key.
-insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
-values (
-    'bills', 'bills', false, 10485760,
-    array['image/png', 'image/jpeg', 'image/webp', 'application/pdf']
-)
-on conflict (id) do nothing;

@@ -10,7 +10,8 @@ What it checks:
     model or the person dials nobody. With AgentPhone not set up, approving
     records nothing and leaves the approval pending.
   - Pending approvals live in the chat's saved history, so a new request sees them.
-  - The operator gets its own prompt and its four tools, and no skills menu.
+  - The operator gets its own prompt and its call tools first, and no skills menu.
+    (The payment tools are tested in test_payments.py.)
   - Against the real local database (``db``): an approved call to a debtor
     outside calling hours is not dialed; an approved call the checks allow is
     dialed once and ``call_status`` finds it; ``find_debtor`` masks phones;
@@ -193,7 +194,7 @@ def test_a_pending_approval_survives_into_the_next_request(tmp_path):
     assert again.pending() == [pending]
 
 
-def test_the_operator_has_its_own_prompt_and_four_tools(tmp_path):
+def test_the_operator_has_its_own_prompt_and_its_call_tools(tmp_path):
     provider = fake(scripted=["hi"])
     op = Operator(JsonlSession.for_call(tmp_path, "c"), provider=provider, connect=no_database)
     op.chat("hello")
@@ -202,7 +203,7 @@ def test_the_operator_has_its_own_prompt_and_four_tools(tmp_path):
     assert sent[0]["role"] == "system"
     assert sent[0]["content"] == DEFAULT_OPERATOR_PROMPT_PATH.read_text(encoding="utf-8").strip()
     names = [t["function"]["name"] for t in provider.responder.kwargs[0]["tools"]]
-    assert names == ["find_debtor", "check_call", "place_call", "call_status"]
+    assert names[:4] == ["find_debtor", "check_call", "place_call", "call_status"]
 
 
 def test_mask_phone_keeps_only_the_last_four_digits():
@@ -220,7 +221,7 @@ def api(tmp_path, monkeypatch) -> Iterator[tuple[TestClient, FakePhoneClient, li
     phone = FakePhoneClient()
     scripts: list = []
 
-    def make_operator(session_id: str) -> Operator:
+    def make_operator(session_id: str, tz: str | None = None) -> Operator:
         return Operator(
             JsonlSession.for_call(tmp_path / "chats", f"chat-{session_id}"),
             provider=fake(scripted=scripts.pop(0) if scripts else ["ok"]),
@@ -272,7 +273,7 @@ def test_approve_endpoint_says_when_agentphone_is_not_set_up(tmp_path, monkeypat
         monkeypatch.delenv(name, raising=False)
     scripts = [asks_to_call()]
 
-    def make_operator(session_id: str) -> Operator:
+    def make_operator(session_id: str, tz: str | None = None) -> Operator:
         return make(tmp_path, scripts.pop(0) if scripts else ["ok"], agentphone=True)
 
     monkeypatch.setattr(harness.api, "make_operator", make_operator)

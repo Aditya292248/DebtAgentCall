@@ -8,11 +8,15 @@ the audit log, because looking at the screen is not placing a call.
 ``GET /api/audit/verify`` runs ``compliance.audit.verify_chain`` and says whether
 the audit chain is whole.
 
-``POST /api/chat`` takes ``{session_id, message}``, runs the operator agent
+``POST /api/chat`` takes ``{session_id, message, tz?}``, runs the operator agent
 (``harness/operator.py``) for one turn and returns its reply, the tool calls it
-made and any calls waiting for approval. ``POST /api/chat/approve`` takes
-``{session_id, approval_id, approve}`` and approves or denies one waiting
-``place_call``; approving dials through the dialer, which runs the checks again.
+made and anything waiting for approval (a call, a payment or a reversal).
+``tz`` is the operator's IANA time zone, which the browser sends so "paid
+yesterday" means the operator's yesterday; without it ``OPERATOR_TZ`` is used.
+``POST /api/chat/approve`` takes ``{session_id, approval_id, approve, tz?}`` and
+approves or denies one waiting approval; approving a call dials through the
+dialer, which runs the checks again, and approving a payment checks it against
+the balance again before writing it.
 Each chat's history is kept in the session store under ``chat:<session_id>``.
 Turns for one chat run one at a time in this process.
 
@@ -60,7 +64,7 @@ from harness.bills import (
 )
 from harness.db import connect, load_call_facts
 from harness.memory import PostgresSession
-from harness.operator import ChatTurn, Operator, PhoneUnavailable
+from harness.operator import ChatTurn, Operator, PhoneUnavailable, operator_tz
 
 DEBTS_SQL = """
     select d.account_number, p.first_name || ' ' || p.last_name
@@ -135,20 +139,32 @@ _chat_locks: defaultdict[str, threading.Lock] = defaultdict(threading.Lock)
 _chat_locks_guard = threading.Lock()
 
 
-def make_operator(session_id: str) -> Operator:
+def make_operator(session_id: str, tz: str | None = None) -> Operator:
     """The operator for one chat, on its saved history. Tests swap this out."""
-    return Operator(PostgresSession.for_call(f"chat:{session_id}"), bills=PostgresBillDb())
+    return Operator(
+        PostgresSession.for_call(f"chat:{session_id}"), tz=operator_tz(tz), bills=PostgresBillDb()
+    )
 
 
 class ChatIn(BaseModel):
     session_id: str
     message: str
+    tz: str | None = None
 
 
 class ApproveIn(BaseModel):
     session_id: str
     approval_id: str
     approve: bool
+    tz: str | None = None
+
+
+def _checked_tz(tz: str | None) -> str | None:
+    try:
+        operator_tz(tz)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return tz
 
 
 def _chat_lock(session_id: str) -> threading.Lock:
@@ -172,15 +188,17 @@ def chat(body: ChatIn) -> dict[str, Any]:
     """One operator message: the agent's reply, its tool calls and what awaits approval."""
     if not body.message.strip():
         raise HTTPException(400, "message is empty")
+    tz = _checked_tz(body.tz)
     with _chat_lock(body.session_id):
-        return _turn_json(make_operator(body.session_id).chat(body.message))
+        return _turn_json(make_operator(body.session_id, tz).chat(body.message))
 
 
 @app.post("/api/chat/approve")
 def chat_approve(body: ApproveIn) -> dict[str, Any]:
-    """Approve or deny one waiting ``place_call``. Approving still runs every check."""
+    """Approve or deny one waiting approval. Approving still runs every check."""
+    tz = _checked_tz(body.tz)
     with _chat_lock(body.session_id):
-        operator = make_operator(body.session_id)
+        operator = make_operator(body.session_id, tz)
         try:
             turn = operator.decide(body.approval_id, body.approve)
         except LookupError as exc:

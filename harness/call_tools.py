@@ -2,8 +2,8 @@
 
 These tools are built on ``harness/tools.py`` (``Tool``, ``ToolRegistry``,
 ``run_tool``), so a failure always comes back as an ``error: ...`` string and
-never raises into the call loop. They are not used on live calls yet: the
-webhook does not offer them to the model.
+never raises into the call loop. On a live call ``phone/live_tools.py`` builds
+the ``CallContext`` for each turn and the webhook gives the model this registry.
 
 ``CallContext`` is everything one call's tools may touch: the person and the
 one debt the call is about, the call state (stage, verified, disclosed), the
@@ -56,7 +56,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from compliance.decision import Decision, allow, block
 from compliance.flags import Flag, check_cease
 from compliance.hours import Contact, check_calling_hours
-from harness.call_state import CallState, Debtor, Stage
+from harness.call_state import CallState, Debtor, Stage, money
 from harness.tools import Tool, ToolRegistry
 
 AuditWriter = Callable[[Decision, str, str | None], None]  # (decision, call_id, debt_id)
@@ -395,7 +395,7 @@ class CallTools:
         return json.dumps(
             {
                 "creditor": d.creditor,
-                "balance": f"{d.balance_cents // 100}.{d.balance_cents % 100:02d}",
+                "balance": money(d.balance_cents),
                 "currency": "USD",
                 "disputed": self.disputed(),
             }

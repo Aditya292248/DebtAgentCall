@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 
 import { fetchPrecall, type DebtCheck } from '@/lib/api'
+import { timeOf } from '@/lib/checks'
 import { supabase, supabaseConfigError } from '@/lib/supabase'
 
 /** One debt as the page shows it: the database row plus the pre-call result. */
@@ -15,6 +16,8 @@ export type DebtView = {
   status: string
   phones: { e164: string; line_type: string }[]
   check: DebtCheck | undefined
+  /** When `check` ran, in ms since the epoch (0 if unknown). */
+  checkedAt: number
   checkFailed: boolean
 }
 
@@ -28,7 +31,8 @@ type DebtorRow = {
     id: string
     account_number: string
     creditor: string
-    balance_cents: number
+    /** Owed now: public.current_balance_cents, after payments. */
+    current_balance_cents: number
     status: string
   }[]
 }
@@ -36,7 +40,12 @@ type DebtorRow = {
 export const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' })
 
 /** The checks we got back, and which time they were run for. */
-type CheckResult = { key: string; checks: Map<string, DebtCheck>; error: string | null }
+type CheckResult = {
+  key: string
+  at: number
+  checks: Map<string, DebtCheck>
+  error: string | null
+}
 
 const NOW_REFRESH_MS = 60_000
 
@@ -64,7 +73,7 @@ export function useDebts(at: string | null) {
       .from('debtor')
       .select(
         'first_name, last_name, state, zip, phone(e164, line_type), ' +
-          'debt(id, account_number, creditor, balance_cents, status)',
+          'debt(id, account_number, creditor, current_balance_cents, status)',
       )
       .order('last_name')
       .then(({ data, error }) => {
@@ -79,12 +88,12 @@ export function useDebts(at: string | null) {
       .then((res) => {
         if (cancelled) return
         const checks = new Map(res.debts.map((d) => [d.account_number, d]))
-        setResult({ key, checks, error: null })
+        setResult({ key, at: timeOf(res.at), checks, error: null })
       })
       .catch((err: unknown) => {
         if (cancelled) return
         const error = err instanceof Error ? err.message : String(err)
-        setResult({ key, checks: new Map(), error })
+        setResult({ key, at: 0, checks: new Map(), error })
       })
     return () => {
       cancelled = true
@@ -108,10 +117,11 @@ export function useDebts(at: string | null) {
       zip: p.zip,
       state: p.state,
       creditor: d.creditor,
-      balanceCents: d.balance_cents,
+      balanceCents: d.current_balance_cents,
       status: d.status,
       phones: p.phone,
       check: current?.checks.get(d.account_number),
+      checkedAt: current?.at ?? 0,
       // Checked, but with no answer for this debt: unknown, never assumed fine.
       checkFailed: current !== null && !current.checks.has(d.account_number),
     })),
