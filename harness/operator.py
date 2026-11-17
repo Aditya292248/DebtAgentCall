@@ -29,14 +29,29 @@
     total. Only reads.
   - ``on_time_report()``: each debt with a plan as on time, late or missed
     (``harness.payments.classify_plan``), and the debts without one. Only reads.
+  - Account reads (``harness/operator_reads.py``), all capped and with phones
+    masked: ``list_debtors(sort, filter, limit)``, ``account_summary``,
+    ``call_history`` (with the 7-in-7 count as the rule sees it),
+    ``next_allowed_call`` (stepped through ``check_before_call`` and confirmed
+    by the dialer's own dry run, so it can never be a way around the checks),
+    ``portfolio_summary(period)`` and ``audit_for(debtor_id, limit)``.
+  - ``add_note(debtor_id, text)`` and ``schedule_callback(debtor_id, when)``
+    open an approval like ``place_call``; nothing is written before it. A
+    callback the pre-call checks would block at that moment is refused, both
+    when it is asked for and again when it is approved.
+  - ``record_stop(debtor_id, kind)``: cease, dispute, attorney or bankruptcy.
+    It writes at once, with an audit row, and needs no approval, because a stop
+    can only ever mean fewer calls. No tool removes a stop, records consent,
+    edits a balance or deletes anything.
 
-Only ``decide(approval_id, approve)`` dials or writes a payment, and only for an
-approval that is still pending. A payment approval runs every check again
-against the balance as it is then, inside one transaction with the debt
-locked, and writes the payment row and its audit event together; a check that
-fails then writes no payment and records the refusal in the audit log. For a
-call: It is called by code (``POST /api/chat/approve``), never by the
-model. First it makes sure AgentPhone is set up, so a missing key fails
+Only ``decide(approval_id, approve)`` dials or writes a payment, note or
+callback, and only for an approval that is still pending. It is called by code
+(``POST /api/chat/approve``), never by the model. A payment approval runs every
+check again against the balance as it is then, inside one transaction with the
+debt locked, and writes the payment row and its audit event together; a check
+that fails then writes nothing but the refusal in the audit log. Notes and
+callbacks work the same way. For a call, it first makes sure AgentPhone is set
+up, so a missing key fails
 before any attempt is recorded (and leaves the approval pending). Then the
 decision is written to the history, so a second
 click on the same approval finds nothing pending. Then it goes through
@@ -46,8 +61,8 @@ checks block is not dialed, approval or not. The model never decides whether a
 call is allowed: the person approves, the checks allow.
 
 Pending approvals are not kept anywhere new: they are read back from the chat
-history in the session store. A ``place_call``, ``record_payment`` or
-``reverse_payment`` result opens one; a message
+history in the session store. A ``place_call``, ``record_payment``,
+``reverse_payment``, ``add_note`` or ``schedule_callback`` result opens one; a message
 that starts with ``[approval <id>]`` closes it. Only code writes tool results,
 so only code can open one. Anyone (the model, or text typed in the box) could
 write a closing marker, but closing one only ever means fewer calls.
@@ -71,6 +86,7 @@ import psycopg
 
 from compliance import Decision
 from compliance.audit import record as audit_record
+from harness import operator_reads as reads
 from harness import payments as pay
 from harness.agent import Agent
 from harness.memory import Session
@@ -87,7 +103,10 @@ NEEDS_APPROVAL = "needs_approval"
 PLACE_CALL = "place_call"
 RECORD_PAYMENT = "record_payment"
 REVERSE_PAYMENT = "reverse_payment"
-ACTIONS = (PLACE_CALL, RECORD_PAYMENT, REVERSE_PAYMENT)
+ADD_NOTE = "add_note"
+SCHEDULE_CALLBACK = "schedule_callback"
+PAYMENT_ACTIONS = (RECORD_PAYMENT, REVERSE_PAYMENT)
+ACTIONS = (PLACE_CALL, *PAYMENT_ACTIONS, ADD_NOTE, SCHEDULE_CALLBACK)
 DEFAULT_OPERATOR_TZ = "America/New_York"
 MAX_MATCHES = 10
 _ACCOUNT = re.compile(r"[A-Za-z0-9-]{1,40}")
@@ -374,6 +393,84 @@ class Operator:
                     {},
                     self.on_time_report,
                 ),
+                Tool(
+                    "list_debtors",
+                    f"List debts, sorted and filtered, at most {reads.MAX_LIST}. Each has its "
+                    "id, name, state, balance, status, masked phone and last payment day.",
+                    {
+                        "sort": "balance (largest first), last_payment (newest first), "
+                        "status or name.",
+                        "filter": "Empty, or a comma list of state:XX, status:active (or "
+                        "disputed, paused, closed), ready (every pre-call check passes now) "
+                        "or blocked.",
+                        "limit": f"How many to show, up to {reads.MAX_LIST}.",
+                    },
+                    self.list_debtors,
+                ),
+                Tool(
+                    "account_summary",
+                    "One debt in full: balance and original amount, status, stop flags, "
+                    "payments, plan, calls, whether a call is allowed now, recent notes "
+                    "and upcoming callbacks.",
+                    {"debtor_id": debtor},
+                    self.account_summary,
+                ),
+                Tool(
+                    "call_history",
+                    "One debt's call attempts and outcomes, newest first, with how many "
+                    "calls in the last 7 days count toward the 7-in-7 limit.",
+                    {"debtor_id": debtor},
+                    self.call_history,
+                ),
+                Tool(
+                    "next_allowed_call",
+                    "The next time every pre-call check would pass for one debt, or why "
+                    "no time will (a stop that waiting does not clear).",
+                    {"debtor_id": debtor},
+                    self.next_allowed_call,
+                ),
+                Tool(
+                    "portfolio_summary",
+                    "Totals for every debt by status, and payments and calls in a period.",
+                    {"period": "'last 7 days', 'this month', 'today', YYYY-MM-DD, or 'all'."},
+                    self.portfolio_summary,
+                ),
+                Tool(
+                    "audit_for",
+                    f"One debt's audit log, newest first, at most {reads.MAX_AUDIT} rows.",
+                    {"debtor_id": debtor, "limit": f"Up to {reads.MAX_AUDIT}."},
+                    self.audit_for,
+                ),
+                Tool(
+                    "add_note",
+                    "Ask to add a note to a debt. This does not write: the person must "
+                    "approve it. Notes are kept forever and can't be edited.",
+                    {"debtor_id": debtor, "text": "The note, in the person's words."},
+                    self.add_note,
+                ),
+                Tool(
+                    "schedule_callback",
+                    "Ask to schedule a callback. This does not write: the person must "
+                    "approve it, and it is refused if a call then would break the "
+                    "pre-call checks (calling hours, a cease, and the rest).",
+                    {
+                        "debtor_id": debtor,
+                        "when": "YYYY-MM-DD HH:MM in the person's time zone, or an ISO "
+                        "time with an offset.",
+                    },
+                    self.schedule_callback,
+                ),
+                Tool(
+                    "record_stop",
+                    "Record that a debtor asked us to stop (cease), disputes the debt, "
+                    "has an attorney, or filed for bankruptcy. Takes effect at once; "
+                    "calls are blocked from then on. It can't be undone in chat.",
+                    {
+                        "debtor_id": debtor,
+                        "kind": "cease, dispute, attorney or bankruptcy.",
+                    },
+                    self.record_stop,
+                ),
             ]
         )
 
@@ -402,8 +499,7 @@ class Operator:
             return f"error: {debtor_id!r} is not a debtor id"
         when = self._clock()
         with self._connect() as conn:
-            (outcome,) = plan_queue([debtor_id], when, conn).outcomes
-            conn.rollback()  # the dry run only reads
+            (outcome,) = plan_queue([debtor_id], when, conn).outcomes  # writes nothing
         return json.dumps(
             {
                 "debtor_id": debtor_id,
@@ -627,6 +723,161 @@ class Operator:
             "balance_after": pay.money(after),
         }
 
+    # --- account reads ---------------------------------------------------------
+
+    def _read(self, fn: Callable[[psycopg.Connection], Any]) -> str:
+        """Run one read and answer JSON, or an ``error:`` line the model can act on."""
+        try:
+            with self._connect() as conn:
+                result = fn(conn)
+        except (reads.ReadError, pay.PaymentError) as exc:
+            return f"error: {exc}"
+        return reads.dumps(result)
+
+    def list_debtors(self, sort: str, filter: str, limit: str) -> str:  # noqa: A002
+        try:
+            n = reads.parse_limit(limit, reads.MAX_LIST)
+        except reads.ReadError as exc:
+            return f"error: {exc}"
+        now = self._clock()
+        return self._read(lambda conn: reads.list_debtors(conn, sort, filter, n, now))
+
+    def account_summary(self, debtor_id: str) -> str:
+        now = self._clock()
+        return self._read(lambda conn: reads.account_summary(conn, debtor_id, now, self.tz))
+
+    def call_history(self, debtor_id: str) -> str:
+        now = self._clock()
+        return self._read(lambda conn: reads.call_history(conn, debtor_id, now))
+
+    def next_allowed_call(self, debtor_id: str) -> str:
+        now = self._clock()
+
+        def run(conn: psycopg.Connection) -> dict[str, Any]:
+            account = pay.resolve_debt(conn, debtor_id).account_number
+            return reads.next_allowed_call(conn, account, now)
+
+        return self._read(run)
+
+    def portfolio_summary(self, period: str) -> str:
+        now = self._clock()
+        try:
+            since = pay.parse_since(period, self._today())
+        except pay.PaymentError as exc:
+            return f"error: {exc}"
+        return self._read(lambda conn: reads.portfolio_summary(conn, since, now, self.tz))
+
+    def audit_for(self, debtor_id: str, limit: str) -> str:
+        try:
+            n = reads.parse_limit(limit, reads.MAX_AUDIT)
+        except reads.ReadError as exc:
+            return f"error: {exc}"
+        return self._read(lambda conn: reads.audit_for(conn, debtor_id, n))
+
+    # --- notes, callbacks and stops ----------------------------------------------
+
+    def _approval(self, action: str, row: dict[str, Any], details: dict[str, Any]) -> str:
+        return json.dumps(
+            {
+                "status": NEEDS_APPROVAL,
+                "action": action,
+                "approval_id": "apr_" + secrets.token_hex(8),
+                "debtor_id": row["debtor_id"],
+                "name": row["name"],
+                "phone": reads.mask_phone(row["e164"]),
+                "details": details,
+                "note": "Nothing has been written. The person must approve this first.",
+            }
+        )
+
+    def add_note(self, debtor_id: str, text: str) -> str:
+        try:
+            body = reads.check_note(text)
+            with self._connect() as conn:
+                row = reads.debt_row(conn, debtor_id)
+        except (reads.ReadError, pay.PaymentError) as exc:
+            return f"error: {exc}; nothing was written"
+        return self._approval(ADD_NOTE, row, {"text": body})
+
+    def schedule_callback(self, debtor_id: str, when: str) -> str:
+        now = self._clock()
+        try:
+            at = reads.parse_when(when, now, self.tz)
+            with self._connect() as conn:
+                row = reads.debt_row(conn, debtor_id)
+                reads.check_callback(conn, row["debtor_id"], at)
+        except (reads.ReadError, pay.PaymentError) as exc:
+            return f"error: {exc}; nothing was written"
+        local = at.astimezone(self.tz)
+        return self._approval(
+            SCHEDULE_CALLBACK,
+            row,
+            {"when": local.isoformat(), "shown": f"{local:%Y-%m-%d %H:%M} {self.tz.key}"},
+        )
+
+    def record_stop(self, debtor_id: str, kind: str) -> str:
+        kind = " ".join(kind.lower().split())
+        if kind not in reads.STOP_KINDS:
+            return f"error: kind must be one of {', '.join(reads.STOP_KINDS)}"
+        source = self._recorded_by()
+        try:
+            with self._connect() as conn, conn.transaction():
+                row = reads.debt_row(conn, debtor_id)
+                what = reads.record_stop(conn, row, kind, source, self.session.call_id)
+                audit_record(
+                    conn,
+                    Decision(True, f"record_stop:{kind}", what, {"source": source}),
+                    kind="stop",
+                    call_id=self.session.call_id,
+                    debt_id=row["debt_id"],
+                )
+        except (reads.ReadError, pay.PaymentError) as exc:
+            return f"error: {exc}; nothing was written"
+        return json.dumps(
+            {"debtor_id": row["debtor_id"], "name": row["name"], "kind": kind, "done": what}
+        )
+
+    def _write_other(self, approval: Approval) -> dict[str, Any]:
+        """Write an approved note or callback with its audit row, checking again first."""
+        d = approval.details
+        with self._connect() as conn, conn.transaction():
+            row: dict[str, Any] | None = None
+            try:
+                row = reads.debt_row(conn, approval.debtor_id)
+                if approval.action == ADD_NOTE:
+                    body = reads.check_note(str(d.get("text", "")))
+                    written = reads.insert_note(conn, row["debt_id"], body, self._recorded_by())
+                else:
+                    at = datetime.fromisoformat(str(d["when"]))
+                    if at <= self._clock():
+                        raise reads.ReadError("that time has passed")
+                    reads.check_callback(conn, row["debtor_id"], at)
+                    written = reads.insert_callback(
+                        conn, self.session.call_id, row["debt_id"], at, self.tz
+                    )
+            except (reads.ReadError, pay.PaymentError, KeyError, ValueError) as exc:
+                audit_record(
+                    conn,
+                    Decision(False, approval.action, str(exc), {"approval_id": approval.id}),
+                    kind="operator",
+                    call_id=self.session.call_id,
+                    debt_id=row["debt_id"] if row else None,
+                )
+                return {"written": False, "reason": str(exc)}
+            audit_record(
+                conn,
+                Decision(
+                    True,
+                    approval.action,
+                    "approved by the operator",
+                    {"approval_id": approval.id, "id": written, **reads.mask_in(d)},
+                ),
+                kind="operator",
+                call_id=self.session.call_id,
+                debt_id=row["debt_id"],
+            )
+        return {"written": True, "reason": "", "id": written}
+
     # --- chatting and approving ------------------------------------------------
 
     def pending(self) -> list[Approval]:
@@ -666,8 +917,10 @@ class Operator:
                 "content": f"{marker} {verb}: {approval.action} for {approval.debtor_id}",
             }
         )
-        if approval.action != PLACE_CALL:
+        if approval.action in PAYMENT_ACTIONS:
             return self._decide_payment(approval, approve, marker)
+        if approval.action != PLACE_CALL:
+            return self._decide_other(approval, approve, marker)
         if not approve:
             reply = f"{marker} Not dialed: you denied the call to {approval.name}."
             self.agent._add({"role": "assistant", "content": reply})
@@ -706,6 +959,24 @@ class Operator:
                 )
             else:
                 reply = f"{marker} Not recorded: {what} failed a check ({done['reason']})."
+        self.agent._add({"role": "assistant", "content": reply})
+        return ChatTurn(reply=reply, pending_approvals=self.pending())
+
+    def _decide_other(self, approval: Approval, approve: bool, marker: str) -> ChatTurn:
+        d = approval.details
+        what = (
+            f"the note for {approval.name}"
+            if approval.action == ADD_NOTE
+            else f"the callback to {approval.name} at {d.get('shown')}"
+        )
+        if not approve:
+            reply = f"{marker} Not saved: you denied {what}."
+        else:
+            done = self._write_other(approval)
+            if done["written"]:
+                reply = f"{marker} Saved {what}. Entry {done['id']}."
+            else:
+                reply = f"{marker} Not saved: {what} failed a check ({done['reason']})."
         self.agent._add({"role": "assistant", "content": reply})
         return ChatTurn(reply=reply, pending_approvals=self.pending())
 

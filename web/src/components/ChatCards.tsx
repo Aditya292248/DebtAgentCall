@@ -4,6 +4,7 @@ import {
   CircleHelp,
   CircleX,
   Phone,
+  NotebookPen,
   Receipt,
   Wrench,
 } from 'lucide-react'
@@ -216,6 +217,58 @@ export function PaymentApprovalCard({ approval, busy, onDecide }: PaymentApprova
           {reversal
             ? 'Adds a reversing entry. The payment itself is kept.'
             : 'The server checks the balance again before it writes.'}
+        </p>
+      </div>
+    </div>
+  )
+}
+
+/** An add_note or schedule_callback waiting on the person. Nothing is saved
+ *  until Approve; the server checks a callback against the pre-call rules again. */
+export function NoteApprovalCard({ approval, busy, onDecide }: PaymentApprovalProps) {
+  const d = approval.details
+  const note = approval.action === 'add_note'
+  return (
+    <div
+      className="space-y-4 rounded-xl border border-primary/40 bg-card p-5 shadow-sm ring-4 ring-primary-soft"
+      data-approval={approval.id}
+    >
+      <div className="flex items-center gap-2.5">
+        <span className="flex size-7 items-center justify-center rounded-full bg-primary-soft text-primary">
+          {note ? <NotebookPen className="size-3.5" /> : <Phone className="size-3.5" />}
+        </span>
+        <span className="text-sm font-semibold">
+          {note ? 'Note' : 'Callback'} waiting for your approval
+        </span>
+      </div>
+      <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-2 text-sm">
+        <dt className="text-muted-foreground">Debtor</dt>
+        <dd className="font-medium">
+          {approval.name}{' '}
+          <span className="font-normal text-muted-foreground">{approval.debtor_id}</span>
+        </dd>
+        <dt className="text-muted-foreground">{note ? 'Note' : 'When'}</dt>
+        <dd className={note ? 'whitespace-pre-wrap' : 'tabular-nums'}>
+          {(note ? d.text : d.shown) ?? 'unknown'}
+        </dd>
+      </dl>
+      <div className="flex flex-wrap items-center gap-2 border-t pt-4">
+        <Button size="lg" className="px-4" disabled={busy} onClick={() => onDecide(true)}>
+          Approve
+        </Button>
+        <Button
+          size="lg"
+          variant="outline"
+          className="px-4"
+          disabled={busy}
+          onClick={() => onDecide(false)}
+        >
+          Deny
+        </Button>
+        <p className="ml-auto text-xs text-muted-foreground">
+          {note
+            ? 'Notes are kept and can’t be edited.'
+            : 'The server checks calling hours and stops again before it saves.'}
         </p>
       </div>
     </div>

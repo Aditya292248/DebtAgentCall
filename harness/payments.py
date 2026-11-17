@@ -73,6 +73,7 @@ class PaymentError(ValueError):
 
 def money(cents: int) -> str:
     """``$1,250.00``, the way the chat shows an amount."""
+    cents = int(cents)  # sums come back from Postgres as Decimal
     sign = "-" if cents < 0 else ""
     return f"{sign}${abs(cents) // 100:,}.{abs(cents) % 100:02d}"
 

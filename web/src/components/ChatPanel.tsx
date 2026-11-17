@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 
 import {
   ApprovalCard,
   DialResult,
+  NoteApprovalCard,
   PaymentApprovalCard,
   ToolCallCard,
 } from '@/components/ChatCards'
@@ -133,6 +134,13 @@ export function ChatPanel({ precallCheck }: Props) {
           {pending.map((a) =>
             a.action === 'record_payment' || a.action === 'reverse_payment' ? (
               <PaymentApprovalCard
+                key={a.id}
+                approval={a}
+                busy={busy}
+                onDecide={(approve) => void decide(a, approve)}
+              />
+            ) : a.action === 'add_note' || a.action === 'schedule_callback' ? (
+              <NoteApprovalCard
                 key={a.id}
                 approval={a}
                 busy={busy}

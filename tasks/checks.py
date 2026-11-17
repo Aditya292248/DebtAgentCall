@@ -1960,3 +1960,115 @@ def _demo_part31() -> None:
 
 ACCEPTANCE["part-31"] = lambda: ACCEPTANCE["part-20"]() and _accept_part31()
 DEMOS["part-31"] = _demo_part31
+
+
+# ----------------------------------------------------------------------------
+# operator account tools: reads, notes, callbacks and stops, from the chat
+# ----------------------------------------------------------------------------
+
+
+def _operator_reads_run(provider: Provider | None, questions: list[str], at: str) -> list:
+    """Ask the operator ``questions`` about two made-up debtors (one with a cease),
+    inside one transaction on the local database that is rolled back afterwards."""
+    import tempfile
+    from contextlib import nullcontext
+    from datetime import datetime
+
+    from harness.db import connect
+    from harness.memory import JsonlSession
+    from harness.operator import Operator, operator_tz
+
+    when = datetime.fromisoformat(at)
+    turns = []
+    with tempfile.TemporaryDirectory() as root, connect() as conn:
+        conn.execute("select 1")  # one transaction, rolled back at the end
+        try:
+            for last, balance, cease in (("Bigowe", 9_000_000_00, False), ("Quietly", 100, True)):
+                (person,) = conn.execute(
+                    "insert into public.debtor (first_name, last_name, dob, address, zip, state)"
+                    " values ('Testread', %s, '1980-01-01', '1 Made Up Way', '90012', 'CA')"
+                    " returning id",
+                    (last,),
+                ).fetchone() or (None,)
+                conn.execute(
+                    "insert into public.phone (debtor_id, e164, line_type, consent_source,"
+                    " consent_at) values (%s, '+12135550199', 'cell', 'made-up', '2026-01-01')",
+                    (person,),
+                )
+                conn.execute(
+                    "insert into public.debt (debtor_id, account_number, creditor, balance_cents,"
+                    " opened_on) values (%s, %s, 'Made Up Store', %s, '2026-01-01')",
+                    (person, f"TST-{last.upper()}", balance),
+                )
+                if cease:
+                    conn.execute(
+                        "insert into public.flags (debtor_id, kind, source) "
+                        "values (%s, 'cease', 'made-up')",
+                        (person,),
+                    )
+            op = Operator(
+                JsonlSession.for_call(root, "chat-reads"),
+                provider=provider,
+                connect=lambda: nullcontext(conn),
+                clock=lambda: when,
+                tz=operator_tz("America/Los_Angeles"),
+            )
+            turns = [op.chat(q) for q in questions]
+        finally:
+            conn.rollback()
+    return turns
+
+
+_OPERATOR_READS_QUESTIONS = [
+    "Who has the highest debt?",
+    "When can we next call Testread Quietly?",
+]
+
+
+def _accept_operator_reads() -> bool:
+    """The real model answers "who has the highest debt" from list_debtors, and
+    says Testread Quietly can't be called (a cease) from next_allowed_call."""
+    turns = _operator_reads_run(None, _OPERATOR_READS_QUESTIONS, _PART07_WHEN)
+    for t in turns:
+        print("tools:", [c["name"] for c in t.tool_calls], "| reply:", t.reply)
+    if len(turns) != 2:
+        return False
+    first_tools = [c["name"] for c in turns[0].tool_calls]
+    second_tools = [c["name"] for c in turns[1].tool_calls]
+    return (
+        "list_debtors" in first_tools
+        and "Bigowe" in turns[0].reply
+        and ("next_allowed_call" in second_tools or "check_call" in second_tools)
+        and any(w in turns[1].reply.lower() for w in ("cease", "stop", "can't", "cannot", "not"))
+    )
+
+
+def _demo_operator_reads() -> None:
+    from model import fake
+    from model.fake import tool_call, tool_reply
+
+    real = _llm_configured()
+    print("model:", "the real one from LLM_BASE_URL" if real else "fake (set LLM_BASE_URL)\n")
+    provider = None
+    if not real:
+        provider = fake(
+            scripted=[
+                tool_reply(
+                    tool_call("list_debtors", "c1", sort="balance", filter="", limit="1000")
+                ),
+                "Testread Bigowe owes the most: $9,000,000.00.",
+                tool_reply(tool_call("next_allowed_call", "c2", debtor_id="Testread Quietly")),
+                "Testread Quietly asked us to stop (cease), so there is no time we can call.",
+            ]
+        )
+    turns = _operator_reads_run(provider, _OPERATOR_READS_QUESTIONS, _PART07_WHEN)
+    for question, t in zip(_OPERATOR_READS_QUESTIONS, turns, strict=True):
+        print("you>  ", question)
+        for c in t.tool_calls:
+            print(f"  tool  {c['name']}({c['arguments']}) -> {str(c['result'])[:160]}")
+        print("agent>", t.reply, "\n")
+    print("   # a limit of 1000 comes back capped; the cease means no time, not a workaround")
+
+
+ACCEPTANCE["operator-reads"] = _accept_operator_reads
+DEMOS["operator-reads"] = _demo_operator_reads

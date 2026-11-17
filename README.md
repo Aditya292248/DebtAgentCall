@@ -29,6 +29,7 @@ harness/
   review.py             review_transcript(transcript, account): reviewer subagents check a finished call
   skills.py             Skill, discover(), skills_prompt() and the load_skill tool
   payments.py           the payment ledger: parsing, current balance checks, history and the on-time report
+  operator_reads.py     the operator chat's account reads, notes, callbacks and stops (capped, phones masked)
 compliance/
   decision.py           Decision (allow, rule_id, reason, evidence), the answer every rule gives
   timezones.py          zones_for(zip, phone), the time zones a debtor might be in
@@ -58,7 +59,7 @@ instructions/
 skills/                 short playbooks for hard conversations (hardship, angry caller, ...)
 supabase/
   config.toml           local Supabase settings (database on port 54322)
-  migrations/           the debtor, phone, debt, call_attempt, flags, audit_event, call_message and payment tables
+  migrations/           the debtor, phone, debt, call_attempt, flags, audit_event, call_message, payment and debt_note tables
   seed.sql              made-up debtors, with call history and flags for each pre-call check
 tasks/
   verify.py             offline checks: format, lint, types, tests, import
@@ -564,6 +565,25 @@ uv run demo part-17
 ```
 
 The demo prints the skills menu, then plays a caller who lost their job: the model loads the `hardship` playbook before answering.
+
+## Account questions from the chat
+
+The operator chat answers questions about accounts from the database, through read-only tools in `harness/operator_reads.py`:
+
+- `list_debtors(sort, filter, limit)`: sort by balance, last payment, status or name; filter by `state:XX`, `status:...`, `ready` or `blocked` (ready and blocked come from the dialer's own dry run). At most 25 rows, whatever limit is asked for, and the answer says when it was cut short.
+- `account_summary`, `call_history` (attempts, outcomes and the 7-in-7 count as the rule sees it), `portfolio_summary(period)` and `audit_for(debtor_id, limit)` (at most 50 rows). Phone numbers are masked to the last four digits everywhere, including inside audit evidence.
+- `next_allowed_call(debtor_id)`: steps forward 15 minutes at a time through `compliance.check_before_call` with the facts the dialer loads, for up to 14 days, and confirms the time it finds with `dialer.service.plan_queue`. A block that waiting can't clear (cease, consent, attorney, a disputed debt) gives no time at all. It only answers a question; the dialer still runs every check when a call is approved.
+
+Three tools write:
+
+- `add_note(debtor_id, text)` and `schedule_callback(debtor_id, when)` open an approval card like a call does. Nothing is written until Approve. A callback is refused, both when asked and on Approve, if the pre-call checks would block a call at that moment (calling hours, a cease, and the rest). Notes go in `debt_note`, which is append-only like `payment`. Each approved write has an audit row.
+- `record_stop(debtor_id, kind)` (cease, dispute, attorney or bankruptcy) writes at once with an audit row (`kind = stop`). It needs no approval because a stop can only mean fewer calls.
+
+There is no chat tool to remove a stop flag, record consent, edit a balance or delete anything; a test checks the tool names, the code, and that running every tool leaves a stop in place.
+
+```bash
+uv run demo operator-reads
+```
 
 ## Payments
 
