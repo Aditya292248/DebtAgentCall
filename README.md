@@ -266,7 +266,7 @@ The demo checks every made-up debtor at a fixed time (2026-11-05, 14:00 in New Y
 
 ## Test numbers
 
-`TEST_NUMBERS` (in the environment or `.env`; unset by default) is a comma-separated list of E.164 numbers, for the repo owner's own phone only, so a real test call can be placed outside calling hours. A listed number skips the `calling_hours` rule and nothing else: consent, 7-in-7, cease, DNC, attorney, bankruptcy and deceased still run and still block. Every skip shows as an allow with the reason `skipped: test number (TEST_NUMBERS)` and, when the decision is recorded, as a `test_number_exemption` row in the audit log. A malformed entry is ignored and logged; there are no wildcards or prefixes. The dialer, the operator agent and `/api/precall` share the same check, and the phone webhook and live-call rules are not affected.
+`TEST_NUMBERS` (in the environment or `.env`; unset by default) is a comma-separated list of E.164 numbers, for the repo owner's own phone only, so real test calls can be placed outside calling hours and past the call limit. A listed number skips the `calling_hours` and `call_frequency` rules (the 7-in-7 limit and the pause after a conversation) and nothing else: consent, cease, DNC, attorney, bankruptcy, deceased and debt status still run and still block, and every attempt is still recorded. Every skip shows as an allow with the reason `skipped: test number (TEST_NUMBERS)` and, when the decision is recorded, as one `test_number_exemption` row per skipped rule in the audit log. A malformed entry is ignored and logged; there are no wildcards or prefixes. The dialer, the operator agent and `/api/precall` share the same check, and the phone webhook and live-call rules are not affected.
 
 ```bash
 uv run demo part-27

@@ -44,6 +44,6 @@ def check_and_record(
     for d in decisions:
         record(conn, d, kind="gate", call_id=call_id, debt_id=debt_id)
         if was_exempted(d):
-            # A second, separate row so every skipped hours check is easy to find.
+            # A second, separate row so every skipped rule is easy to find.
             record(conn, d, kind="test_number_exemption", call_id=call_id, debt_id=debt_id)
     return decisions

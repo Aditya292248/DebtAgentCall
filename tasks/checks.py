@@ -1751,7 +1751,7 @@ def _demo_part27() -> None:
         for d in decisions[:3]:
             print(f"  {'allow' if d.allow else 'BLOCK'}  {d.rule_id:<14} {d.reason}")
         print()
-    print("   # only calling_hours is skipped; consent, 7-in-7, cease, DNC and the rest still run")
+    print("   # only calling_hours and call_frequency are skipped; the other rules still run")
 
 
 ACCEPTANCE["part-27"] = _accept_part27

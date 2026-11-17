@@ -31,7 +31,7 @@ from compliance.flags import (
     check_dnc,
 )
 from compliance.hours import Contact, check_calling_hours
-from compliance.testnumbers import configured_test_numbers, exempt_calling_hours
+from compliance.testnumbers import configured_test_numbers, exempt_for_test_number
 
 
 @dataclass(frozen=True)
@@ -52,7 +52,7 @@ def check_before_call(
     """Every pre-call decision for this debt at ``when``.
 
     A number in ``test_numbers`` (default: the ``TEST_NUMBERS`` setting, empty if
-    unset) skips the calling-hours rule only; see ``compliance/testnumbers.py``.
+    unset) skips the calling-hours and call-frequency rules only; see ``compliance/testnumbers.py``.
     """
     if when.tzinfo is None or when.utcoffset() is None:
         raise ValueError("when must be timezone-aware, for example datetime.now(timezone.utc)")
@@ -63,9 +63,12 @@ def check_before_call(
     if test_numbers is None:
         test_numbers = configured_test_numbers()
     hours = check_calling_hours(Contact(zip=facts.zip, phone_e164=e164), when)
+    frequency = check_call_frequency(facts.attempts, facts.debt_id, when)
+    # No history means we can't count; that is missing data, so never exempt.
+    frequency_numbers = test_numbers if facts.attempts is not None else frozenset()
     return [
-        exempt_calling_hours(hours, e164, test_numbers),
-        check_call_frequency(facts.attempts, facts.debt_id, when),
+        exempt_for_test_number(hours, e164, test_numbers),
+        exempt_for_test_number(frequency, e164, frequency_numbers),
         check_consent(facts.phone),
         check_cease(facts.flags, facts.debt_id, e164),
         check_dnc(facts.flags, facts.debt_id, e164),
