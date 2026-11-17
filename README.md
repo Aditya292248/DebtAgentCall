@@ -572,12 +572,12 @@ The operator chat answers questions about accounts from the database, through re
 
 - `list_debtors(sort, filter, limit)`: sort by balance, last payment, status or name; filter by `state:XX`, `status:...`, `ready` or `blocked` (ready and blocked come from the dialer's own dry run). At most 25 rows, whatever limit is asked for, and the answer says when it was cut short.
 - `account_summary`, `call_history` (attempts, outcomes and the 7-in-7 count as the rule sees it), `portfolio_summary(period)` and `audit_for(debtor_id, limit)` (at most 50 rows). Phone numbers are masked to the last four digits everywhere, including inside audit evidence.
-- `next_allowed_call(debtor_id)`: steps forward 15 minutes at a time through `compliance.check_before_call` with the facts the dialer loads, for up to 14 days, and confirms the time it finds with `dialer.service.plan_queue`. A block that waiting can't clear (cease, consent, attorney, a disputed debt) gives no time at all. It only answers a question; the dialer still runs every check when a call is approved.
+- `next_allowed_call(debtor_id)`: steps forward 15 minutes at a time through `compliance.check_before_call` with the facts the dialer loads, for up to 14 days, and confirms the time it finds with `dialer.service.plan_queue`. It gives the time in the operator's zone too (`next_allowed_local`), so the model doesn't convert it. A block that waiting can't clear (cease, consent, attorney, a disputed debt) gives no time at all. It only answers a question; the dialer still runs every check when a call is approved.
 
 Three tools write:
 
 - `add_note(debtor_id, text)` and `schedule_callback(debtor_id, when)` open an approval card like a call does. Nothing is written until Approve. A callback is refused, both when asked and on Approve, if the pre-call checks would block a call at that moment (calling hours, a cease, and the rest). Notes go in `debt_note`, which is append-only like `payment`. Each approved write has an audit row.
-- `record_stop(debtor_id, kind)` (cease, dispute, attorney or bankruptcy) writes at once with an audit row (`kind = stop`). It needs no approval because a stop can only mean fewer calls.
+- `record_stop(debtor_id, kind)` (cease, dispute, attorney or bankruptcy) writes at once with an audit row (`kind = stop`). It needs no approval because a stop can only mean fewer calls, but for that reason it takes only an exact account id, never a name: there is no card to catch a wrong match.
 
 There is no chat tool to remove a stop flag, record consent, edit a balance or delete anything; a test checks the tool names, the code, and that running every tool leaves a stop in place.
 

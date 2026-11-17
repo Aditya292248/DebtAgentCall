@@ -182,6 +182,8 @@ def test_next_allowed_call_agrees_with_the_dialer_for_a_blocked_debtor(tmp_path,
     assert body["allowed_now"] is False
     at = datetime.fromisoformat(body["next_allowed"])
     assert at.astimezone(LA).strftime("%H:%M") == "08:00"
+    # The time to say comes from code, already in the operator's zone.
+    assert body["next_allowed_local"] == "2026-11-17 08:00 America/Los_Angeles"
     assert not dialer_allows(conn, who["account"], NIGHT)
     assert not dialer_allows(conn, who["account"], at - timedelta(minutes=15))
     assert dialer_allows(conn, who["account"], at)
@@ -410,3 +412,24 @@ def test_audit_and_summary_mask_phone_numbers(tmp_path, conn):
     assert len(audit["events"]) <= reads.MAX_AUDIT
     summary = json.loads(results[1])
     assert summary["balance"] == "$500.00" and summary["may_call_now"] is True
+
+
+@pytest.mark.db
+def test_record_stop_refuses_a_name_and_writes_nothing(tmp_path, conn):
+    """A stop has no approval card, so a name that matches one debtor is not enough."""
+    tag = secrets.token_hex(3)
+    who = add_debtor(conn, f"Onlyone{tag}")
+    script = [
+        tool_reply(
+            tool_call("record_stop", "c1", debtor_id=f"Onlyone{tag}", kind="cease"),
+            tool_call("record_stop", "c2", debtor_id=f"Testread Onlyone{tag}", kind="cease"),
+        ),
+        "I need the id.",
+    ]
+    op = make(tmp_path, script, conn)
+    results = [c["result"] for c in op.chat("they asked us to stop").tool_calls]
+    assert all(r.startswith("error:") and "find_debtor" in r for r in results)
+    flags = "select count(*) from public.flags where debtor_id = %s"
+    assert count(conn, flags, who["person"]) == 0
+    audits = "select count(*) from public.audit_event where debt_id = %s"
+    assert count(conn, audits, who["debt_id"]) == 0

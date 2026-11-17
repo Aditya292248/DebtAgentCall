@@ -466,7 +466,8 @@ class Operator:
                     "has an attorney, or filed for bankruptcy. Takes effect at once; "
                     "calls are blocked from then on. It can't be undone in chat.",
                     {
-                        "debtor_id": debtor,
+                        "debtor_id": "The exact id find_debtor returned, e.g. 'ACC-1001'. "
+                        "A name is refused.",
                         "kind": "cease, dispute, attorney or bankruptcy.",
                     },
                     self.record_stop,
@@ -755,7 +756,12 @@ class Operator:
 
         def run(conn: psycopg.Connection) -> dict[str, Any]:
             account = pay.resolve_debt(conn, debtor_id).account_number
-            return reads.next_allowed_call(conn, account, now)
+            result = reads.next_allowed_call(conn, account, now)
+            if result.get("next_allowed"):
+                # The time to say, in the operator's zone, so the model never converts it.
+                at = datetime.fromisoformat(result["next_allowed"]).astimezone(self.tz)
+                result["next_allowed_local"] = f"{at:%Y-%m-%d %H:%M} {self.tz.key}"
+            return result
 
         return self._read(run)
 
@@ -820,9 +826,18 @@ class Operator:
         if kind not in reads.STOP_KINDS:
             return f"error: kind must be one of {', '.join(reads.STOP_KINDS)}"
         source = self._recorded_by()
+        nothing = "; nothing was written"
+        account = debtor_id.strip()
         try:
             with self._connect() as conn, conn.transaction():
-                row = reads.debt_row(conn, debtor_id)
+                # A stop is written at once with no card to check, so it takes only an
+                # exact account id, never a name that happens to match one debtor.
+                if not _ACCOUNT.fullmatch(account) or pay.account_by_number(conn, account) is None:
+                    return (
+                        f"error: {debtor_id!r} is not a debtor id; use find_debtor and pass "
+                        f"the id it returns{nothing}"
+                    )
+                row = reads.debt_row(conn, account)
                 what = reads.record_stop(conn, row, kind, source, self.session.call_id)
                 audit_record(
                     conn,
@@ -832,7 +847,7 @@ class Operator:
                     debt_id=row["debt_id"],
                 )
         except (reads.ReadError, pay.PaymentError) as exc:
-            return f"error: {exc}; nothing was written"
+            return f"error: {exc}{nothing}"
         return json.dumps(
             {"debtor_id": row["debtor_id"], "name": row["name"], "kind": kind, "done": what}
         )
