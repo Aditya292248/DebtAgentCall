@@ -70,7 +70,7 @@ tasks/
   serve.py              `uv run serve`, which runs the webhook on this machine
 web/                    the browser UI (Vite, React, TypeScript, Tailwind, shadcn/ui), read-only for now
 tests/
-  episodes/             offline tests that use the fake provider
+  <area>/               offline tests by feature, in the same folders as the code
 ```
 
 The rest of the code will only use `chat` and `Provider`. That means you can switch from LM Studio to Ollama, OpenRouter or OpenAI without changing any calling code.
@@ -194,7 +194,7 @@ The app connects with `DATABASE_URL` (see `.env.example`). It defaults to the lo
 
 `harness/db.py` has `find_account(name)`, which `lookup_account` uses. It matches the full name, ignoring case and extra spaces. If the database is down, the tool returns an `error: lookup_account failed: ...` message instead of crashing.
 
-The tests in `tests/episodes/test_part06.py` that need the database are marked `db`. They run against the real local database. When it isn't running, they are skipped with "run `supabase start`", so `uv run verify` still works offline. CI (`.github/workflows/ci.yml`) starts the database with `supabase db start` and sets `REQUIRE_DATABASE=1`, which turns that skip into a failure, so the database tests always run there. A `db` test that writes against a debt uses the `scratch_sam` fixture (`tests/conftest.py`): its own debtor and debt with fresh ids, deleted afterwards, so it passes on a fresh or a used database and leaves the seed rows alone.
+The tests in `tests/harness/test_account_lookup_db.py` that need the database are marked `db`. They run against the real local database. When it isn't running, they are skipped with "run `supabase start`", so `uv run verify` still works offline. CI (`.github/workflows/ci.yml`) starts the database with `supabase db start` and sets `REQUIRE_DATABASE=1`, which turns that skip into a failure, so the database tests always run there. A `db` test that writes against a debt uses the `scratch_sam` fixture (`tests/conftest.py`): its own debtor and debt with fresh ids, deleted afterwards, so it passes on a fresh or a used database and leaves the seed rows alone.
 
 ```bash
 uv run pytest -m db -v
@@ -303,7 +303,7 @@ uv run audit-verify
 
 If Windows blocks the generated `audit-verify.exe`, `uv run python -m tasks.audit_verify` runs the same check.
 
-`compliance/audit.py` explains exactly how a hash is made, so anyone can check the log with their own code. The tests in `tests/episodes/test_part08.py` run inside transactions that are rolled back, so they never leave rows behind.
+`compliance/audit.py` explains exactly how a hash is made, so anyone can check the log with their own code. The tests in `tests/compliance/test_audit_log.py` run inside transactions that are rolled back, so they never leave rows behind.
 
 ```bash
 uv run demo part-08
@@ -493,7 +493,7 @@ cd web && npm install && npm run dev
 
 Before the first run, copy `web/.env.example` to `web/.env.local` and paste in the anon key that `npx supabase status` prints. Then open http://localhost:5173. The dev server forwards `/api` to the API on port 8000. If Windows blocks `api.exe`, `uv run python -m harness.api` starts the same thing.
 
-You need Node.js 18 or newer for `web/`. `npm run build` and `npm run lint` check it. The API's tests are in `tests/episodes/test_part12.py`; one checks that Robin Hale, who has a lawyer, comes back blocked by `attorney`.
+You need Node.js 18 or newer for `web/`. `npm run build` and `npm run lint` check it. The API's tests are in `tests/harness/test_api.py`; one checks that Robin Hale, who has a lawyer, comes back blocked by `attorney`.
 
 ```bash
 uv run demo part-12

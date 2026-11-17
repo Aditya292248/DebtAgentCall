@@ -47,7 +47,7 @@ def client(responder: FakeProvider, no_instructions, tmp_path) -> TestClient:
         ),
         open_session=partial(JsonlSession.for_call, tmp_path / "sessions"),
         clock=lambda: NOW,
-        stages=False,  # the bare webhook; call stages are tested in test_part13
+        stages=False,  # the bare webhook; call stages are tested in test_call_stages.py
     )
     return TestClient(app)
 

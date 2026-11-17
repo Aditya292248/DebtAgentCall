@@ -8,7 +8,7 @@ deterministic; the live-model version is ``uv run accept part-04``.
 
 ``lookup_account`` reads Postgres now. These tests swap in the same made-up
 accounts held in memory, so they still run without a database; the database
-itself is tested in ``test_part06.py``.
+itself is tested in ``harness/test_account_lookup_db.py``.
 """
 
 from __future__ import annotations
