@@ -1,5 +1,7 @@
 # DebtAgentCall
 
+[![CI](https://github.com/Aditya292248/DebtAgentCall/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Aditya292248/DebtAgentCall/actions/workflows/ci.yml)
+
 A debt-collection voice agent that puts compliance first, built one small step at a time.
 
 Right now the project can send messages to a language model and get a reply back, and it has an agent that remembers the conversation, follows a system prompt kept in a file, and can look up an account with a tool. The made-up debtors live in a local Postgres database run by Supabase. The pre-call compliance rules (calling hours, the 7-in-7 call limit, consent, stop requests, do-not-call, lawyers, bankruptcy and death) are here as plain Python checks; they are not wired into the agent yet. Every decision they make can be written to an append-only audit log that the database won't let anyone edit. There is a webhook that AgentPhone can call during a phone call, and a fake caller to test it without a phone. Each call's conversation is saved as it happens, so every turn of a call sees the turns before it. A first read-only web page shows the debtors with their pre-call result and the audit log. A dialer checks each debt right before dialing, writes the call to the ledger first, and places it once. The call flow and the other rules come later, each in its own step.
@@ -191,7 +193,7 @@ The app connects with `DATABASE_URL` (see `.env.example`). It defaults to the lo
 
 `harness/db.py` has `find_account(name)`, which `lookup_account` uses. It matches the full name, ignoring case and extra spaces. If the database is down, the tool returns an `error: lookup_account failed: ...` message instead of crashing.
 
-The tests in `tests/episodes/test_part06.py` that need the database are marked `db`. They run against the real local database. When it isn't running, they are skipped with "run `supabase start`", so `uv run verify` still works offline.
+The tests in `tests/episodes/test_part06.py` that need the database are marked `db`. They run against the real local database. When it isn't running, they are skipped with "run `supabase start`", so `uv run verify` still works offline. CI (`.github/workflows/ci.yml`) starts the database with `supabase db start` and sets `REQUIRE_DATABASE=1`, which turns that skip into a failure, so the database tests always run there. A `db` test that writes against a debt uses the `scratch_sam` fixture (`tests/conftest.py`): its own debtor and debt with fresh ids, deleted afterwards, so it passes on a fresh or a used database and leaves the seed rows alone.
 
 ```bash
 uv run pytest -m db -v
@@ -596,7 +598,7 @@ uv run demo part-31
 - **Not done yet:** nothing marks a call as answered or as a conversation with the debtor afterwards. That needs the after-call step, so for now the "no calls for 7 days after a conversation" rule only sees conversations already in the ledger.
 - `max_parallel` (default 1) works on several debts at once, each with its own database connection.
 - **Recording:** there is no recording-consent decision yet, so the dialer leaves AgentPhone's default. A TODO in `dial_one` marks where `disableRecording` goes.
-- `AgentPhoneClient` needs the `agentphone` SDK (`uv pip install agentphone`) and `AGENTPHONE_API_KEY`, `AGENTPHONE_AGENT_ID` and `AGENTPHONE_FROM_NUMBER_ID` (see `.env.example`). It sends no system prompt, so calls run in webhook mode, and it turns the SDK's own retries off.
+- `AgentPhoneClient` uses the `agentphone` SDK (a project dependency, installed by `uv sync`) and `AGENTPHONE_API_KEY`, `AGENTPHONE_AGENT_ID` and `AGENTPHONE_FROM_NUMBER_ID` (see `.env.example`). It sends no system prompt, so calls run in webhook mode, and it turns the SDK's own retries off.
 
 ```bash
 uv run dialer --dry-run

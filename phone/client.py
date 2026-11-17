@@ -85,9 +85,18 @@ def call_error_for(status: int, headers: dict[str, str] | None = None) -> CallEr
 
 
 def _status_and_headers(exc: Exception) -> tuple[int | None, dict[str, str]]:
-    """Pull the HTTP status and headers out of an SDK error, whatever its class."""
+    """Pull the HTTP status and headers out of an SDK error, whatever its class.
+
+    The ``agentphone`` SDK's ``AgentPhoneError`` keeps the code in ``.status`` and
+    no response (so no headers, and a 429 reads as ``concurrency``); other clients
+    use ``.status_code`` or ``.response.status_code``.
+    """
     response = getattr(exc, "response", None)
-    status = getattr(exc, "status_code", None) or getattr(response, "status_code", None)
+    status = (
+        getattr(exc, "status_code", None)
+        or getattr(response, "status_code", None)
+        or getattr(exc, "status", None)
+    )
     headers = getattr(response, "headers", None) or {}
     return (status if isinstance(status, int) else None), dict(headers)
 
@@ -119,7 +128,7 @@ class AgentPhoneClient:
             try:
                 from agentphone import AgentPhone  # type: ignore[import-not-found]
             except ImportError as exc:
-                raise RuntimeError("install the AgentPhone SDK: uv pip install agentphone") from exc
+                raise RuntimeError("the AgentPhone SDK is missing; run `uv sync`") from exc
             try:
                 self._sdk = AgentPhone(api_key=self.api_key, max_retries=0)
             except TypeError:

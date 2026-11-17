@@ -397,25 +397,23 @@ def test_tool_names_and_never_raises() -> None:
 
 
 @pytest.mark.db
-def test_rows_and_audit_are_written_to_the_database() -> None:
+def test_rows_and_audit_are_written_to_the_database(scratch_sam: Debtor) -> None:
     from harness.call_tools import PgCallStore, audit_to_conn, load_plan_policy
     from harness.db import connect
 
+    # Its own copy of Sam, not the seed row, so a used database can't change the result.
+    sam = scratch_sam
     call_id = f"test-part21-{uuid.uuid4()}"
     with connect() as conn:
-        (status_before,) = conn.execute(
-            "select status from public.debt where id = %s", (SAM.debt_id,)
-        ).fetchone()
-        conn.commit()
         try:
             ctx = CallContext(
-                debtor=SAM,
-                state=verified(CallState.new(call_id, SAM)),
+                debtor=sam,
+                state=verified(CallState.new(call_id, sam)),
                 store=PgCallStore(conn),
                 audit=audit_to_conn(conn),
-                contact=Contact(zip=SAM.zip, phone_e164="+12135550101"),
+                contact=Contact(zip=sam.zip, phone_e164="+12135550101"),
                 flags=[],
-                policy=load_plan_policy(conn, SAM.creditor),
+                policy=load_plan_policy(conn, sam.creditor),
                 clock=lambda: NOW,
             )
             assert ctx.policy == PlanPolicy()
@@ -433,7 +431,7 @@ def test_rows_and_audit_are_written_to_the_database() -> None:
             ).fetchall()
             assert kinds == [("allow",), ("block",), ("allow",), ("allow",)]
             debt = conn.execute(
-                "select status from public.debt where id = %s", (SAM.debt_id,)
+                "select status from public.debt where id = %s", (sam.debt_id,)
             ).fetchone()
             assert debt == ("disputed",)
             # The next turn's context starts with disputed=False and reads the database.
@@ -446,12 +444,5 @@ def test_rows_and_audit_are_written_to_the_database() -> None:
                 ).fetchall()
             assert seen == [(True,)]
         finally:
-            # The tool committed, so a rollback isn't enough. Audit rows stay: the
-            # log can't be edited, and they are ordinary, valid entries.
+            # The tool committed; deleting scratch_sam takes the plan and dispute with it.
             conn.rollback()
-            for table in ("dispute", "payment_plan"):
-                conn.execute(f"delete from public.{table} where call_id = %s", (call_id,))
-            conn.execute(
-                "update public.debt set status = %s where id = %s", (status_before, SAM.debt_id)
-            )
-            conn.commit()
