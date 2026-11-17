@@ -23,6 +23,14 @@ calls ``send()`` again so the model can see them. It stops when the model
 answers in plain text or ``max_steps`` model calls have been used up. If any
 model call in the loop fails, the whole turn is taken back out, as with ``send()``.
 
+Streaming. ``run_stream()`` is the same loop on ``model.chat_stream``: it
+yields the reply text as the model writes it, and ``None`` at the end of each
+model call, so a caller can finish a half sentence before tools run. Tools run
+between model calls exactly as in ``run()``. A caller that stops reading
+(``close()``) ends the turn there: what the model had written so far is kept as
+a plain assistant message, with no tool requests, so the history stays valid;
+the caller then rewrites it to what was really said.
+
 Memory. Give the agent a ``Session`` (``harness/memory.py``) and every message
 is saved the moment it joins the history (``_add``). A new ``Agent`` on the same
 session starts from what was saved, so each webhook turn of a call sees the
@@ -48,6 +56,7 @@ Adapted from codingHarness.
 
 from __future__ import annotations
 
+from collections.abc import Generator
 from pathlib import Path
 
 from harness.compact import SUMMARIZE_PROMPT, compact_messages, estimate_tokens, render
@@ -55,7 +64,7 @@ from harness.instructions import load_system_prompt
 from harness.memory import Session, unanswered_tool_calls
 from harness.skills import Skill, discover, load_skills, skill_tool, skills_prompt
 from harness.tools import ToolRegistry, default_tools, run_tool
-from model import Provider, chat
+from model import LLMResponse, Provider, chat, chat_stream
 
 DEFAULT_SYSTEM_PROMPT_PATH = Path(__file__).resolve().parent.parent / "instructions" / "system.md"
 DEFAULT_SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
@@ -172,6 +181,11 @@ class Agent:
             # Undo the user turn so a failed call leaves the history as it was.
             self._undo_to(start)
             raise
+        self._record(resp)
+        return resp.content
+
+    def _record(self, resp: LLMResponse) -> None:
+        """Add the model's reply (and any tool requests) to the history."""
         prompt_tokens = resp.usage.get("prompt_tokens")
         if isinstance(prompt_tokens, int) and prompt_tokens > 0:
             self._measured = (prompt_tokens, len(self.messages))
@@ -181,7 +195,73 @@ class Agent:
             self._add({"role": "assistant", "content": resp.content, "tool_calls": calls})
         else:
             self._add({"role": "assistant", "content": resp.content})
-        return resp.content
+
+    def _send_stream(self, user_text: str | None) -> Generator[str | None, None, None]:
+        """One streamed model call: yields its text, then None once it is recorded."""
+        start = len(self.messages)
+        if user_text is not None:
+            self._add({"role": "user", "content": user_text})
+        written: list[str] = []
+        recorded = False
+        try:
+            skills = self.skills()
+            pieces = chat_stream(
+                self._payload(skills),
+                model=self.model,
+                tools=self._tools(skills).schemas() or None,
+                provider=self.provider,
+            )
+            try:
+                for piece in pieces:
+                    if isinstance(piece, LLMResponse):
+                        self._record(piece)
+                        recorded = True
+                        break
+                    written.append(piece)
+                    yield piece
+            finally:
+                close = getattr(pieces, "close", None)
+                if callable(close):
+                    close()
+        except GeneratorExit:
+            # The caller stopped reading mid-reply: keep what was written, no tools.
+            if not recorded:
+                self._add({"role": "assistant", "content": "".join(written)})
+            raise
+        except Exception:
+            self._undo_to(start)
+            raise
+        if not recorded:  # the stream ended without its summary: keep the text
+            self._add({"role": "assistant", "content": "".join(written)})
+        try:
+            yield None
+        except GeneratorExit:
+            last = self.messages[-1]
+            if last.get("tool_calls"):  # stopped before its tools ran: drop the requests
+                self.messages[-1] = {"role": "assistant", "content": last.get("content") or ""}
+                if self.session is not None:
+                    self.session.replace(self.messages)
+            raise
+
+    def run_stream(self, user_text: str) -> Generator[str | None, None, None]:
+        """``run()``, streamed: reply text as it comes, ``None`` after each model call."""
+        self._maybe_compact(user_text)
+        start = len(self.messages)
+        try:
+            yield from self._send_stream(user_text)
+            steps = 1
+            while calls := self.messages[-1].get("tool_calls"):
+                self._run_tools(calls)
+                if steps == self.max_steps:
+                    yield f"stopped: used all {self.max_steps} steps without a final answer"
+                    yield None
+                    return
+                yield from self._send_stream(None)
+                steps += 1
+        except Exception:
+            # Undo the whole turn, as run() does. A close() (GeneratorExit) is not undone.
+            self._undo_to(start)
+            raise
 
     def run(self, user_text: str) -> str:
         """The agent loop: send, run the tools the model asked for, send again, until

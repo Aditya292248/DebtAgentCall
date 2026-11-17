@@ -48,7 +48,7 @@ from phone.webhook import (
     debt_as_found,
     record_stop_in_db,
 )
-from sim.agentphone_sim import load_script, run_script
+from sim.agentphone_sim import load_script, reply_of, run_script
 
 SECRET = "whsec_test_only"
 SAM_PHONE = "+12135550101"
@@ -109,7 +109,7 @@ class Call:
         )
         resp = self.client.post(WEBHOOK_PATH, content=body, headers=headers)
         assert resp.status_code == 200
-        return resp.json()
+        return reply_of(resp)
 
     def stages(self) -> list[Stage]:
         (path,) = self.folder.glob("*.jsonl")
@@ -267,7 +267,7 @@ def test_balance_before_verification_is_not_spoken(tmp_path: Path) -> None:
     call = Call(tmp_path, reply=f"{BALANCE} May I ask who I'm speaking with?")
     call.turn("call_v", "Hello?")
     reply = call.turn("call_v", "Who is this?")  # GREETING: the model answers
-    assert reply == {"text": "May I ask who I'm speaking with?"}
+    assert reply == {"text": SAFE_LINE}  # the first sentence is blocked: the turn stops there
     assert len(call.responder.calls) == 1
     assert [(d.rule_id, d.evidence["sentence"]) for d in call.audited] == [
         ("third_party_disclosure", BALANCE)
@@ -292,7 +292,7 @@ def test_a_failed_audit_write_never_lets_the_sentence_through(
     call.turn("call_a", "Hello?")
     with caplog.at_level(logging.ERROR, logger="phone.webhook"):
         reply = call.turn("call_a", "Who is this?")
-    assert reply == {"text": "Who am I speaking with?"}
+    assert reply == {"text": SAFE_LINE}
     assert "not audited" in caplog.text
 
 

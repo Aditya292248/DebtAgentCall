@@ -56,15 +56,29 @@ One caller turn, with call stages on (the default):
    reply is not spoken: a fixed line, hang up, and an error is logged.
    ``end_call`` hangs up after the reply. ``escalate_to_human`` saves a request
    for a person (worked as a callback) and, only if ``SUPERVISOR_NUMBER`` is
-   set, transfers the call to the agent's transfer number.
-6. Cut the reply into sentences and check each one with
-   ``compliance.check_sentence``, using what the call state says so far
-   (verified, disclosed). Amounts of a plan approved on this turn count as on
-   file. Blocked sentences are dropped and written to the
-   audit log (``kind="utterance_blocked"``). If nothing is left, a fixed safe
-   line is spoken instead. The saved history keeps what was really said. A
-   failed audit write is logged; the blocked sentence is still not spoken.
+   set, transfers the call to the agent's transfer number; nothing more is said.
+6. The reply is streamed (``application/x-ndjson``, see ``phone/replies.py``).
+   The model's text is cut into sentences as it arrives, and each complete
+   sentence is checked with ``compliance.check_sentence`` before it is sent,
+   using the call state as it is at that moment (verified, disclosed, and the
+   amounts of a plan approved so far this turn), plus the check that nothing
+   is called approved or booked unless code saved it. A sentence that passes
+   goes out at once as an ``interim`` line, so the caller hears the first one
+   while the model is still writing. The first blocked sentence is never sent:
+   it is written to the audit log (``kind="utterance_blocked"``), the model is
+   stopped, and the turn ends with a fixed safe line (the pending line if a
+   plan was only saved as pending). Tool calls mid-reply run as in step 5, so
+   a row is saved before any later sentence can speak of it. The last line has
+   no ``interim`` and carries ``hangup`` or ``action`` if the turn ends the
+   call. The saved history keeps what was really said. A failed audit write is
+   logged; the blocked sentence is still not spoken. If a tool fails, nothing
+   more the model wrote is sent: the fixed line, then hang up.
 7. Save the new ``CallState`` in the session.
+
+If no line is ready within ``HOLD_AFTER`` seconds (a slow model, database or
+tool), the stream opens with the fixed ``HOLD_LINE`` and the turn carries on.
+A turn whose whole reply is ready before anything was sent (fixed lines, stop
+triggers, a reply blocked outright) is one plain JSON reply.
 
 ``create_app(stages=False)`` is the bare webhook from before: every turn goes
 straight to the model, unchecked. Only the older tests use it.
@@ -80,6 +94,7 @@ own debtor lookup, audit log and stop recorder.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -87,11 +102,11 @@ import threading
 import time
 import zlib
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, replace
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from compliance import Decision, Flag, SpeechState, block, check_sentence, split_sentences
@@ -110,7 +125,15 @@ from phone.live_tools import (
     check_commitment,
     open_backend_in_db,
 )
-from phone.replies import say, say_and_hangup, transfer
+from phone.replies import (
+    NDJSON,
+    SentenceBuffer,
+    interim,
+    ndjson_line,
+    say,
+    say_and_hangup,
+    transfer,
+)
 from phone.signing import ID_HEADER, verify
 
 WEBHOOK_PATH = "/webhooks/agentphone"
@@ -122,6 +145,9 @@ REPLAY_KEY = "webhook"
 DIDNT_CATCH = "Sorry, I didn't catch that. Could you say it again?"
 SAFE_LINE = "Sorry, could you say that again?"  # when every sentence was blocked
 CANT_CONTINUE = "Sorry, I can't continue this call right now. Goodbye."
+# Sent first if nothing safe is ready to say by HOLD_AFTER seconds into a turn.
+HOLD_LINE = "One moment while I check that."
+HOLD_AFTER = 2.5
 STOP_SOURCE = "live_call"  # flags.source for a flag a stop trigger set
 # A lawyer represents the person on one debt; a stop request, a bankruptcy or a
 # death is about the person, so those flags cover every debt.
@@ -289,6 +315,7 @@ def create_app(
     open_backend: OpenBackend = open_backend_in_db,
     supervisor_number: str | None = None,
     read_debt: ReadDebt = read_debt_in_db,
+    hold_after: float = HOLD_AFTER,
 ) -> FastAPI:
     """The webhook app.
 
@@ -307,6 +334,7 @@ def create_app(
     (database by default; ``debt_as_found`` for tests without one).
     ``supervisor_number`` defaults to ``SUPERVISOR_NUMBER``; without one,
     ``escalate_to_human`` never transfers.
+    ``hold_after`` is how long a turn may stay silent before ``HOLD_LINE``.
     ``stages=False`` turns the call stages and the sentence filter off.
     """
     if secret is None:
@@ -326,13 +354,14 @@ def create_app(
         open_backend,
         bool(supervisor_number.strip()),
         read_debt,
+        hold_after,
     )
     seen = _SeenIds()
     app = FastAPI(title="DebtAgentCall webhook")
     app.state.seen = seen
 
     @app.post(WEBHOOK_PATH)
-    async def agentphone(request: Request) -> JSONResponse:
+    async def agentphone(request: Request) -> Response:
         raw = await request.body()  # the exact bytes that were signed
         problem = verify(raw, request.headers, secret, clock())
         if problem:
@@ -350,6 +379,8 @@ def create_app(
             return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
 
         reply = await _handle(envelope, turn, webhook_id)
+        if isinstance(reply, _Live):
+            return await reply.respond(seen, webhook_id)
         if webhook_id:
             seen.remember(webhook_id, reply)
         return JSONResponse(reply)
@@ -370,9 +401,87 @@ class _Turn:
     open_backend: OpenBackend
     can_transfer: bool  # a supervisor number is configured
     read_debt: ReadDebt
+    hold_after: float = HOLD_AFTER  # seconds of silence before HOLD_LINE
 
 
-async def _handle(envelope: dict, turn: _Turn, webhook_id: str | None = None) -> dict:
+@dataclass(frozen=True)
+class _Said:
+    """How a staged turn ended: the last line to send, and the whole reply.
+
+    ``last`` closes the stream. ``whole`` is everything said this turn as one
+    plain reply: saved for a retry, and sent as is if nothing was streamed.
+    """
+
+    last: dict
+    whole: dict
+
+
+Emit = Callable[[str], None]  # sends one checked sentence as an interim line
+
+
+class _Live:
+    """A staged turn running in a worker thread, streamed as it speaks."""
+
+    def __init__(self, hold_after: float) -> None:
+        self.hold_after = hold_after
+        self._loop = asyncio.get_running_loop()
+        self._events: asyncio.Queue[tuple[str, object]] = asyncio.Queue()
+        self._task: asyncio.Future[None] | None = None
+
+    def emit(self, text: str) -> None:
+        """Called from the worker thread for each sentence that passed the checks."""
+        self._loop.call_soon_threadsafe(self._events.put_nowait, ("say", text))
+
+    def start(self, work: Callable[[Emit], _Said]) -> _Live:
+        async def run() -> None:
+            try:
+                said = await run_in_threadpool(work, self.emit)
+            except Exception as exc:  # noqa: BLE001 - handed to respond() below
+                self._events.put_nowait(("error", exc))
+            else:
+                self._events.put_nowait(("done", said))
+
+        # Kept on self so it isn't collected mid-turn; it runs on even if the
+        # caller hangs up, so the state is still saved.
+        self._task = asyncio.ensure_future(run())
+        return self
+
+    async def respond(self, seen: _SeenIds, webhook_id: str | None) -> Response:
+        """One JSON reply if the turn finished before anything was sent, else NDJSON."""
+        first: tuple[str, object] | None
+        try:
+            first = await asyncio.wait_for(self._events.get(), self.hold_after)
+        except TimeoutError:
+            first = None
+        if first is not None and isinstance(first[1], _Said):
+            if webhook_id:
+                seen.remember(webhook_id, first[1].whole)
+            return JSONResponse(first[1].whole)
+        if first is not None and isinstance(first[1], Exception):
+            raise first[1]  # nothing was sent yet: a 500, as before streaming
+        lead = HOLD_LINE if first is None else str(first[1])
+        return StreamingResponse(self._lines(lead, seen, webhook_id), media_type=NDJSON)
+
+    async def _lines(
+        self, lead: str, seen: _SeenIds, webhook_id: str | None
+    ) -> AsyncIterator[bytes]:
+        yield ndjson_line(interim(lead))
+        while True:
+            _, value = await self._events.get()
+            if isinstance(value, _Said):
+                if webhook_id:
+                    seen.remember(webhook_id, value.whole)
+                yield ndjson_line(value.last)
+                return
+            if isinstance(value, Exception):
+                # Lines were already spoken, so a 500 is too late: close the turn safely.
+                log.error("a turn failed after it started speaking", exc_info=value)
+                yield ndjson_line(say(SAFE_LINE))
+                return
+            yield ndjson_line(interim(str(value)))
+
+
+async def _handle(envelope: dict, turn: _Turn, webhook_id: str | None = None) -> dict | _Live:
     """The reply for one verified webhook."""
     event = envelope.get("event")
     data = envelope.get("data") or {}
@@ -382,7 +491,8 @@ async def _handle(envelope: dict, turn: _Turn, webhook_id: str | None = None) ->
             return say(DIDNT_CATCH)
         # Sessions, the database and the model all block, so keep them off the event loop.
         if turn.stages:
-            return await run_in_threadpool(_staged_turn, turn, data, transcript, webhook_id)
+            live = _Live(turn.hold_after)
+            return live.start(lambda emit: _staged_turn(turn, data, transcript, webhook_id, emit))
         return await run_in_threadpool(_bare_turn, turn, data, transcript)
     # agent.call_ended is accepted; storing the call comes later. Unknown events too.
     return {}
@@ -395,8 +505,21 @@ def _bare_turn(turn: _Turn, data: dict, transcript: str) -> dict:
     return say(turn.make_agent(session).run(transcript))
 
 
-def _staged_turn(turn: _Turn, data: dict, transcript: str, webhook_id: str | None = None) -> dict:
+def _staged_turn(
+    turn: _Turn,
+    data: dict,
+    transcript: str,
+    webhook_id: str | None = None,
+    emit: Emit = lambda text: None,
+) -> _Said:
     """One caller turn through the call stages and the sentence filter."""
+    said = _staged_reply(turn, data, transcript, webhook_id, emit)
+    return said if isinstance(said, _Said) else _Said(said, said)
+
+
+def _staged_reply(
+    turn: _Turn, data: dict, transcript: str, webhook_id: str | None, emit: Emit
+) -> dict | _Said:
     call_id = data.get("callId")
     outbound = data.get("direction", "outbound") == "outbound"
     phone = data.get("to") if outbound else data.get("from")
@@ -415,7 +538,7 @@ def _staged_turn(turn: _Turn, data: dict, transcript: str, webhook_id: str | Non
         # Stop triggers come first: the model never sees a turn that must end the call.
         if hits := detect(transcript):
             return _stop_turn(turn, call_id, debtor, phone, transcript, hits, webhook_id)
-        return _locked_turn(turn, call_id, debtor, phone, transcript, webhook_id)
+        return _locked_turn(turn, call_id, debtor, phone, transcript, webhook_id, emit)
 
 
 def _earlier_reply(turn: _Turn, call_id: str, webhook_id: str) -> dict | None:
@@ -513,7 +636,8 @@ def _locked_turn(
     phone: str,
     transcript: str,
     webhook_id: str | None = None,
-) -> dict:
+    emit: Emit = lambda text: None,
+) -> dict | _Said:
     session = turn.open_session(call_id)
     state = load_state(session) or CallState.new(call_id, debtor)
     if state.debt_id != debtor.debt_id:
@@ -546,40 +670,89 @@ def _locked_turn(
     if state.stage != Stage.DISCUSS:
         # No tools offered and no skill playbooks before verify and disclosure.
         agent.skills = lambda: []  # type: ignore[method-assign]
+    return _model_turn(turn, session, agent, live, transcript, call_id, debtor, webhook_id, emit)
+
+
+def _model_turn(
+    turn: _Turn,
+    session: Session,
+    agent: Agent,
+    live: LiveTools,
+    transcript: str,
+    call_id: str,
+    debtor: Debtor,
+    webhook_id: str | None,
+    emit: Emit,
+) -> dict | _Said:
+    """Stream the model's reply, one checked sentence at a time (step 6 above)."""
+    spoken: list[str] = []  # every sentence sent this turn, in order
+    step: list[str] = []  # those from the model call being read now
+    blocked: Decision | None = None
+    buffer = SentenceBuffer()
+
+    def stop_speaking() -> bool:
+        # A failed tool, or a transfer: nothing more the model writes is said.
+        return live.failure is not None or (live.escalated and turn.can_transfer)
+
+    stream = agent.run_stream(transcript)
     try:
-        reply = agent.run(transcript)
+        for piece in stream:
+            sentences = buffer.flush() if piece is None else buffer.feed(piece)
+            for sentence in sentences:
+                if stop_speaking():
+                    break
+                # Checked against the state as it is now: a tool may have changed it.
+                speech = speech_state(live.state, debtor, live.approved_amounts())
+                decision = check_utterance(sentence, speech, live.backs_commitments())
+                if not decision.allow:
+                    blocked = decision
+                    break
+                spoken.append(sentence)
+                step.append(sentence)
+                emit(sentence)
+            if blocked is not None or stop_speaking():
+                break  # closing the stream stops the model; no tool runs after this
+            if piece is None:
+                step = []  # that model call is over and recorded as it was said
     finally:
+        stream.close()
         live.finish()
     if live.failure is not None:
         return _tools_failed(session, agent, live, call_id, debtor, webhook_id)
     state = live.state  # end_call may have moved it to WRAP
 
-    speech = speech_state(state, debtor, live.approved_amounts())
-    spoken, blocked = filter_reply(reply, speech, commitments_backed=live.backs_commitments())
-    if live.pending_only() and any(d.rule_id == COMMITMENT_RULE for d in blocked):
-        # The code said "pending"; make sure that is what the caller hears.
-        spoken = PENDING_LINE if spoken == SAFE_LINE else f"{PENDING_LINE} {spoken}"
+    fallback = ""
+    if blocked is not None:
+        # If code saved the plan as pending, that is what the caller must hear.
+        pending = live.pending_only() and blocked.rule_id == COMMITMENT_RULE
+        fallback = PENDING_LINE if pending else SAFE_LINE
+    elif not spoken:
+        fallback = SAFE_LINE
+    if live.ended and fallback == SAFE_LINE:
+        fallback = STOPPED_CLOSE
+    heard = " ".join(x for x in [*step, fallback] if x)
     last = agent.messages[-1] if agent.messages else {}
-    if spoken != reply and last.get("role") == "assistant" and not last.get("tool_calls"):
+    written = " ".join(split_sentences(str(last.get("content") or "")))
+    if last.get("role") == "assistant" and not last.get("tool_calls") and heard != written:
         # Keep the history to what the caller heard, so the model doesn't build on
         # a sentence that was never said. Done before the audit write, so a failed
         # write can't leave the blocked sentence in the history.
-        agent.messages[-1] = {**last, "content": spoken}
+        agent.messages[-1] = {**last, "content": heard}
         session.replace(agent.messages)
-    for decision in blocked:
+    if blocked is not None:
         try:
-            turn.audit(decision, call_id, debtor.debt_id)
+            turn.audit(blocked, call_id, debtor.debt_id)
         except Exception:
-            # The sentence was already dropped; only the record of it is missing.
-            log.exception("call %s: blocked sentence (%s) not audited", call_id, decision.rule_id)
+            # The sentence was never sent; only the record of it is missing.
+            log.exception("call %s: blocked sentence (%s) not audited", call_id, blocked.rule_id)
     if live.escalated and turn.can_transfer:
-        out = transfer()
-    elif live.ended:
-        out = say_and_hangup(STOPPED_CLOSE if spoken == SAFE_LINE else spoken)
+        said = _Said(transfer(), transfer())
     else:
-        out = say(spoken)
-    _save(session, state, webhook_id, out)
-    return out
+        ending = {"hangup": True} if live.ended else {}
+        everything = " ".join(x for x in [*spoken, fallback] if x)
+        said = _Said({"text": fallback, **ending}, {"text": everything, **ending})
+    _save(session, state, webhook_id, said.whole)
+    return said
 
 
 def _add_purpose(
@@ -655,11 +828,20 @@ def filter_reply(
     kept: list[str] = []
     blocked: list[Decision] = []
     for sentence in split_sentences(text):
-        decision = check_sentence(sentence, speech)
-        if decision.allow and commitments_backed is not None:
-            decision = check_commitment(sentence, commitments_backed)
+        decision = check_utterance(sentence, speech, commitments_backed)
         if decision.allow:
             kept.append(sentence)
         else:
             blocked.append(decision)
     return " ".join(kept) or SAFE_LINE, blocked
+
+
+def check_utterance(
+    sentence: str, speech: SpeechState, commitments_backed: bool | None = None
+) -> Decision:
+    """The sentence filter, then (with ``commitments_backed`` given) the check that
+    nothing is called approved or booked unless code saved it this turn."""
+    decision = check_sentence(sentence, speech)
+    if decision.allow and commitments_backed is not None:
+        decision = check_commitment(sentence, commitments_backed)
+    return decision

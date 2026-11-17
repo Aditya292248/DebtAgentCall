@@ -2275,3 +2275,144 @@ def _demo_bills() -> None:
 
 ACCEPTANCE["bills"] = _accept_bills
 DEMOS["bills"] = _demo_bills
+
+
+# ----------------------------------------------------------------------------
+# streamed replies: speaking starts after the first safe sentence
+# ----------------------------------------------------------------------------
+
+_PART25_SAFE = "Thanks for taking my call. "
+_PART25_BAD = "You owe $1,250.00 to Northwind Furniture. "
+
+
+class _Part25Call:
+    """The live webhook with JSONL sessions, an in-memory tool backend and a list
+    for blocked sentences. Each turn goes straight to the ASGI app, signed, and
+    comes back as ``(seconds, chunk)`` pairs. ``provider`` None is the real model."""
+
+    def __init__(self, provider: Provider | None, hold_after: float = 2.5) -> None:
+        import secrets
+        import tempfile
+        from functools import partial
+        from pathlib import Path
+
+        from harness.call_tools import MemoryCallStore
+        from harness.memory import JsonlSession
+        from phone.live_tools import ToolBackend
+        from phone.webhook import create_app, debt_as_found
+
+        self.secret = secrets.token_hex(16)
+        self.blocked: list = []
+        self.store = MemoryCallStore()
+        self.app = create_app(
+            provider=provider,
+            secret=self.secret,
+            open_session=partial(
+                JsonlSession.for_call, Path(tempfile.mkdtemp(prefix="debtagent-p25-"))
+            ),
+            find_debtor=_part13_debtors().get,
+            audit=lambda decision, call_id, debt_id: self.blocked.append(decision),
+            record_stop=lambda stop: None,
+            open_backend=lambda debtor: ToolBackend(
+                self.store, lambda d, call_id, debt_id: None, flags=[]
+            ),
+            supervisor_number="",
+            read_debt=debt_as_found,
+            hold_after=hold_after,
+        )
+
+    def turn(self, call_id: str, text: str) -> list[tuple[float, dict]]:
+        import json
+        import time
+        import uuid
+
+        from phone import signed_headers
+        from sim.agentphone_sim import post_timed
+
+        body = json.dumps(
+            {
+                "event": "agent.message",
+                "channel": "voice",
+                "data": {"callId": call_id, "transcript": text, "to": "+12135550101"},
+            }
+        ).encode()
+        headers = signed_headers(
+            body, self.secret, time.time(), f"wh_{uuid.uuid4().hex}", "agent.message"
+        )
+        _, chunks = post_timed(self.app, body, headers)
+        return chunks
+
+
+def _part25_show(caller: str, chunks: list[tuple[float, dict]]) -> None:
+    print(f"  caller> {caller}")
+    for at, chunk in chunks:
+        print(f"   {at * 1000:7.1f} ms  {chunk}")
+
+
+def _part25_negative() -> tuple[bool, list[tuple[float, dict]]]:
+    """A safe sentence streams; the balance after it, before verification, never does."""
+    from model import fake, streamed
+
+    call = _Part25Call(fake(scripted=[streamed(_PART25_SAFE, 0.4, _PART25_BAD, "Is this Sam?")]))
+    call.turn("call_p25_neg", "Hello?")
+    chunks = call.turn("call_p25_neg", "Who is this?")
+    texts = " ".join(str(c.get("text", "")) for _, c in chunks)
+    ok = (
+        chunks[0][1] == {"text": _PART25_SAFE.strip(), "interim": True}
+        and chunks[0][0] < 0.4
+        and "1,250" not in texts
+        and "Northwind" not in texts
+        and [d.rule_id for d in call.blocked] == ["third_party_disclosure"]
+    )
+    return ok, chunks
+
+
+def _accept_part25() -> bool:
+    ok, chunks = _part25_negative()
+    print(f"  safe sentence first, balance never streamed: {'ok' if ok else 'BAD'}")
+
+    # The real model, verified: time to the first chunk on a few turns.
+    call = _Part25Call(None)
+    for line in _PART22_TO_DISCUSS:
+        call.turn("call_p25_real", line)
+    firsts: list[float] = []
+    shaped = True
+    for line in ("What are my options?", "Could I pay a bit each month?", "Thanks, that helps."):
+        chunks = call.turn("call_p25_real", line)
+        _part25_show(line, chunks)
+        firsts.append(chunks[0][0])
+        shaped = shaped and "interim" not in chunks[-1][1]
+    firsts.sort()
+    print(f"  first chunk (real model): median {firsts[len(firsts) // 2] * 1000:.0f} ms")
+    return ok and shaped
+
+
+def _demo_part25() -> None:
+    from model import fake, streamed
+    from model.fake import tool_call
+
+    print("-- not verified yet: a safe sentence, then the balance --")
+    _, chunks = _part25_negative()
+    _part25_show("Who is this?", chunks)
+    print("   # the first sentence went out while the model was still writing;")
+    print("   # the balance was blocked before it was sent, and the turn ended safely")
+
+    print("\n-- a slow model: the hold line first --")
+    call = _Part25Call(fake(scripted=[streamed(1.0, "Here is what I can do. ")]), hold_after=0.5)
+    for line in _PART22_TO_DISCUSS:
+        call.turn("call_p25_slow", line)
+    _part25_show("What are my options?", call.turn("call_p25_slow", "What are my options?"))
+
+    print("\n-- the model ends the call: hangup on the last chunk --")
+    script = [
+        streamed("Thanks for your time today. ", tool_calls=[tool_call("end_call", reason="done")]),
+        streamed("Goodbye."),
+    ]
+    call = _Part25Call(fake(scripted=script))
+    for line in _PART22_TO_DISCUSS:
+        call.turn("call_p25_end", line)
+    _part25_show("That's all.", call.turn("call_p25_end", "That's all."))
+
+
+ACCEPTANCE["part-25"] = lambda: ACCEPTANCE["part-22"]() and _accept_part25()
+DEMOS["part-25"] = _demo_part25
