@@ -81,6 +81,21 @@ def dollars(cents: int) -> str:
     return f"${cents / 100:,.2f}"
 
 
+def _why(reason: object) -> str:
+    """``: <reason>`` if the text is safe to carry to the next call, else nothing.
+
+    A reason is the caller's or the model's words, not a database value, so it gets the
+    narrative's checks that need no debtor (no number, email or other person) and a
+    short cap. The balance is left out of the facts on purpose: it can change before the
+    next call, and the call tools read the current one.
+    """
+    text = " ".join(str(reason).split())[:MAX_REASON_CHARS]
+    unsafe = _EMAIL.search(text) or _LONG_DIGITS.search(text) or _PEOPLE.search(text)
+    if not text or unsafe or amounts_in_cents(text) or _MONEY_WORD.search(text):
+        return ""
+    return f": {text}"
+
+
 def build_facts(
     conn: psycopg.Connection,
     call_id: str,
@@ -96,21 +111,13 @@ def build_facts(
         return SummaryFacts(call_id, debt_id, outcome, tuple(lines), frozenset(), detail=False)
 
     lines.append("Identity was verified.")
-    amounts: set[int] = set()
-    row = conn.execute(
-        "select d.balance_cents, public.current_balance_cents(d)"
-        " from public.debt d where d.id = %s",
-        (debt_id,),
-    ).fetchone()
-    if row:
-        amounts.update({int(row[0]), int(row[1])})
-        lines.append(f"The balance on file is {dollars(int(row[1]))}.")
+    amounts: set[int] = set()  # plan amounts only; the balance is read live, never summarised
     for reason, ok in conn.execute(
         "select reason, verified from public.dispute where call_id = %s order by created_at",
         (call_id,),
     ).fetchall():
         kind = "verified" if ok else "unverified"
-        lines.append(f"A {kind} dispute was logged: {str(reason)[:MAX_REASON_CHARS]}.")
+        lines.append(f"A {kind} dispute was logged{_why(reason)}.")
     for when, tz in conn.execute(
         "select scheduled_at, tz from public.callback where call_id = %s order by created_at",
         (call_id,),
@@ -129,7 +136,7 @@ def build_facts(
     for (why,) in conn.execute(
         "select reason from public.escalation where call_id = %s order by created_at", (call_id,)
     ).fetchall():
-        lines.append(f"A person was asked to follow up: {str(why)[:MAX_REASON_CHARS]}.")
+        lines.append(f"A person was asked to follow up{_why(why)}.")
     kinds = [
         k
         for (k,) in conn.execute(

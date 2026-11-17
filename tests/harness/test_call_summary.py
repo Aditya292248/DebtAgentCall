@@ -119,8 +119,8 @@ def test_facts_hold_the_saved_rows_to_the_cent(scratch_sam: Debtor) -> None:
         facts = build_facts(
             conn, call_id, scratch_sam.debt_id, "answered", _verified(call_id, scratch_sam)
         )
-    assert {125000, 25000, 200000} <= facts.amounts_cents
-    assert "$250.00 down" in facts.text and "$1,250.00" in facts.text
+    assert {25000, 200000} <= facts.amounts_cents and 125000 not in facts.amounts_cents
+    assert "$250.00 down" in facts.text and "balance" not in facts.text
     assert "dispute was logged: says the fee is wrong" in facts.text
     assert "pending" in facts.text and facts.detail
 
@@ -301,3 +301,21 @@ def test_a_verified_call_gets_them_in_the_stage_context(tmp_path: Path) -> None:
     assert loads == ["c2"]
     system = model.calls[0][0]["content"]
     assert MARKER in system
+
+
+@pytest.mark.db
+def test_a_reason_with_a_number_or_another_person_is_not_carried(scratch_sam: Debtor) -> None:
+    call_id = f"call_{uuid.uuid4().hex[:10]}"
+    with connect() as conn:
+        for reason in ("my wife says it is paid", "call me at 312 555 0188", "fee was wrong"):
+            conn.execute(
+                "insert into public.dispute (call_id, debt_id, reason, verified)"
+                " values (%s, %s, %s, true)",
+                (call_id, scratch_sam.debt_id, reason),
+            )
+        facts = build_facts(
+            conn, call_id, scratch_sam.debt_id, "answered", _verified(call_id, scratch_sam)
+        )
+    assert "wife" not in facts.text and "312" not in facts.text
+    assert facts.text.count("dispute was logged") == 3
+    assert "dispute was logged: fee was wrong." in facts.text
