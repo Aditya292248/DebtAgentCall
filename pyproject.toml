@@ -37,6 +37,7 @@ audit-verify = "tasks.audit_verify:main"
 serve = "tasks.serve:main"
 api = "harness.api:main"
 dialer = "dialer.cli:main"
+reconcile = "dialer.reconcile:main"
 
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11"]

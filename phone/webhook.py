@@ -15,7 +15,12 @@ here, and speaks whatever text we answer with. Each request goes through:
    logged. This covers the newest turn of a call, in one server process.
 3. Act on the event:
    - ``agent.message`` on the voice channel: one caller turn (below).
-   - ``agent.call_ended``: accepted with ``{}``. Nothing is stored yet.
+   - ``agent.call_ended``: recorded by ``phone/call_end.py`` (the attempt's outcome and the
+     two 7-in-7 flags, the saved state marked ended, an audit row, the call summary),
+     under the same per-call lock as a caller turn, then answered ``{}`` whatever
+     happened: the event is never retried, so a failure is logged for a person and the
+     reconciler (``uv run reconcile``) finds the attempt later. A call we did not place
+     is audited and answered 200 too.
    - anything else: ``{}``.
 
 One caller turn, with call stages on (the default):
@@ -113,10 +118,12 @@ from compliance import Decision, Flag, SpeechState, block, check_sentence, split
 from compliance.triggers import Trigger, detect
 from harness import Agent
 from harness.call_state import CallState, Debtor, DebtRow, Stage, load_state
+from harness.call_summary import LoadEarlier, context_block, earlier_from_db, model_narrator
 from harness.memory import PostgresSession, Session
 from harness.stages import ENDING, STOPPED_CLOSE, instructions_path, next_stage, purpose_line
 from model import Provider
 from model.provider import _load_dotenv
+from phone.call_end import EndedCall, EndResult, parse_ended, record_call_end
 from phone.live_tools import (
     COMMITMENT_RULE,
     PENDING_LINE,
@@ -162,6 +169,7 @@ MAX_REMEMBERED_IDS = 10_000  # enough to spot repeats, without growing forever
 _CALL_LOCKS = [threading.Lock() for _ in range(64)]
 
 FindDebtor = Callable[[str], Debtor | None]
+CallEnded = Callable[[EndedCall], EndResult]
 ReadDebt = Callable[[Debtor], DebtRow | None]  # the debt's row as stored now
 Audit = Callable[[Decision, str, str | None], None]  # (decision, call_id, debt_id)
 
@@ -316,6 +324,8 @@ def create_app(
     supervisor_number: str | None = None,
     read_debt: ReadDebt = read_debt_in_db,
     hold_after: float = HOLD_AFTER,
+    on_call_ended: CallEnded | None = None,
+    load_earlier: LoadEarlier = earlier_from_db,
 ) -> FastAPI:
     """The webhook app.
 
@@ -335,6 +345,9 @@ def create_app(
     ``supervisor_number`` defaults to ``SUPERVISOR_NUMBER``; without one,
     ``escalate_to_human`` never transfers.
     ``hold_after`` is how long a turn may stay silent before ``HOLD_LINE``.
+    ``on_call_ended(ended)`` records a finished call (database, and ``provider`` for the
+    summary's narrative, by default). ``load_earlier(debt_id, call_id)`` reads the
+    earlier calls' summaries; they reach the model only once the person is verified.
     ``stages=False`` turns the call stages and the sentence filter off.
     """
     if secret is None:
@@ -344,6 +357,8 @@ def create_app(
         _load_dotenv()
         supervisor_number = os.environ.get(SUPERVISOR_ENV, "")
     make_agent = agent_factory or (lambda session: Agent(provider=provider, session=session))
+    if on_call_ended is None:
+        on_call_ended = _record_in_db(open_session, provider)
     turn = _Turn(
         make_agent,
         open_session,
@@ -355,6 +370,8 @@ def create_app(
         bool(supervisor_number.strip()),
         read_debt,
         hold_after,
+        on_call_ended,
+        load_earlier,
     )
     seen = _SeenIds()
     app = FastAPI(title="DebtAgentCall webhook")
@@ -402,6 +419,8 @@ class _Turn:
     can_transfer: bool  # a supervisor number is configured
     read_debt: ReadDebt
     hold_after: float = HOLD_AFTER  # seconds of silence before HOLD_LINE
+    on_call_ended: CallEnded | None = None
+    load_earlier: LoadEarlier = earlier_from_db
 
 
 @dataclass(frozen=True)
@@ -494,8 +513,33 @@ async def _handle(envelope: dict, turn: _Turn, webhook_id: str | None = None) ->
             live = _Live(turn.hold_after)
             return live.start(lambda emit: _staged_turn(turn, data, transcript, webhook_id, emit))
         return await run_in_threadpool(_bare_turn, turn, data, transcript)
-    # agent.call_ended is accepted; storing the call comes later. Unknown events too.
-    return {}
+    if event == "agent.call_ended" and turn.on_call_ended is not None:
+        await run_in_threadpool(_call_ended, turn, envelope)
+    return {}  # a call_ended we could not read, and any other event, is just acknowledged
+
+
+def _record_in_db(open_session: Callable[[str], Session], provider: Provider | None) -> CallEnded:
+    """The default ``on_call_ended``: the real database, and a model for the narrative."""
+    from harness.db import connect
+
+    narrator = model_narrator(provider)
+    return lambda ended: record_call_end(
+        ended, connect=connect, open_session=open_session, narrator=narrator
+    )
+
+
+def _call_ended(turn: _Turn, envelope: dict) -> None:
+    """Record a finished call. Never raises: the event is not retried, so a failure is
+    logged for a person to fix and the reconciler picks the attempt up later."""
+    ended = parse_ended(envelope)
+    if ended is None or turn.on_call_ended is None:
+        log.error("agent.call_ended without a call id was ignored")
+        return
+    try:
+        with _CALL_LOCKS[zlib.crc32(ended.call_id.encode()) % len(_CALL_LOCKS)]:
+            turn.on_call_ended(ended)
+    except Exception:
+        log.exception("call %s: could not record the end of the call", ended.call_id)
 
 
 def _bare_turn(turn: _Turn, data: dict, transcript: str) -> dict:
@@ -656,6 +700,7 @@ def _locked_turn(
 
     agent = turn.make_agent(session)
     agent.stage_prompt_path = instructions_path(state.stage)
+    agent.extra_context = _earlier_calls(turn, state, call_id)
     # The call tools and nothing else: no subagents, no fan-out, no lookup by name.
     # Built from the saved state, so only the server can say who is verified.
     # Before a tool's first row is saved, mark this webhook as started, so a retry
@@ -671,6 +716,15 @@ def _locked_turn(
         # No tools offered and no skill playbooks before verify and disclosure.
         agent.skills = lambda: []  # type: ignore[method-assign]
     return _model_turn(turn, session, agent, live, transcript, call_id, debtor, webhook_id, emit)
+
+
+def _earlier_calls(turn: _Turn, state: CallState, call_id: str) -> str:
+    """Summaries of earlier calls about this debt, only for a verified person."""
+    try:
+        return context_block(state, turn.load_earlier)
+    except Exception:
+        log.exception("call %s: could not load earlier call summaries", call_id)
+        return ""  # the call goes on without them
 
 
 def _model_turn(

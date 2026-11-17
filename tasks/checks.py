@@ -2301,3 +2301,121 @@ def _demo_part25() -> None:
 
 ACCEPTANCE["part-25"] = lambda: ACCEPTANCE["part-22"]() and _accept_part25()
 DEMOS["part-25"] = _demo_part25
+
+
+# --- what happens when a call ends (call-end) -----------------------------------
+
+
+def _call_end_run() -> dict:
+    """Three made-up calls on a made-up debtor in the local database, ended three ways.
+
+    Needs the local database. Returns what was recorded, for the demo and the check.
+    """
+    import tempfile
+    import uuid
+    from dataclasses import replace
+    from datetime import UTC, date, datetime
+    from functools import partial
+    from pathlib import Path
+
+    from compliance.attempts import check_call_frequency
+    from harness.call_state import CallState, Debtor, Stage
+    from harness.db import connect, load_attempts
+    from harness.memory import JsonlSession
+    from phone.call_end import EndedCall, record_call_end
+
+    tag = uuid.uuid4().hex[:8]
+    debtor = Debtor(
+        str(uuid.uuid4()), str(uuid.uuid4()), "Morgan", f"Demo-{tag}", date(1982, 3, 7), "30309",
+        "Lakeside Appliance Co", 73450,
+    )  # fmt: skip
+    open_session = partial(JsonlSession.for_call, Path(tempfile.mkdtemp(prefix="callend-")))
+    out: dict = {}
+    with connect() as conn:
+        conn.execute(
+            "insert into public.debtor (id, first_name, last_name, dob, address, zip, state)"
+            " values (%s, %s, %s, %s, '1 Demo St', %s, 'GA')",
+            (debtor.debtor_id, debtor.first_name, debtor.last_name, debtor.dob, debtor.zip),
+        )
+        conn.execute(
+            "insert into public.debt (id, debtor_id, account_number, creditor, balance_cents)"
+            " values (%s, %s, %s, %s, %s)",
+            (
+                debtor.debt_id,
+                debtor.debtor_id,
+                f"DEMO-{tag}",
+                debtor.creditor,
+                debtor.balance_cents,
+            ),
+        )
+    try:
+        placed = datetime(2026, 11, 10, 15, tzinfo=UTC)
+        when = datetime(2026, 11, 11, 15, tzinfo=UTC)
+        for name, state, spoke in (
+            ("rang, nobody spoke", None, False),
+            ("verified conversation", {"stage": Stage.DISCUSS, "verified": True, "turns": 5}, True),
+        ):
+            call_id = f"callend_{tag}_{name[:4]}"
+            with connect() as conn:
+                conn.execute(
+                    "insert into public.call_attempt (debt_id, placed_at, outcome,"
+                    " agentphone_call_id) values (%s, %s, 'placed', %s)",
+                    (debtor.debt_id, placed, call_id),
+                )
+            if state:
+                saved = replace(CallState.new(call_id, debtor), **state)  # type: ignore[arg-type]
+                open_session(call_id).put_state(saved.to_dict())
+            record_call_end(
+                EndedCall(call_id, reason="user_hangup", caller_spoke=spoke),
+                connect=connect,
+                open_session=open_session,
+                narrator=lambda facts: "Morgan agreed to $1.00 down.",  # not a database amount
+            )
+            with connect() as conn:
+                row = conn.execute(
+                    "select outcome, conversation_with_debtor from public.call_attempt"
+                    " where agentphone_call_id = %s",
+                    (call_id,),
+                ).fetchone()
+                summary = conn.execute(
+                    "select narrative from public.call_summary where call_id = %s", (call_id,)
+                ).fetchone()
+                attempts = load_attempts(conn, debtor.debt_id)
+            out[name] = {
+                "row": row,
+                "narrative_kept": bool(summary and summary[0]),
+                "may_call_next_day": check_call_frequency(attempts, debtor.debt_id, when).allow,
+            }
+    finally:
+        with connect() as conn:
+            conn.execute("delete from public.debtor where id = %s", (debtor.debtor_id,))
+    return out
+
+
+def _accept_call_end() -> bool:
+    out = _call_end_run()
+    quiet, talked = out["rang, nobody spoke"], out["verified conversation"]
+    ok = (
+        quiet["row"] == ("no_answer", False)
+        and quiet["may_call_next_day"]
+        and talked["row"] == ("answered", True)
+        and not talked["may_call_next_day"]
+        and not talked["narrative_kept"]
+    )
+    for name, got in out.items():
+        print(f"  {name}: {got}")
+    return ok
+
+
+def _demo_call_end() -> None:
+    print("two made-up calls ended; the narrative below quotes an amount not in the database\n")
+    for name, got in _call_end_run().items():
+        row = got["row"]
+        print(f"{name}:")
+        print(f"  recorded outcome {row[0]}, conversation with debtor {row[1]}")
+        print(f"  may we call the next day: {got['may_call_next_day']}")
+        print(f"  model narrative kept: {got['narrative_kept']} (rejected: wrong amount)")
+
+
+ACCEPTANCE["call-end"] = _accept_call_end
+DEMOS["call-end"] = _demo_call_end

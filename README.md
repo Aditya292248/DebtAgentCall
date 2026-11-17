@@ -325,7 +325,7 @@ Every request is checked before anything else happens:
 - A request whose timestamp is more than five minutes off is refused too, so an old request can't be replayed.
 - Each webhook has an `X-Webhook-ID`. If the same id comes again, it gets the same reply as the first time, and the model isn't asked twice.
 
-Then the event decides what happens. `agent.message` on the voice channel runs one turn of the agent with the caller's words and replies `{"text": ...}`. `agent.call_ended` is accepted, but nothing more is stored for it yet. Any other event gets `{}`. `phone/replies.py` also has `say_and_hangup()` and `transfer()`, for ending the call or handing it to a person. On a staged call the model gets the call tools from `harness/call_tools.py` (built per turn by `phone/live_tools.py`): each tool call passes the compliance gate and then `PolicyApprover`, saved rows are committed before the reply, `end_call` hangs up, and `escalate_to_human` transfers only when `SUPERVISOR_NUMBER` is set.
+Then the event decides what happens. `agent.message` on the voice channel runs one turn of the agent with the caller's words and replies `{"text": ...}`. `agent.call_ended` is recorded by `phone/call_end.py`: the attempt's outcome and its `connected` and `conversation_with_debtor` flags (a conversation only if the caller spoke and was verified), the call state marked ended, an audit row and a call summary; a call we did not place is audited and still answered 200. `uv run reconcile` does the same for attempts whose end never arrived. Any other event gets `{}`. `phone/replies.py` also has `say_and_hangup()` and `transfer()`, for ending the call or handing it to a person. On a staged call the model gets the call tools from `harness/call_tools.py` (built per turn by `phone/live_tools.py`): each tool call passes the compliance gate and then `PolicyApprover`, saved rows are committed before the reply, `end_call` hangs up, and `escalate_to_human` transfers only when `SUPERVISOR_NUMBER` is set.
 
 Each turn builds a new agent, but on that call's saved session, so it remembers what was said earlier in the same call (see [Sessions](#sessions)).
 
@@ -669,6 +669,7 @@ The dry run prints who would be called and why each of the others is blocked, an
 | `uv run demo part-17`     | No             | Prints the skills menu and a call where the model loads a playbook (real model if set, else the fake) |
 | `uv run accept part-18`   | Yes            | Runs the earlier checks, then a dialer dry run over every seeded debtor |
 | `uv run demo part-18`     | No (needs DB)  | A dialer dry run on the seed: who would be called, and why the rest are blocked |
+| `uv run reconcile --dry-run` | No (needs DB and AgentPhone settings) | Attempts older than 30 minutes with no end recorded, and what would be recorded for each; writes nothing |
 | `uv run dialer --dry-run` | No (needs DB) | Who would be called now, and why the others are blocked; writes nothing |
 | `uv run accept part-13`   | Yes (needs DB) | Runs the earlier checks, then plays three calls and checks the disclosure comes before any amount, and nothing leaks otherwise |
 | `uv run demo part-13`     | No             | Plays three calls through the call stages and prints the stage next to each line |

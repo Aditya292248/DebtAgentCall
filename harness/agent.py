@@ -98,6 +98,7 @@ class Agent:
         self.provider = provider
         self.system_prompt_path = Path(system_prompt_path)
         self.stage_prompt_path = Path(stage_prompt_path) if stage_prompt_path else None
+        self.extra_context = ""  # more stage context, e.g. earlier calls, set by the caller
         self.tools = default_tools() if tools is None else tools
         self.max_steps = max_steps
         # Looked up here, not as a default argument, so tests can point every agent
@@ -151,6 +152,8 @@ class Agent:
         parts = [load_system_prompt(self.system_prompt_path)]
         if self.stage_prompt_path is not None:
             parts.append(load_system_prompt(self.stage_prompt_path))
+        if self.extra_context:
+            parts.append(self.extra_context)
         parts.append(skills_prompt(skills))
         system_prompt = "\n\n".join(p for p in parts if p)
         system = [{"role": "system", "content": system_prompt}] if system_prompt else []
