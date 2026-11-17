@@ -1,0 +1,34 @@
+name: Feature request
+description: Suggest a change or addition
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: Use made-up data only. Never paste real personal data or secrets.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What is hard or missing today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like
+      description: If it touches a compliance rule, say which requirement it is meant to meet.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I removed any real personal data and secrets from this request.
+          required: true
