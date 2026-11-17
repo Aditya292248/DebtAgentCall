@@ -22,6 +22,9 @@ answer, with this stage's instructions".
     DISCLOSE     Fixed text: recording notice, "automated assistant", and the
                  mini-Miranda (FDCPA 807(11)). Then DISCUSS. It never waits for
                  the caller, so it is said in the same turn the match happened.
+                 The webhook adds ``purpose_line`` after it: why we called, with
+                 the creditor and balance from the debt's database row, so the
+                 call does not open with "How can I help you?".
     DISCUSS      The model talks; every sentence still goes through the filter.
     THIRD_PARTY  Fixed question: a good time to reach the person. Their answer
                  gets a fixed goodbye -> WRAP. A question back goes to the model.
@@ -43,7 +46,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from compliance.triggers import CLOSES
-from harness.call_state import CallState, Debtor, Stage
+from harness.call_state import CallState, Debtor, DebtRow, Stage, money
 from harness.spoken import find_dob, find_zip  # also imported from here by tests
 
 STAGES_DIR = Path(__file__).resolve().parent.parent / "instructions" / "stages"
@@ -77,7 +80,24 @@ DISCLOSURE = (
     "Thank you, {first_name}. This call is being recorded. "
     "You're speaking with an automated assistant. "
     "This is a debt collector. This is an attempt to collect a debt, and any information "
-    "obtained will be used for that purpose. How can I help you today?"
+    "obtained will be used for that purpose."
+)
+# Said right after the disclosure, in the same turn. We placed the call, so we say
+# why; the creditor and balance come from the database row, never from the model.
+# No "today" or "now": the sentence filter's overshadowing rule would block that.
+PURPOSE = (
+    "I'm calling about your account with {creditor}, which has a balance of {balance}. "
+    "Would you like to pay it in full, or would a payment plan work better for you?"
+)
+# A disputed, paused or closed debt: no amount and no payment ask.
+PURPOSE_ON_HOLD = (
+    "I'm calling about your account with {creditor}. I'm not asking for a payment on this call."
+)
+# The debt row could not be read, or doesn't match what this call was set up with:
+# no amount, nothing for the model to fill in, and the call ends.
+PURPOSE_UNREAD = (
+    "I'm sorry, I can't bring up your account details right now, so I'll end the call "
+    "here. Thank you for your time. Goodbye."
 )
 LOCATION_ASK = "Okay, thank you. Is there a good time to reach {full_name}?"
 THIRD_PARTY_CLOSE = "Thank you for your help. Goodbye."
@@ -205,6 +225,25 @@ def _disclose(state: CallState, names: dict[str, str]) -> tuple[CallState, str]:
     if not state.verified:  # can't happen through next_stage; refuse rather than leak
         return replace(state, stage=Stage.WRAP), VERIFY_FAILED
     return replace(state, disclosed=True, stage=Stage.DISCUSS), DISCLOSURE.format(**names)
+
+
+def purpose_line(debtor: Debtor, row: DebtRow | None) -> tuple[str, bool]:
+    """What to say after the disclosure, and whether the call ends there.
+
+    ``row`` is the debt read again from the database (None: the read failed). The
+    amount is said only if the row agrees with what the call tools and the sentence
+    filter know (``debtor``), so the caller never hears a balance they can't repeat.
+    """
+    if (
+        row is None
+        or not isinstance(row.balance_cents, int)
+        or not row.creditor.strip()
+        or (row.creditor, row.balance_cents) != (debtor.creditor, debtor.balance_cents)
+    ):
+        return PURPOSE_UNREAD, True
+    if row.status != "active" or row.balance_cents <= 0:
+        return PURPOSE_ON_HOLD.format(creditor=row.creditor), False
+    return PURPOSE.format(creditor=row.creditor, balance=f"${money(row.balance_cents)}"), False
 
 
 def instructions_path(stage: Stage) -> Path:

@@ -45,6 +45,7 @@ from phone.webhook import (
     WEBHOOK_PATH,
     Stop,
     create_app,
+    debt_as_found,
     record_stop_in_db,
 )
 from sim.agentphone_sim import load_script, run_script
@@ -84,6 +85,7 @@ class Call:
             agent_factory=lambda session: Agent(provider=provider, session=session),
             open_session=open_session or (lambda cid: JsonlSession.for_call(self.folder, cid)),
             find_debtor={SAM_PHONE: SAM}.get,
+            read_debt=debt_as_found,
             audit=audit or (lambda decision, call_id, debt_id: self.audited.append(decision)),
             record_stop=record_stop or self.stops.append,
         )

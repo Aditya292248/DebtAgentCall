@@ -40,7 +40,11 @@ One caller turn, with call stages on (the default):
 3. Load the call's ``CallState`` and run ``harness.stages.next_stage``. Turns
    of the same call wait for each other, so they never see stale state.
 4. If it gives a fixed line (greeting, identity check, disclosure, closes),
-   speak it. The model is not called.
+   speak it. The model is not called. The disclosure turn also reads the debt's
+   row again (``read_debt``) and adds the purpose line from
+   ``harness.stages.purpose_line``: the creditor and balance from that row and a
+   payment ask; for a disputed, paused or closed debt, no amount and no ask; if
+   the row can't be read, or doesn't match, no amount and the call ends.
 5. Otherwise run the agent with ``system.md`` plus the stage's file from
    ``instructions/stages/``, and the call tools from ``harness/call_tools.py``
    (``phone/live_tools.py`` builds this turn's ``CallContext`` from the saved
@@ -93,9 +97,9 @@ from starlette.concurrency import run_in_threadpool
 from compliance import Decision, Flag, SpeechState, block, check_sentence, split_sentences
 from compliance.triggers import Trigger, detect
 from harness import Agent
-from harness.call_state import CallState, Debtor, Stage, load_state
+from harness.call_state import CallState, Debtor, DebtRow, Stage, load_state
 from harness.memory import PostgresSession, Session
-from harness.stages import ENDING, STOPPED_CLOSE, instructions_path, next_stage
+from harness.stages import ENDING, STOPPED_CLOSE, instructions_path, next_stage, purpose_line
 from model import Provider
 from model.provider import _load_dotenv
 from phone.live_tools import (
@@ -132,6 +136,7 @@ MAX_REMEMBERED_IDS = 10_000  # enough to spot repeats, without growing forever
 _CALL_LOCKS = [threading.Lock() for _ in range(64)]
 
 FindDebtor = Callable[[str], Debtor | None]
+ReadDebt = Callable[[Debtor], DebtRow | None]  # the debt's row as stored now
 Audit = Callable[[Decision, str, str | None], None]  # (decision, call_id, debt_id)
 
 log = logging.getLogger(__name__)
@@ -222,6 +227,18 @@ def find_debtor_in_db(e164: str) -> Debtor | None:
     return find_debtor_by_phone(e164)
 
 
+def read_debt_in_db(debtor: Debtor) -> DebtRow | None:
+    """The call's debt, read again from ``public.debt``."""
+    from harness.db import read_debt_row
+
+    return read_debt_row(debtor.debt_id)
+
+
+def debt_as_found(debtor: Debtor) -> DebtRow:
+    """The debt as ``find_debtor`` gave it, for tests with no database (status active)."""
+    return DebtRow(debtor.creditor, debtor.balance_cents, "active")
+
+
 def audit_to_db(decision: Decision, call_id: str, debt_id: str | None) -> None:
     """Write one blocked sentence to the audit log, committed at once."""
     from compliance.audit import record
@@ -271,6 +288,7 @@ def create_app(
     record_stop: RecordStop = record_stop_in_db,
     open_backend: OpenBackend = open_backend_in_db,
     supervisor_number: str | None = None,
+    read_debt: ReadDebt = read_debt_in_db,
 ) -> FastAPI:
     """The webhook app.
 
@@ -285,6 +303,8 @@ def create_app(
     ``record_stop(stop)`` saves what a stop trigger found (database by default).
     ``open_backend(debtor)`` gives the call tools their store, audit writer,
     flags and plan policy (database by default, opened on the first tool call).
+    ``read_debt(debtor)`` reads the debt's row for the line after the disclosure
+    (database by default; ``debt_as_found`` for tests without one).
     ``supervisor_number`` defaults to ``SUPERVISOR_NUMBER``; without one,
     ``escalate_to_human`` never transfers.
     ``stages=False`` turns the call stages and the sentence filter off.
@@ -305,6 +325,7 @@ def create_app(
         record_stop,
         open_backend,
         bool(supervisor_number.strip()),
+        read_debt,
     )
     seen = _SeenIds()
     app = FastAPI(title="DebtAgentCall webhook")
@@ -348,6 +369,7 @@ class _Turn:
     record_stop: RecordStop
     open_backend: OpenBackend
     can_transfer: bool  # a supervisor number is configured
+    read_debt: ReadDebt
 
 
 async def _handle(envelope: dict, turn: _Turn, webhook_id: str | None = None) -> dict:
@@ -497,7 +519,10 @@ def _locked_turn(
     if state.debt_id != debtor.debt_id:
         return say_and_hangup(CANT_CONTINUE)  # the saved call is about another debt
 
+    disclosed_before = state.disclosed
     state, fixed = next_stage(state, transcript, debtor)
+    if fixed is not None and state.disclosed and not disclosed_before:
+        state, fixed = _add_purpose(turn, state, fixed, call_id, debtor)
     if fixed is not None:
         session.append({"role": "user", "content": transcript})
         session.append({"role": "assistant", "content": fixed})
@@ -555,6 +580,28 @@ def _locked_turn(
         out = say(spoken)
     _save(session, state, webhook_id, out)
     return out
+
+
+def _add_purpose(
+    turn: _Turn, state: CallState, disclosure: str, call_id: str, debtor: Debtor
+) -> tuple[CallState, str]:
+    """The disclosure plus why we called, built from the debt's row, never the model."""
+    try:
+        row = turn.read_debt(debtor)
+    except Exception:
+        log.exception(
+            "call %s: could not read debt %s for the purpose line", call_id, debtor.debt_id
+        )
+        row = None
+    line, ends = purpose_line(debtor, row)
+    if ends:
+        log.error(
+            "call %s: debt %s unreadable or changed; ended after the disclosure",
+            call_id,
+            debtor.debt_id,
+        )
+        state = replace(state, stage=Stage.WRAP)
+    return state, f"{disclosure} {line}"
 
 
 def _tools_failed(

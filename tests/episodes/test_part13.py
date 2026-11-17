@@ -36,6 +36,7 @@ from harness.stages import (
     DISCLOSURE,
     GREETING,
     LOCATION_ASK,
+    PURPOSE,
     THIRD_PARTY_CLOSE,
     VERIFY_ASK,
     VERIFY_FAILED,
@@ -48,7 +49,14 @@ from harness.stages import (
 )
 from model import FakeProvider, Provider
 from phone import signed_headers
-from phone.webhook import CANT_CONTINUE, SAFE_LINE, WEBHOOK_PATH, audit_to_db, create_app
+from phone.webhook import (
+    CANT_CONTINUE,
+    SAFE_LINE,
+    WEBHOOK_PATH,
+    audit_to_db,
+    create_app,
+    debt_as_found,
+)
 from sim.agentphone_sim import Script, load_script, run_script
 
 SECRET = "whsec_test_only"
@@ -101,6 +109,7 @@ class Call:
             ),
             open_session=lambda call_id: self._open(call_id, slow),
             find_debtor=DEBTORS.get,
+            read_debt=debt_as_found,
             audit=audit or (lambda decision, call_id, debt_id: self.audited.append(decision)),
         )
         self.client = TestClient(app)
@@ -150,7 +159,9 @@ def test_greeting_verify_disclose_discuss(tmp_path: Path) -> None:
     replies = [reply for _, reply in turns]
     assert replies[0] == GREETING.format(full_name="Sam Doe")
     assert replies[1] == VERIFY_ASK
-    assert replies[2] == DISCLOSURE.format(first_name="Sam")
+    assert replies[2] == DISCLOSURE.format(first_name="Sam") + " " + PURPOSE.format(
+        creditor="Northwind Furniture", balance="$1250.00"
+    )
     assert replies[3] == LEAKY  # verified and disclosed: the amount on file may be said
     assert call.stages() == [
         Stage.GREETING,
@@ -342,8 +353,11 @@ def test_disclosure_comes_before_the_first_amount(tmp_path: Path) -> None:
     )
     replies = [reply for _, reply in call.play(script)]
     with_amount = [i for i, r in enumerate(replies) if "$" in r]
-    disclosed_at = replies.index(DISCLOSURE.format(first_name="Sam"))
-    assert with_amount and min(with_amount) > disclosed_at
+    said = DISCLOSURE.format(first_name="Sam")
+    disclosed_at = next(i for i, r in enumerate(replies) if r.startswith(said))
+    # The first amount is the purpose line, after the mini-Miranda in the same reply.
+    assert with_amount and min(with_amount) == disclosed_at
+    assert "$" not in said and "$" in replies[disclosed_at][len(said) :]
     assert len(call.audited) == 2  # the balance sentence from each early model turn
     assert {d.rule_id for d in call.audited} == {"third_party_disclosure"}
 

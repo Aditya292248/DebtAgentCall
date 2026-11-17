@@ -35,6 +35,7 @@ from harness.stages import (
     DISCLOSURE,
     GREETING,
     GREETING_REASK,
+    PURPOSE,
     REASK_DOB,
     REASK_ZIP,
     VERIFY_ASK,
@@ -46,7 +47,7 @@ from harness.stages import (
     next_stage,
 )
 from model import FakeProvider, Provider
-from phone.webhook import create_app
+from phone.webhook import create_app, debt_as_found
 from sim.agentphone_sim import Script, run_script
 
 SECRET = "whsec_test_only"
@@ -79,6 +80,7 @@ class Call:
             agent_factory=lambda session: Agent(provider=provider, session=session),
             open_session=self._open,
             find_debtor={PHONE: ALEX}.get,
+            read_debt=debt_as_found,
             audit=lambda decision, call_id, debt_id: None,
         )
         self.client = TestClient(app)
@@ -311,7 +313,9 @@ def test_spoken_right_answers_verify(tmp_path: Path) -> None:
     replies = call.play(
         *TO_VERIFY, "the fifteenth of January nineteen ninety", "oh two, one, one, five"
     )
-    assert replies == [GREETING.format(**NAMES), VERIFY_ASK, ASK_ZIP, DISCLOSURE.format(**NAMES)]
+    purpose = PURPOSE.format(creditor=ALEX.creditor, balance="$420.00")
+    disclosure = f"{DISCLOSURE.format(**NAMES)} {purpose}"
+    assert replies == [GREETING.format(**NAMES), VERIFY_ASK, ASK_ZIP, disclosure]
     assert call.last()["verified"] and call.last()["stage"] == "DISCUSS"
     assert call.responder.calls == []
 
