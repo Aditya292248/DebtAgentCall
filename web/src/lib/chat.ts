@@ -11,10 +11,19 @@ export type ToolCall = {
 }
 
 /** What the server is waiting on: a call, a payment, or a payment reversal. */
-export type ApprovalAction = 'place_call' | 'record_payment' | 'reverse_payment'
+export type ApprovalAction =
+  | 'place_call'
+  | 'record_payment'
+  | 'reverse_payment'
+  | 'add_note'
+  | 'schedule_callback'
 
-/** Written by the server for a payment or reversal; shown as it is. */
+/** Written by the server for a payment, reversal, note or callback; shown as it is. */
 export type PaymentDetails = {
+  /** add_note: the note as it will be saved. */
+  text?: string
+  /** schedule_callback: the time, e.g. "2026-11-18 10:30 America/Los_Angeles". */
+  shown?: string
   amount?: string
   paid_on?: string
   method?: string
