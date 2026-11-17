@@ -22,6 +22,10 @@ What can go wrong, as a small ``CallError(kind)``:
   ``other``       any other 4xx                            not placed
   ==============  ======================================  ===============
 
+Reading a call back (``get_call``) is safe to repeat, so it is retried a few
+times on a timeout or a 5xx; a 4xx is raised at once. A failure is raised as
+``CallLookupError`` and the caller leaves its attempt untouched.
+
 Anything else (a timeout, a dropped connection, a 5xx) is *not* a
 ``CallError``: we don't know whether AgentPhone placed the call, so the error
 is raised as it is and the runner marks the attempt ``placed_unknown``.
@@ -33,7 +37,8 @@ raise any of those errors, or a timeout.
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
@@ -66,6 +71,38 @@ class PhoneClient(Protocol):
     ) -> str:
         """Place one call and return its call id. Raise ``CallError`` if it was refused."""
         ...
+
+
+class CallLookupError(Exception):
+    """AgentPhone could not tell us about a call (not found, refused, or unreachable)."""
+
+
+@dataclass(frozen=True)
+class CallInfo:
+    """What ``GET /v1/calls/{id}`` says about one call.
+
+    ``ended_at`` is None while the call is still going. ``caller_turns`` are the
+    things the caller said (the SDK's ``transcripts[].transcript``), empty if
+    nobody spoke. ``disconnection_reason`` is None when the lookup does not carry
+    one (the SDK's call model has no such field; the webhook does).
+    """
+
+    call_id: str
+    status: str
+    ended_at: str | None
+    duration_seconds: int | None = None
+    disconnection_reason: str | None = None
+    caller_turns: tuple[str, ...] = ()
+
+
+class CallReader(Protocol):
+    def get_call(self, call_id: str) -> CallInfo:
+        """Read one call back. Raise ``CallLookupError`` if that is not possible."""
+        ...
+
+
+READ_ATTEMPTS = 3  # a read can be repeated; a dial never is
+READ_BACKOFF = 0.5  # seconds, doubled after each failed read
 
 
 def call_error_for(status: int, headers: dict[str, str] | None = None) -> CallError | None:
@@ -102,7 +139,7 @@ def _status_and_headers(exc: Exception) -> tuple[int | None, dict[str, str]]:
 
 
 @dataclass
-class AgentPhoneClient:
+class AgentPhoneClient:  # also a CallReader
     api_key: str
     agent_id: str
     from_number_id: str
@@ -166,6 +203,32 @@ class AgentPhoneClient:
             raise RuntimeError("AgentPhone answered without a call id")
         return str(call_id)
 
+    def get_call(self, call_id: str, *, sleep: Callable[[float], None] = time.sleep) -> CallInfo:
+        """``GET /v1/calls/{id}``. Retried on a timeout or 5xx; a 4xx is raised at once."""
+        last: Exception | None = None
+        for attempt in range(READ_ATTEMPTS):
+            try:
+                call = self._client().calls.get(call_id)
+            except Exception as exc:  # noqa: BLE001 - classified just below
+                status, _ = _status_and_headers(exc)
+                if status is not None and 400 <= status < 500:
+                    raise CallLookupError(f"AgentPhone answered HTTP {status}") from exc
+                last = exc
+                if attempt + 1 < READ_ATTEMPTS:
+                    sleep(READ_BACKOFF * 2**attempt)
+                continue
+            turns = tuple(
+                str(t.transcript) for t in getattr(call, "transcripts", []) if t.transcript
+            )
+            return CallInfo(
+                call_id=str(call.id),
+                status=str(call.status),
+                ended_at=call.ended_at,
+                duration_seconds=call.duration_seconds,
+                caller_turns=turns,
+            )
+        raise CallLookupError(f"could not read the call: {last!r}") from last
+
 
 @dataclass
 class FakePhoneClient:
@@ -174,6 +237,8 @@ class FakePhoneClient:
     calls: list[dict[str, Any]] = field(default_factory=list)
     errors: list[BaseException] = field(default_factory=list)
     on_call: Any = None  # optional hook(to_number), run before answering
+    infos: dict[str, CallInfo] = field(default_factory=dict)  # what get_call answers, by call id
+    looked_up: list[str] = field(default_factory=list)  # every call id get_call was asked about
     _ids: Iterator[int] = field(default_factory=lambda: iter(range(1, 1_000_000)))
 
     def fail_next(self, error: CallErrorKind | BaseException) -> None:
@@ -198,3 +263,9 @@ class FakePhoneClient:
         if self.errors:
             raise self.errors.pop(0)
         return f"fake-call-{next(self._ids)}"
+
+    def get_call(self, call_id: str) -> CallInfo:
+        self.looked_up.append(call_id)
+        if call_id not in self.infos:
+            raise CallLookupError(f"no such call {call_id}")
+        return self.infos[call_id]

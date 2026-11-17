@@ -86,6 +86,7 @@ class CallState:
     # not given yet). Only the yes/no is kept, never what the caller said.
     dob_ok: bool | None = None
     zip_ok: bool | None = None
+    ended: bool = False  # set when the call's end was recorded (phone/call_end.py)
 
     @classmethod
     def new(cls, call_id: str, debtor: Debtor) -> CallState:
@@ -107,6 +108,7 @@ class CallState:
             turns=int(data.get("turns", 0)),
             dob_ok=data.get("dob_ok"),
             zip_ok=data.get("zip_ok"),
+            ended=bool(data.get("ended", False)),
         )
 
 
