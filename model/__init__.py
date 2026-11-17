@@ -1,7 +1,8 @@
 """``model/`` — everything about talking to a model.
 
 This is the model seam: the one place the rest of the code goes through to call a
-model and get a reply. Callers use two names from here, ``chat`` and ``Provider``.
+model and get a reply. Callers use three names from here: ``chat``, ``chat_stream``
+(the same call, streamed) and ``Provider``.
 Everything behind them (the HTTP backend, the fake) can change without touching
 the callers.
 
@@ -14,9 +15,9 @@ Adapted from codingHarness, keeping only what a single model call needs.
 
 from __future__ import annotations
 
-from model.client import chat
-from model.fake import FakeProvider, fake, tool_call, tool_reply
-from model.openai_compatible import complete_openai
+from model.client import chat, chat_stream
+from model.fake import FakeProvider, Streamed, fake, streamed, tool_call, tool_reply
+from model.openai_compatible import complete_openai, stream_openai
 from model.provider import (
     DEFAULT_API_KEY,
     DEFAULT_BASE_URL,
@@ -32,9 +33,13 @@ __all__ = [
     "FakeProvider",
     "LLMResponse",
     "Provider",
+    "Streamed",
     "chat",
+    "chat_stream",
     "complete_openai",
     "fake",
+    "stream_openai",
+    "streamed",
     "tool_call",
     "tool_reply",
 ]
