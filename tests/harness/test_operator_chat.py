@@ -11,7 +11,7 @@ What it checks:
     records nothing and leaves the approval pending.
   - Pending approvals live in the chat's saved history, so a new request sees them.
   - The operator gets its own prompt and its call tools first, and no skills menu.
-    (The payment tools are tested in test_part31.)
+    (The payment tools are tested in test_payments.py.)
   - Against the real local database (``db``): an approved call to a debtor
     outside calling hours is not dialed; an approved call the checks allow is
     dialed once and ``call_status`` finds it; ``find_debtor`` masks phones;
