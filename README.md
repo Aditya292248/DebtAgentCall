@@ -601,6 +601,21 @@ Debts that existed before the payments migration get the day it ran as `opened_o
 uv run demo part-31
 ```
 
+## Bill upload
+
+A bill (PNG, JPEG, WebP or PDF) can be read into a draft, and nothing is saved until a person confirms it. A wrong amount read off a bill would become a false statement on a call, so the model only reads.
+
+- `POST /api/bills` (multipart, field `file`) checks the file type from its first bytes, stores the file (the private `bills` bucket when `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are set, else the folder in `BILLS_DIR`, default `.bills/`), has the vision model read the fields and returns a draft. Code turns the printed balance into cents and a US number into E.164, and flags every field that is missing, unsure or fails a check. Date of birth and line type are never on a bill, so they are always flagged. No debtor, phone or debt row is written, only the draft (`bill_draft`) and an audit row (`kind = bill`).
+- `POST /api/bills/{id}/confirm` takes `{fields}` as the person edited them and checks them again, strictly: the balance must be a positive whole number of cents, the phone must already be E.164, and the ZIP, state, date of birth and line type must be valid (422 with each problem otherwise). It refuses (409) a draft already confirmed, an account number already saved, and a phone number already on file, since a call finds its debtor by the number. Then it saves the debtor, phone and debt with an audit row in one transaction.
+- A bill is not consent to be called. The phone is saved with no consent, so `tcpa_consent` blocks every call to it until consent is recorded.
+- The operator chat's `read_bill(draft_id)` shows a draft with the phone masked. It never saves.
+
+The web UI has no upload entry point yet; the API is ready for one.
+
+```bash
+uv run demo bills
+```
+
 ## Dialer: the one safe way every call is placed
 
 `dial_one(conn, account_number, when, phone)` in `dialer/service.py` is the only code that asks AgentPhone to place a call. `dial_queue(debtors, when, phone, conn)` runs it for a list of debts in a fixed order (the one whose last call is oldest goes first), and a later `place_call` tool for an operator agent will call it for one debt. Each time, for that debt:
