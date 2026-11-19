@@ -49,11 +49,11 @@ def test_sam_is_ready_in_the_afternoon_and_blocked_at_930pm():
 
 
 @pytest.mark.db
-def test_every_seeded_debt_gets_all_eight_decisions():
+def test_every_seeded_debt_gets_all_nine_decisions():
     body = client.get("/api/precall", params={"at": AFTERNOON}).json()
     assert body["at"] == AFTERNOON
     assert len(body["debts"]) >= 12
-    assert all(len(d["decisions"]) == 8 for d in body["debts"])
+    assert all(len(d["decisions"]) == 9 for d in body["debts"])
 
 
 @pytest.mark.db

@@ -9,6 +9,7 @@ export const RULE_NAMES: Record<string, string> = {
   attorney: 'Lawyer',
   bankruptcy: 'Bankruptcy',
   deceased: 'Deceased',
+  archived: 'Archived',
   precall: 'Missing data',
 }
 

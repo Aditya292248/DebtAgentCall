@@ -10,7 +10,7 @@ proven can silently regress.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from fastapi.testclient import TestClient
@@ -2534,3 +2534,74 @@ def _demo_call_end() -> None:
 
 ACCEPTANCE["call-end"] = _accept_call_end
 DEMOS["call-end"] = _demo_call_end
+
+
+# ----------------------------------------------------------------------------
+# people: add a person from the web UI, archive and restore one
+# ----------------------------------------------------------------------------
+
+
+def _people_run() -> bool:
+    """A form that fails the checks, one that passes, then no consent and archived. Prints each."""
+    from datetime import UTC, datetime
+
+    from compliance import CallFacts, PhoneConsent, check_before_call, may_call
+    from harness.people import check_person
+
+    person: dict[str, Any] = {
+        "first_name": "Riley",
+        "last_name": "Example",
+        "dob": "1985-04-12",
+        "address": "100 Test Street, Los Angeles",
+        "zip": "90012",
+        "state": "CA",
+        "phone": "+12135550199",
+        "line_type": "cell",
+        "creditor": "Northbank Utilities",
+        "account_number": "DEMO-2001",
+        "balance_cents": 123456,
+        "consent_source": "",
+        "consent_date": "",
+    }
+    bad = check_person({**person, "zip": "9001", "state": "ZZ", "balance_cents": "1234.56"})
+    print("bad zip, state and amount:", sorted(bad))
+    print("good form:", check_person(person) or "no problems")
+
+    when = datetime(2026, 11, 16, 19, 0, tzinfo=UTC)  # 11:00 in Los Angeles
+
+    def blocked_by(consent: PhoneConsent, archived: bool) -> list[str]:
+        facts = CallFacts("demo", "90012", consent, [], [], archived=archived)
+        return [d.rule_id for d in check_before_call(facts, when) if not d.allow]
+
+    no_consent = blocked_by(PhoneConsent(e164=person["phone"], line_type="cell"), False)
+    print("added with no consent, blocked by:", no_consent)
+    given = PhoneConsent(
+        person["phone"], datetime(2026, 10, 1, tzinfo=UTC), "signed form", None, "cell"
+    )
+    live = blocked_by(given, False)
+    archived = blocked_by(given, True)
+    print("with consent, blocked by:", live or "nothing")
+    print("same person archived, blocked by:", archived)
+    facts = CallFacts("demo", "90012", given, [], [], archived=None)
+    unknown = [d.rule_id for d in check_before_call(facts, when) if not d.allow]
+    print("archived status unknown, blocked by:", unknown)
+    return sorted(bad) == ["balance_cents", "state", "zip"] and (
+        no_consent == ["tcpa_consent"]
+        and live == []
+        and archived == ["archived"]
+        and unknown == ["archived"]
+        and not may_call(check_before_call(CallFacts("demo", "90012", given, [], [], True), when))
+    )
+
+
+def _accept_people() -> bool:
+    return _people_run()
+
+
+def _demo_people() -> None:
+    _people_run()
+    print("\n   # adding a person is not consent; archiving is not deleting, and it blocks calls")
+
+
+ACCEPTANCE["people"] = _accept_people
+DEMOS["people"] = _demo_people

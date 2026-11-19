@@ -19,6 +19,8 @@ export type DebtView = {
   /** When `check` ran, in ms since the epoch (0 if unknown). */
   checkedAt: number
   checkFailed: boolean
+  /** Archived people are out of the default list and can't be called. */
+  archived: boolean
 }
 
 type DebtorRow = {
@@ -26,6 +28,7 @@ type DebtorRow = {
   last_name: string
   state: string
   zip: string
+  archived_at: string | null
   phone: { e164: string; line_type: string }[]
   debt: {
     id: string
@@ -59,7 +62,9 @@ export function useDebts(at: string | null) {
   const [dbError, setDbError] = useState<string | null>(supabaseConfigError)
   const [result, setResult] = useState<CheckResult | null>(null)
   const [tick, setTick] = useState(0)
+  const [reloads, setReloads] = useState(0)
   const key = at ?? `now:${tick}`
+  const reload = () => setReloads((n) => n + 1)
 
   useEffect(() => {
     if (at) return
@@ -72,7 +77,7 @@ export function useDebts(at: string | null) {
     supabase
       .from('debtor')
       .select(
-        'first_name, last_name, state, zip, phone(e164, line_type), ' +
+        'first_name, last_name, state, zip, archived_at, phone(e164, line_type), ' +
           'debt(id, account_number, creditor, current_balance_cents, status)',
       )
       .order('last_name')
@@ -80,7 +85,7 @@ export function useDebts(at: string | null) {
         if (error) setDbError(error.message)
         else setRows((data ?? []) as unknown as DebtorRow[])
       })
-  }, [])
+  }, [reloads])
 
   useEffect(() => {
     let cancelled = false
@@ -98,7 +103,7 @@ export function useDebts(at: string | null) {
     return () => {
       cancelled = true
     }
-  }, [at, key])
+  }, [at, key, reloads])
 
   // While "now" is re-checked each minute, keep showing last minute's good result
   // rather than flashing "checking"; a chosen time only ever shows its own result.
@@ -109,7 +114,7 @@ export function useDebts(at: string | null) {
       : null
   const apiError = current?.error ?? null
 
-  const debts: DebtView[] = rows.flatMap((p) =>
+  const all: DebtView[] = rows.flatMap((p) =>
     p.debt.map((d) => ({
       id: d.id,
       account: d.account_number,
@@ -124,9 +129,16 @@ export function useDebts(at: string | null) {
       checkedAt: current?.at ?? 0,
       // Checked, but with no answer for this debt: unknown, never assumed fine.
       checkFailed: current !== null && !current.checks.has(d.account_number),
+      archived: p.archived_at !== null,
     })),
   )
-  return { debts, dbError, apiError }
+  return {
+    debts: all.filter((d) => !d.archived),
+    archived: all.filter((d) => d.archived),
+    dbError,
+    apiError,
+    reload,
+  }
 }
 
 export function blocksOf(debt: DebtView) {

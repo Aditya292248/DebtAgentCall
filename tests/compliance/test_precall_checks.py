@@ -222,6 +222,7 @@ def test_clean_facts_allow_the_call():
         "attorney",
         "bankruptcy",
         "deceased",
+        "archived",
     ]
     assert all(d.allow for d in decisions)
     assert may_call(decisions)

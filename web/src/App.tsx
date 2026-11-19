@@ -1,6 +1,7 @@
 import { ChartColumn, Clock, Moon, ScrollText, Sun } from 'lucide-react'
 import { useState } from 'react'
 
+import { AddPersonDialog } from '@/components/AddPersonDialog'
 import { AuditLog } from '@/components/AuditLog'
 import { ChatPanel } from '@/components/ChatPanel'
 import { DebtorDetail } from '@/components/DebtorDetail'
@@ -37,8 +38,9 @@ export default function App() {
   const [panel, setPanel] = useState<Panel | null>(null)
 
   const atIso = at ? new Date(at).toISOString() : null
-  const { debts, dbError, apiError } = useDebts(atIso)
-  const selectedDebt = debts.find((d) => d.account === selected)
+  const { debts, archived, dbError, apiError, reload } = useDebts(atIso)
+  const [adding, setAdding] = useState(false)
+  const selectedDebt = [...debts, ...archived].find((d) => d.account === selected)
   const accounts = new Map(debts.map((d) => [d.id, d.name]))
   const atLabel = at
     ? `Checked for ${new Date(at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}`
@@ -120,6 +122,8 @@ export default function App() {
         <aside className="min-h-0 border-r bg-sidebar">
           <DebtorList
             debts={debts}
+            archived={archived}
+            onAdd={() => setAdding(true)}
             selected={selected}
             onSelect={select}
             dbError={dbError}
@@ -130,6 +134,7 @@ export default function App() {
           <ChatPanel precallCheck={precallCheck} />
         </main>
       </div>
+      <AddPersonDialog open={adding} onOpenChange={setAdding} onAdded={reload} />
       <Sheet open={shown !== null} onOpenChange={(open) => !open && setPanel(null)}>
         <SheetContent>
           <div className="space-y-4 border-b px-6 pt-5 pb-4">
@@ -155,7 +160,7 @@ export default function App() {
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto px-6 py-6">
             {shown === 'debtor' && selectedDebt && (
-              <DebtorDetail debt={selectedDebt} atLabel={atLabel} />
+              <DebtorDetail debt={selectedDebt} atLabel={atLabel} onChanged={reload} />
             )}
             {shown === 'overview' && <Overview debts={debts} atLabel={atLabel} />}
             {shown === 'log' && <AuditLog accounts={accounts} />}

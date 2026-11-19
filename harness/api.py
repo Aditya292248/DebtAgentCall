@@ -65,6 +65,7 @@ from harness.bills import (
 from harness.db import connect, load_call_facts
 from harness.memory import PostgresSession
 from harness.operator import ChatTurn, Operator, PhoneUnavailable, operator_tz
+from harness.people_api import router as people_router
 
 DEBTS_SQL = """
     select d.account_number, p.first_name || ' ' || p.last_name
@@ -74,6 +75,7 @@ DEBTS_SQL = """
 """
 
 app = FastAPI(title="DebtAgentCall read-only API")
+app.include_router(people_router)
 
 
 @app.exception_handler(psycopg.Error)

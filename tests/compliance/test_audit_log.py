@@ -255,7 +255,7 @@ def test_a_blocked_precall_check_leaves_a_block_row(conn):
     assert [(r[0], r[1]) for r in rows] == [
         (d.rule_id, "allow" if d.allow else "block") for d in decisions
     ]
-    assert len(rows) == 8
+    assert len(rows) == 9
     blocks = [r for r in rows if r[1] == "block"]
     assert [r[0] for r in blocks] == ["bankruptcy"]
     debt = conn.execute("select id::text from public.debt where account_number = 'ACC-1011'")
