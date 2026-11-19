@@ -24,7 +24,7 @@ You need [uv](https://docs.astral.sh/uv/), Node.js, and Docker Desktop running.
 
    On Windows PowerShell use `Copy-Item .env.example .env`. Set `AGENTPHONE_WEBHOOK_SECRET` to any string (the simulator in step 5 and the server must use the same one). For the chat with a real model, also set `LLM_BASE_URL`, `LLM_MODEL` and `LLM_API_KEY` (the defaults point at LM Studio on `localhost:1234`). To approve a call at any hour in step 3, set `TEST_NUMBERS=+12135550101`, which is Sam Doe's made-up number from the seed; see "What to say if asked" for what that list can and cannot skip. Do not commit `.env`.
 
-3. Start the local database. The first start applies `supabase/migrations/` and loads `supabase/seed.sql` (twelve made-up debtors, each built to trip one pre-call check).
+3. Start the local database. The first start applies `supabase/migrations/` and loads `supabase/seed.sql` (nine made-up debtors, each built to trip one pre-call check).
 
    ```bash
    npx supabase start
@@ -96,7 +96,7 @@ In a terminal, run the dialer's dry run at the fixed time the seed was built aro
 uv run dialer --dry-run --when 2026-11-05T19:00:00+00:00
 ```
 
-**See** (on a clean seed): two debts that would be called and ten blocked, each with a rule and a reason:
+**See** (on a clean seed): two debts that would be called and seven blocked, each with a rule and a reason:
 
 ```text
   blocked  ACC-1005  tcpa_consent: consent revoked on 2026-10-28
@@ -104,14 +104,11 @@ uv run dialer --dry-run --when 2026-11-05T19:00:00+00:00
   blocked  ACC-1007  cease: debtor asked us to stop on 2026-10-15
   blocked  ACC-1008  cease: debtor opted this number out on 2026-10-21
   blocked  ACC-1009  dnc: number is on a do-not-call list on 2026-09-30
-  blocked  ACC-1010  attorney: debtor has a lawyer for this debt; contact the lawyer on 2026-10-25
-  blocked  ACC-1011  bankruptcy: debtor filed for bankruptcy on 2026-10-10
-  blocked  ACC-1012  deceased: debtor is recorded as deceased on 2026-10-05
   call     ACC-1001  +12135550101  (every check allows)
   blocked  ACC-1003  call_frequency: talked with the debtor on 2026-11-02; no calls until 2026-11-09
   call     ACC-1002  +14155550102  (every check allows)
   blocked  ACC-1004  call_frequency: 7 calls in the last 7 days; the limit is 7
-would call 2, blocked 10
+would call 2, blocked 7
 ```
 
 **Why it matters:** there is no model in this path at all. The decision to call is a list of plain functions in `compliance/`, and a missing fact (no history, no flags) blocks instead of passing.
@@ -122,7 +119,7 @@ In the web app's chat, type `call Sam Doe`.
 
 **See:** collapsed tool lines (`find_debtor`, `check_call`, `place_call`), then an approval card that shows the person's name and a masked phone number, and the message "Nothing has been dialed". Open the `check_call` line to show every rule and its result. Click Approve.
 
-**Why it matters:** `place_call` does not dial. Only the approve button does, and approving runs every check again inside one transaction before a single dial attempt. If a check fails at that moment, the card cannot be approved, and the model has no way around it. Then try `call Robin Hale`, who has a lawyer on file: `check_call` shows the `attorney` rule blocking, and the card has only Deny. (Do not use Casey Morgan: the seed's call history is dated early November, so that person's call limit has long expired.)
+**Why it matters:** `place_call` does not dial. Only the approve button does, and approving runs every check again inside one transaction before a single dial attempt. If a check fails at that moment, the card cannot be approved, and the model has no way around it. Then try `call Morgan Patel`, who asked us to stop: `check_call` shows the `cease` rule blocking, and the card has only Deny. (Do not use Casey Morgan: the seed's call history is dated early November, so that person's call limit has long expired.)
 
 If the card shows only Deny for everyone, it is outside calling hours; set `TEST_NUMBERS` as described above, or use "Check at".
 
@@ -219,13 +216,13 @@ The bill upload that is on main is an API only (`/api/bills`); the web app has n
 
 ## What to say if asked
 
-**Why regex, and what about a classifier?** Stop triggers and the sentence filter are regular expressions on purpose: they are deterministic, readable, and testable line by line (`tests/compliance/test_stop_triggers.py`, `tests/compliance/test_utterance_filter.py`), and a reviewer or lawyer can read the exact words that fire. They are eager: a false alarm ends a call politely, a miss could break the law, so "my lawyer friend said this is fine" ends the call too. Their weakness is language they do not list and negation they do not understand. A second layer, a small classifier, is planned but does not exist yet: `compliance/triggers.py: combine` already merges its hits with the regex hits (either one firing stops the call), but only the merge function exists. A classifier would only ever add stops, never remove one.
+**Why regex, and what about a classifier?** Stop triggers and the sentence filter are regular expressions on purpose: they are deterministic, readable, and testable line by line (`tests/compliance/test_stop_triggers.py`, `tests/compliance/test_utterance_filter.py`), and a reviewer or lawyer can read the exact words that fire. They are eager: a false alarm ends a call politely, a miss could break the law, so "please don't call me at work" ends the call too. Their weakness is language they do not list and negation they do not understand. A second layer, a small classifier, is planned but does not exist yet: `compliance/triggers.py: combine` already merges its hits with the regex hits (either one firing stops the call), but only the merge function exists. A classifier would only ever add stops, never remove one.
 
 **Why archive instead of delete?** Compliance records are evidence. `audit_event`, `payment` and `debt_note` refuse update, delete and truncate in the database, and a debt that has payments or notes cannot be deleted. A mistake is corrected with a new row. The people screen that archives instead of deleting is in an open pull request and not on main yet.
 
 **How does fail-closed work?** When the code cannot tell, it says no. A few examples you can point at: no webhook secret refuses every webhook; a missing phone record, call history or flag list blocks the pre-call check; an unknown ZIP and area code blocks the call; an unreadable debt row ends the call after the disclosure with no amount; a failed save on a stop still hangs up; a failed tool save replaces the model's reply with a fixed line and hangs up; a dispute whose status cannot be read is treated as a dispute. Each has a test.
 
-**What does `TEST_NUMBERS` do?** It is an owner-only list of full phone numbers, empty by default, for testing on your own phone outside calling hours and past the call limit. It skips exactly those two rules for exactly those numbers. Consent, stop requests, do-not-call, lawyer, bankruptcy, deceased and debt status still block. Every skip is audited. It is not for real debtors.
+**What does `TEST_NUMBERS` do?** It is an owner-only list of full phone numbers, empty by default, for testing on your own phone outside calling hours and past the call limit. It skips exactly those two rules for exactly those numbers. Consent, stop requests, do-not-call and debt status still block. Every skip is audited. It is not for real debtors.
 
 **Does the model ever decide anything legal?** No. It writes words in one stage, `DISCUSS`, after code has verified the person and said the disclosure. Every sentence it writes is checked, and its tools are gated. After a call, reviewer models can flag a transcript for a person, but they decide nothing.
 

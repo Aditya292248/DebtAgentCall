@@ -313,7 +313,7 @@ DEMOS["part-06"] = _demo_part06
 
 
 # ----------------------------------------------------------------------------
-# pre-call checks: call limits, consent, stop requests, lawyers, bankruptcy
+# pre-call checks: call limits, consent, stop requests
 # ----------------------------------------------------------------------------
 
 # A fixed time so the seeded call history always gives the same answers:
@@ -331,9 +331,6 @@ _PART07_EXPECTED: dict[str, tuple[str, list[str]]] = {
     "ACC-1007": ("Morgan Patel", ["cease"]),
     "ACC-1008": ("Parker Reed", ["cease"]),
     "ACC-1009": ("Avery Ortiz", ["dnc"]),
-    "ACC-1010": ("Robin Hale", ["attorney"]),
-    "ACC-1011": ("Drew Kim", ["bankruptcy"]),
-    "ACC-1012": ("Quinn Walsh", ["deceased"]),
 }
 
 
@@ -804,14 +801,11 @@ def _part14_samples() -> list[tuple[str, list[str]]]:
         ("I don't want to stop paying, I just need more time.", []),
         ("The bank is not my favourite.", []),
         ("Please stop calling me at work.", ["cease"]),
-        ("I filed chapter 7 last year.", ["bankruptcy"]),
-        ("You'll have to talk to my lawyer.", ["attorney"]),
-        ("My lawyer friend said this is fine.", ["attorney"]),
         ("That's not my debt, I don't owe anything.", ["dispute"]),
         ("I don't consent to recording.", ["recording_objection"]),
         ("Sorry, wrong number.", ["wrong_number"]),
-        ("He passed away in June.", ["deceased"]),
-        ("Stop calling, I have an attorney and I dispute this.", ["attorney", "cease", "dispute"]),
+        ("I filed chapter 7 and my lawyer says he passed away.", []),
+        ("Stop calling, and I dispute this.", ["cease", "dispute"]),
     ]
 
 

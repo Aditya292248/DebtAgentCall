@@ -39,7 +39,7 @@
     open an approval like ``place_call``; nothing is written before it. A
     callback the pre-call checks would block at that moment is refused, both
     when it is asked for and again when it is approved.
-  - ``record_stop(debtor_id, kind)``: cease, dispute, attorney or bankruptcy.
+  - ``record_stop(debtor_id, kind)``: cease or dispute.
     It writes at once, with an audit row, and needs no approval, because a stop
     can only ever mean fewer calls. No tool removes a stop, records consent,
     edits a balance or deletes anything.
@@ -471,13 +471,13 @@ class Operator:
                 ),
                 Tool(
                     "record_stop",
-                    "Record that a debtor asked us to stop (cease), disputes the debt, "
-                    "has an attorney, or filed for bankruptcy. Takes effect at once; "
+                    "Record that a debtor asked us to stop (cease) or disputes the debt. "
+                    "Takes effect at once; "
                     "calls are blocked from then on. It can't be undone in chat.",
                     {
                         "debtor_id": "The exact id find_debtor returned, e.g. 'ACC-1001'. "
                         "A name is refused.",
-                        "kind": "cease, dispute, attorney or bankruptcy.",
+                        "kind": "cease or dispute.",
                     },
                     self.record_stop,
                 ),

@@ -29,8 +29,8 @@ One caller turn, with call stages on (the default):
    outbound call), and open the session for ``data.callId``. An unknown number,
    or a call with no id, gets a fixed goodbye: no model, no debt facts.
 2. Run the stop triggers (``compliance.triggers.detect``) on what the caller
-   said, before anything else sees it. If one fires (a lawyer, bankruptcy, a
-   death, "stop calling", a dispute, a recording objection, a wrong number):
+   said, before anything else sees it. If one fires ("stop calling", a
+   dispute, a recording objection, a wrong number):
    save its flag (for "stop calling", also revoke the number's consent; for a
    dispute, add a ``dispute`` row and mark the debt ``disputed`` so the dialer
    stops) and an audit row
@@ -156,9 +156,6 @@ CANT_CONTINUE = "Sorry, I can't continue this call right now. Goodbye."
 HOLD_LINE = "One moment while I check that."
 HOLD_AFTER = 2.5
 STOP_SOURCE = "live_call"  # flags.source for a flag a stop trigger set
-# A lawyer represents the person on one debt; a stop request, a bankruptcy or a
-# death is about the person, so those flags cover every debt.
-_FLAG_THIS_DEBT_ONLY = frozenset({"attorney"})
 # Said instead of the dispute close before verification: promises nothing and
 # doesn't hint that there is a debt.
 UNVERIFIED_DISPUTE_CLOSE = "Thank you for letting me know. Goodbye."
@@ -206,7 +203,7 @@ class Stop:
             return None
         return Flag(
             kind=kind,
-            debt_id=self.debtor.debt_id if kind in _FLAG_THIS_DEBT_ONLY else None,
+            debt_id=None,  # a stop request is about the person: it covers every debt
             data={"call_id": self.call_id, "matched": self.trigger.matched},
             source=STOP_SOURCE,
         )

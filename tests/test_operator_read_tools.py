@@ -115,6 +115,23 @@ def test_an_unknown_stop_kind_writes_nothing(tmp_path):
     assert op.chat("pause them").tool_calls[0]["result"].startswith("error: kind must be")
 
 
+@pytest.mark.parametrize("kind", ["attorney", "bankruptcy"])
+def test_record_stop_refuses_the_removed_kinds(tmp_path, kind):
+    op = make(tmp_path, asks("record_stop", debtor_id="ACC-1001", kind=kind))
+    result = op.chat("record it").tool_calls[0]["result"]
+    assert result == "error: kind must be one of cease, dispute"
+
+
+@pytest.mark.db
+@pytest.mark.parametrize("kind", ["cease", "dispute"])
+def test_record_stop_still_accepts_cease_and_dispute(tmp_path, conn, kind):
+    who = add_debtor(conn, "Stopkind")
+    op = make(tmp_path, asks("record_stop", debtor_id=who["account"], kind=kind), conn, clock=DAY)
+    result = op.chat("record it").tool_calls[0]["result"]
+    assert not str(result).startswith("error:"), result
+    assert json.loads(result)["kind"] == kind
+
+
 # --- the real local database, rolled back ----------------------------------------
 
 
@@ -322,7 +339,7 @@ def test_a_list_call_with_a_huge_limit_is_capped(tmp_path, conn):
 def test_ready_and_blocked_lists_come_from_the_dialers_check(tmp_path, conn):
     ok = add_debtor(conn, "Readyone", balance_cents=999_999_00)
     stop = add_debtor(conn, "Blockone", balance_cents=999_998_00)
-    add_flag(conn, stop, "attorney")
+    add_flag(conn, stop, "cease")
     script = [
         tool_reply(
             tool_call("list_debtors", "c1", sort="balance", filter="ready", limit="3"),

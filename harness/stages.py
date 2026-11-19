@@ -35,7 +35,7 @@ answer, with this stage's instructions".
 The text matching is kept small and cautious: when unsure, the call does not
 move forward. A spoken date that could be read two ways, or is not a real date,
 is no answer at all, never a match. A "yes" with a "no" or "not" in it is not a
-yes. The full list of stop phrases (lawyer, bankruptcy, "stop calling") is
+yes. The full list of stop phrases ("stop calling", a dispute) is
 ``compliance/triggers.py``. Dates and ZIP codes are read by ``harness/spoken.py``.
 """
 

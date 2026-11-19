@@ -244,7 +244,7 @@ def test_a_blocked_precall_check_leaves_a_block_row(conn):
     from harness.precall import check_and_record
 
     before = conn.execute("select coalesce(max(seq), 0) from public.audit_event").fetchone()
-    decisions = check_and_record(conn, "ACC-1011", WHEN, call_id="call-drew")  # Drew: bankruptcy
+    decisions = check_and_record(conn, "ACC-1007", WHEN, call_id="call-morgan")  # Morgan: cease
     rows = conn.execute(
         "select rule_id, decision, debt_id::text, call_id, reason from public.audit_event "
         "where seq > %s order by seq",
@@ -255,13 +255,13 @@ def test_a_blocked_precall_check_leaves_a_block_row(conn):
     assert [(r[0], r[1]) for r in rows] == [
         (d.rule_id, "allow" if d.allow else "block") for d in decisions
     ]
-    assert len(rows) == 8
+    assert len(rows) == 5
     blocks = [r for r in rows if r[1] == "block"]
-    assert [r[0] for r in blocks] == ["bankruptcy"]
-    debt = conn.execute("select id::text from public.debt where account_number = 'ACC-1011'")
+    assert [r[0] for r in blocks] == ["cease"]
+    debt = conn.execute("select id::text from public.debt where account_number = 'ACC-1007'")
     debt_row = debt.fetchone()
     assert debt_row is not None
-    assert all(r[2] == debt_row[0] and r[3] == "call-drew" for r in rows)
+    assert all(r[2] == debt_row[0] and r[3] == "call-morgan" for r in rows)
     assert verify_chain(conn) == []
 
 
