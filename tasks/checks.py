@@ -2534,3 +2534,138 @@ def _demo_call_end() -> None:
 
 ACCEPTANCE["call-end"] = _accept_call_end
 DEMOS["call-end"] = _demo_call_end
+
+
+# --- live call view ---------------------------------------------------------------
+
+
+def _call_view_run() -> dict:
+    """Two made-up calls read through the call view API: what it shows, what it hides.
+
+    A call in progress has a caller turn with a phone number in it, a tool whose
+    arguments carry a key, and a blocked sentence in the audit log. Needs the local
+    database. Returns what the API answered, for the demo and the check.
+    """
+    import uuid
+    from datetime import UTC, date, datetime
+
+    from fastapi.testclient import TestClient
+
+    from compliance.audit import record
+    from compliance.decision import block
+    from harness.api import app
+    from harness.call_state import CallState, Debtor, Stage
+    from harness.db import connect
+    from harness.memory import PostgresSession
+    from model.fake import tool_call
+
+    tag = uuid.uuid4().hex[:8]
+    debtor = Debtor(
+        str(uuid.uuid4()), str(uuid.uuid4()), "Riley", f"View-{tag}", date(1990, 6, 1), "60601",
+        "Harbor Utilities", 41200,
+    )  # fmt: skip
+    number = "+13125550142"
+    live, other = f"callview_{tag}_a", f"callview_{tag}_b"
+    with connect() as conn:
+        conn.execute(
+            "insert into public.debtor (id, first_name, last_name, dob, address, zip, state)"
+            " values (%s, %s, %s, %s, '1 Demo St', %s, 'IL')",
+            (debtor.debtor_id, debtor.first_name, debtor.last_name, debtor.dob, debtor.zip),
+        )
+        conn.execute(
+            "insert into public.debt (id, debtor_id, account_number, creditor, balance_cents)"
+            " values (%s, %s, %s, %s, %s)",
+            (
+                debtor.debt_id,
+                debtor.debtor_id,
+                f"DEMO-{tag}",
+                debtor.creditor,
+                debtor.balance_cents,
+            ),
+        )
+        conn.execute(
+            "insert into public.phone (debtor_id, e164, line_type) values (%s, %s, 'cell')",
+            (debtor.debtor_id, number),
+        )
+    out: dict = {}
+    try:
+        for call_id, words in ((live, f"Try me on {number}"), (other, "a different call")):
+            session = PostgresSession.for_call(call_id)
+            session.append({"role": "user", "content": words})
+            session.append({"role": "assistant", "content": "Am I speaking with Riley?"})
+            session.append(
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        tool_call("lookup_account", "t1", api_key="sk-live-abcdef123456")
+                    ],
+                }
+            )
+            session.put_state(
+                {**CallState.new(call_id, debtor).to_dict(), "stage": Stage.VERIFY.value}
+            )
+            with connect() as conn:
+                conn.execute(
+                    "insert into public.call_attempt (debt_id, placed_at, outcome,"
+                    " agentphone_call_id) values (%s, %s, 'placed', %s)",
+                    (debtor.debt_id, datetime.now(UTC), call_id),
+                )
+                if call_id == live:
+                    record(
+                        conn,
+                        block("utterance_threat", "a threat", {"sentence": "We will sue you."}),
+                        kind="utterance_blocked",
+                        call_id=call_id,
+                        debt_id=debtor.debt_id,
+                    )
+        client = TestClient(app)
+        out["call"] = client.get(f"/api/calls/{live}")
+        out["list"] = client.get("/api/calls")
+        out["unknown"] = client.get("/api/calls/no_such_call")
+        out["write"] = client.post(f"/api/calls/{live}")
+        out["number"] = number
+        out["live"], out["other"] = live, other
+    finally:
+        with connect() as conn:
+            conn.execute("delete from public.debtor where id = %s", (debtor.debtor_id,))
+    return out
+
+
+def _accept_call_view() -> bool:
+    out = _call_view_run()
+    body = out["call"].json()
+    ok = (
+        out["call"].status_code == 200
+        and body["state"]["stage"] == "verify"
+        and [m["speaker"] for m in body["messages"]] == ["caller", "agent"]
+        and any(e["sentence"] == "We will sue you." for e in body["audit_events"])
+        and out["number"] not in out["call"].text + out["list"].text
+        and "sk-live" not in out["call"].text
+        and "a different call" not in out["call"].text
+        and out["unknown"].status_code == 404
+        and out["write"].status_code == 405
+    )
+    print(f"  call {out['call'].status_code}, unknown {out['unknown'].status_code}, "
+          f"write {out['write'].status_code}")  # fmt: skip
+    return ok
+
+
+def _demo_call_view() -> None:
+    out = _call_view_run()
+    body = out["call"].json()
+    print("a made-up call in progress, read through GET /api/calls/{id}\n")
+    print(f"stage {body['state']['stage']}, verified {body['state']['verified']}")
+    for m in body["messages"]:
+        print(f"  {m['speaker']:<6} {m['text']}")
+    for t in body["tool_calls"]:
+        print(f"  tool   {t['name']} {t['arguments']}")
+    for e in body["audit_events"]:
+        print(f"  event  {e['kind']}: {e['reason']} (not spoken: {e['sentence']!r})")
+    print(f"\nthe debtor's number appears in the answer: {out['number'] in out['call'].text}")
+    print(f"another call's words appear: {'a different call' in out['call'].text}")
+    print(f"an unknown call id: {out['unknown'].status_code}; a POST: {out['write'].status_code}")
+
+
+ACCEPTANCE["call-view"] = _accept_call_view
+DEMOS["call-view"] = _demo_call_view

@@ -33,9 +33,11 @@ const NOW_TICK_MS = 15_000
 type Props = {
   /** The page's own pre-call result for a debt right now, if it has one. */
   precallCheck: (debtorId: string) => CheckView | null
+  /** Open the live view for a call that was just placed. */
+  onOpenCall: (callId: string) => void
 }
 
-export function ChatPanel({ precallCheck }: Props) {
+export function ChatPanel({ precallCheck, onOpenCall }: Props) {
   const [sessionId] = useState(chatSessionId)
   const [items, setItems] = useState<Item[]>([])
   const [pending, setPending] = useState<Approval[]>([])
@@ -129,7 +131,7 @@ export function ChatPanel({ precallCheck }: Props) {
             </div>
           )}
           {items.map((item, i) => (
-            <Message key={i} item={item} />
+            <Message key={i} item={item} onOpenCall={onOpenCall} />
           ))}
           {pending.map((a) =>
             a.action === 'record_payment' || a.action === 'reverse_payment' ? (
@@ -194,7 +196,7 @@ export function ChatPanel({ precallCheck }: Props) {
   )
 }
 
-function Message({ item }: { item: Item }) {
+function Message({ item, onOpenCall }: { item: Item; onOpenCall: (callId: string) => void }) {
   if (item.kind === 'user') {
     return (
       <div className="flex justify-end">
@@ -212,7 +214,7 @@ function Message({ item }: { item: Item }) {
       {item.toolCalls.map((c, i) => (
         <ToolCallCard key={i} call={c} />
       ))}
-      {item.dial && <DialResult dial={item.dial} />}
+      {item.dial && <DialResult dial={item.dial} onWatch={onOpenCall} />}
       {item.text && (
         <p className="pt-1 text-[0.9375rem] leading-7 whitespace-pre-wrap">{item.text}</p>
       )}
