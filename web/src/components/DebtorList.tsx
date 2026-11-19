@@ -41,7 +41,7 @@ export function DebtorList({ debts, archived, onAdd, selected, onSelect, dbError
       <div className="space-y-3 px-4 pt-5 pb-4">
         <div className="flex items-baseline justify-between">
           <h2 className="text-sm font-semibold">Debtors</h2>
-          <Button size="sm" variant="outline" onClick={onAdd}>
+          <Button size="sm" onClick={onAdd}>
             <Plus /> Add person
           </Button>
         </div>

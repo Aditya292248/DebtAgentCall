@@ -1,3 +1,4 @@
+import { Archive, ArchiveRestore } from 'lucide-react'
 import { useState } from 'react'
 
 import { Notice } from '@/components/Notice'
@@ -42,16 +43,25 @@ export function ArchivePerson({ debt, onDone }: { debt: DebtView; onDone: () => 
         }}
       >
         <DialogContent className="max-w-md">
-          <div className="space-y-5 p-6">
-            <div className="space-y-2">
-              <DialogTitle>
-                {restoring ? `Restore ${debt.name}?` : `Archive ${debt.name}?`}
-              </DialogTitle>
-              <DialogDescription>
+          <div className="space-y-6 p-7">
+            <div className="flex items-start gap-4">
+              <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
+                {restoring ? (
+                  <ArchiveRestore className="size-5" aria-hidden />
+                ) : (
+                  <Archive className="size-5" aria-hidden />
+                )}
+              </span>
+              <div className="space-y-2 pt-0.5">
+                <DialogTitle className="text-lg">
+                  {restoring ? `Restore ${debt.name}?` : `Archive ${debt.name}?`}
+                </DialogTitle>
+                <DialogDescription className="leading-relaxed">
                 {restoring
                   ? 'They return to the list. Their consent, stop requests and history are as they were, and the pre-call checks decide whether they can be called.'
                   : 'They leave the list and cannot be called. Nothing is deleted: payments, calls and the compliance log are kept, and you can restore them later.'}
-              </DialogDescription>
+                </DialogDescription>
+              </div>
             </div>
             {error && <Notice message={error} />}
             <div className="flex justify-end gap-2">

@@ -1,4 +1,4 @@
-import { CircleCheck } from 'lucide-react'
+import { CircleCheck, Receipt, ShieldCheck, UserPlus, UserRound } from 'lucide-react'
 import { useState } from 'react'
 
 import { Notice } from '@/components/Notice'
@@ -15,6 +15,7 @@ import {
   type Person,
   type Problems,
 } from '@/lib/people'
+import { cn } from '@/lib/utils'
 
 type Props = {
   open: boolean
@@ -29,41 +30,96 @@ type FieldProps = {
   form: Form
   problems: Problems
   set: (name: FieldName, value: string) => void
+  /** Columns taken out of the dialog's six. */
+  span?: 1 | 2 | 3 | 4 | 6
   placeholder?: string
   type?: string
-  className?: string
   hint?: string
+  prefix?: string
 }
 
-function Field({ name, label, form, problems, set, placeholder, type, className, hint }: FieldProps) {
+const SPAN = { 1: 'col-span-1', 2: 'col-span-2', 3: 'col-span-3', 4: 'col-span-4', 6: 'col-span-6' }
+
+function Field({ name, label, form, problems, set, span = 3, placeholder, type, hint, prefix }: FieldProps) {
   const id = `person-${name}`
   const problem = problems[name]
   return (
-    <div className={className}>
-      <label htmlFor={id} className="mb-1.5 block text-xs font-medium">
+    <div className={SPAN[span]}>
+      <label htmlFor={id} className="mb-1.5 block text-xs font-medium text-foreground/80">
         {label}
       </label>
-      <Input
-        id={id}
-        type={type}
-        value={form[name]}
-        placeholder={placeholder}
-        onChange={(e) => set(name, e.target.value)}
-        aria-invalid={problem ? true : undefined}
-        aria-describedby={problem ? `${id}-problem` : hint ? `${id}-hint` : undefined}
-        autoComplete="off"
-      />
+      <div className="relative">
+        {prefix && (
+          <span className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-sm text-muted-foreground">
+            {prefix}
+          </span>
+        )}
+        <Input
+          id={id}
+          type={type}
+          value={form[name]}
+          placeholder={placeholder}
+          onChange={(e) => set(name, e.target.value)}
+          aria-invalid={problem ? true : undefined}
+          aria-describedby={problem ? `${id}-problem` : hint ? `${id}-hint` : undefined}
+          autoComplete="off"
+          className={cn('h-9 bg-background', prefix && 'pl-7')}
+        />
+      </div>
       {problem ? (
-        <p id={`${id}-problem`} className="mt-1 text-xs text-destructive">
+        <p id={`${id}-problem`} className="mt-1.5 text-xs text-destructive">
           {problem}
         </p>
       ) : (
         hint && (
-          <p id={`${id}-hint`} className="mt-1 text-xs text-muted-foreground">
+          <p id={`${id}-hint`} className="mt-1.5 text-xs text-muted-foreground">
             {hint}
           </p>
         )
       )}
+    </div>
+  )
+}
+
+function SectionTitle({ icon: Icon, children }: { icon: typeof UserRound; children: string }) {
+  return (
+    <h3 className="col-span-6 flex items-center gap-2 text-xs font-semibold tracking-wide text-muted-foreground uppercase">
+      <Icon className="size-3.5" aria-hidden />
+      {children}
+    </h3>
+  )
+}
+
+/** Cell or landline, as two joined buttons. */
+function LineType({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  return (
+    <div className="col-span-2">
+      <span id="person-line_type-label" className="mb-1.5 block text-xs font-medium text-foreground/80">
+        Line type
+      </span>
+      <div
+        role="radiogroup"
+        aria-labelledby="person-line_type-label"
+        className="grid h-9 grid-cols-2 rounded-lg border border-input bg-muted/50 p-0.5"
+      >
+        {(['cell', 'landline'] as const).map((v) => (
+          <button
+            key={v}
+            type="button"
+            role="radio"
+            aria-checked={value === v}
+            onClick={() => onChange(v)}
+            className={cn(
+              'rounded-md text-sm capitalize transition-colors focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none',
+              value === v
+                ? 'bg-background font-medium text-foreground shadow-sm'
+                : 'text-muted-foreground hover:text-foreground',
+            )}
+          >
+            {v}
+          </button>
+        ))}
+      </div>
     </div>
   )
 }
@@ -120,22 +176,24 @@ export function AddPersonDialog({ open, onOpenChange, onAdded }: Props) {
   const common = { form, problems, set }
   return (
     <Dialog open={open} onOpenChange={close}>
-      <DialogContent className="max-w-xl">
+      <DialogContent className="max-w-2xl">
         {saved ? (
-          <div className="space-y-5 p-6">
-            <div className="flex items-start gap-3">
-              <CircleCheck className="mt-0.5 size-5 shrink-0 text-ok" aria-hidden />
-              <div className="space-y-1">
-                <DialogTitle>{saved.name} was added</DialogTitle>
+          <div className="space-y-5 p-8">
+            <div className="flex items-start gap-4">
+              <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-ok/10 text-ok">
+                <CircleCheck className="size-5" aria-hidden />
+              </span>
+              <div className="space-y-1 pt-0.5">
+                <DialogTitle className="text-lg">{saved.name} was added</DialogTitle>
                 <DialogDescription>
-                  Account {saved.account_number}, phone {saved.phone}.
+                  Account {saved.account_number} · phone {saved.phone}
                 </DialogDescription>
               </div>
             </div>
-            <p className="rounded-lg bg-muted p-3 text-sm text-muted-foreground">
+            <p className="rounded-lg border bg-muted/50 p-3.5 text-sm leading-relaxed text-muted-foreground">
               {saved.consent_recorded
                 ? 'Consent was recorded, so the pre-call checks decide the rest.'
-                : "No consent is on file, so calls to this number stay blocked until it is recorded."}
+                : 'No consent is on file, so calls to this number stay blocked until it is recorded.'}
             </p>
             <div className="flex justify-end gap-2">
               <Button
@@ -152,63 +210,70 @@ export function AddPersonDialog({ open, onOpenChange, onAdded }: Props) {
           </div>
         ) : (
           <form onSubmit={submit} noValidate className="flex min-h-0 flex-col">
-            <div className="space-y-1 border-b px-6 pt-6 pb-4">
-              <DialogTitle>Add person</DialogTitle>
-              <DialogDescription>
-                A person, their phone and one debt. Nothing is saved until you add them.
-              </DialogDescription>
+            <div className="flex items-start gap-3.5 border-b px-7 pt-6 pb-5">
+              <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                <UserPlus className="size-4" aria-hidden />
+              </span>
+              <div className="space-y-0.5">
+                <DialogTitle className="text-lg">Add person</DialogTitle>
+                <DialogDescription>
+                  A person, their phone and one debt. Nothing is saved until you add them.
+                </DialogDescription>
+              </div>
             </div>
-            <div className="min-h-0 flex-1 space-y-6 overflow-y-auto px-6 py-5">
-              <section className="grid grid-cols-2 gap-x-3 gap-y-4">
-                <h3 className="col-span-2 text-sm font-semibold">Person</h3>
+
+            <div className="min-h-0 flex-1 space-y-8 overflow-y-auto px-7 py-6">
+              <section className="grid grid-cols-6 gap-x-4 gap-y-4">
+                <SectionTitle icon={UserRound}>Person</SectionTitle>
                 <Field {...common} name="first_name" label="First name" />
                 <Field {...common} name="last_name" label="Last name" />
-                <Field {...common} name="dob" label="Date of birth" type="date" />
-                <Field {...common} name="state" label="State" placeholder="CA" />
-                <Field {...common} name="address" label="Address" className="col-span-2" />
-                <Field {...common} name="zip" label="ZIP" placeholder="90012" />
+                <Field {...common} name="dob" label="Date of birth" type="date" span={2} />
                 <Field
                   {...common}
                   name="phone"
                   label="Phone"
                   placeholder="+12135550123"
-                  hint="E.164, with the country code"
+                  hint="E.164, with country code"
+                  span={2}
                 />
-                <div>
-                  <label htmlFor="person-line_type" className="mb-1.5 block text-xs font-medium">
-                    Line type
-                  </label>
-                  <select
-                    id="person-line_type"
-                    value={form.line_type}
-                    onChange={(e) => set('line_type', e.target.value)}
-                    className="h-8 w-full rounded-lg border border-input bg-background px-2 text-sm"
-                  >
-                    <option value="cell">Cell</option>
-                    <option value="landline">Landline</option>
-                  </select>
-                </div>
+                <LineType value={form.line_type} onChange={(v) => set('line_type', v)} />
+                <Field {...common} name="address" label="Address" span={3} />
+                <Field {...common} name="state" label="State" placeholder="CA" span={1} />
+                <Field {...common} name="zip" label="ZIP" placeholder="90012" span={2} />
               </section>
 
-              <section className="grid grid-cols-2 gap-x-3 gap-y-4">
-                <h3 className="col-span-2 text-sm font-semibold">Debt</h3>
-                <Field {...common} name="creditor" label="Creditor" className="col-span-2" />
-                <Field {...common} name="account_number" label="Account number" placeholder="ACC-2001" />
+              <section className="grid grid-cols-6 gap-x-4 gap-y-4">
+                <SectionTitle icon={Receipt}>Debt</SectionTitle>
+                <Field {...common} name="creditor" label="Creditor" span={6} />
+                <Field
+                  {...common}
+                  name="account_number"
+                  label="Account number"
+                  placeholder="ACC-2001"
+                  span={3}
+                />
                 <Field
                   {...common}
                   name="amount"
-                  label="Amount owed (USD)"
-                  placeholder="1250.00"
+                  label="Amount owed"
+                  placeholder="1,250.00"
+                  prefix="$"
+                  span={3}
                 />
               </section>
 
-              <section className="grid grid-cols-2 gap-x-3 gap-y-4 rounded-lg border bg-card p-4">
-                <div className="col-span-2 space-y-1">
-                  <h3 className="text-sm font-semibold">Consent to be called</h3>
-                  <p className="text-xs text-muted-foreground">
-                    Fill this in only if the person has given consent, and say where. If you leave
-                    it empty, they are saved but cannot be called until consent is recorded.
-                  </p>
+              <section className="grid grid-cols-6 gap-x-4 gap-y-4 rounded-xl border bg-muted/40 p-5">
+                <div className="col-span-6 flex items-start gap-3">
+                  <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-md bg-background text-muted-foreground ring-1 ring-border">
+                    <ShieldCheck className="size-4" aria-hidden />
+                  </span>
+                  <div className="space-y-0.5">
+                    <h3 className="text-sm font-semibold">Consent to be called</h3>
+                    <p className="text-xs leading-relaxed text-muted-foreground">
+                      Fill this in only if the person has given consent, and say where. If you leave
+                      it empty, they are saved but cannot be called until consent is recorded.
+                    </p>
+                  </div>
                 </div>
                 <Field
                   {...common}
@@ -220,13 +285,19 @@ export function AddPersonDialog({ open, onOpenChange, onAdded }: Props) {
               </section>
               {error && <Notice message={error} />}
             </div>
-            <div className="flex justify-end gap-2 border-t px-6 py-4">
-              <Button type="button" variant="ghost" onClick={() => close(false)}>
-                Cancel
-              </Button>
-              <Button type="submit" disabled={busy}>
-                {busy ? 'Adding' : 'Add person'}
-              </Button>
+
+            <div className="flex items-center justify-between gap-3 border-t bg-muted/30 px-7 py-4">
+              <span className="text-xs text-muted-foreground">
+                Every field except consent is needed.
+              </span>
+              <div className="flex gap-2">
+                <Button type="button" variant="ghost" onClick={() => close(false)}>
+                  Cancel
+                </Button>
+                <Button type="submit" disabled={busy}>
+                  {busy ? 'Adding' : 'Add person'}
+                </Button>
+              </div>
             </div>
           </form>
         )}
