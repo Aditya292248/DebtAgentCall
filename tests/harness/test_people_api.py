@@ -289,6 +289,7 @@ def test_a_duplicate_account_number_is_409_and_writes_nothing(created):
     [
         ("phone", "2135550123"),
         ("phone", "+0123456"),
+        ("phone", "+12"),
         ("zip", "9001"),
         ("state", "ZZ"),
         ("state", "ca"),
@@ -336,3 +337,19 @@ def test_no_response_holds_a_whole_phone_number(created):
     for res in responses:
         assert body["phone"] not in res.text and body["phone"][2:] not in res.text
     assert responses[0].json()["phone"] == "***-***-" + body["phone"][-4:]
+
+
+@pytest.mark.db
+def test_the_operator_chat_tools_leave_an_archived_person_out(created):
+    from harness.operator_reads import list_debtors
+
+    account = add_callable(created)["account_number"]
+
+    def listed() -> list[str]:
+        with connect() as conn:
+            out = list_debtors(conn, "balance", "", 1000, WHEN)
+        return [d["account"] if "account" in d else str(d) for d in out["debtors"]]
+
+    assert any(account in x for x in listed())
+    client.post(f"/api/people/{account}/archive")
+    assert not any(account in x for x in listed())

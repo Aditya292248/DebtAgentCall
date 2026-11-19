@@ -126,10 +126,11 @@ FIND_SQL = """
     left join lateral (
         select e164 from public.phone where debtor_id = p.id order by e164 limit 1
     ) ph on true
-    where lower(p.first_name || ' ' || p.last_name) like %s
+    where p.archived_at is null
+      and (lower(p.first_name || ' ' || p.last_name) like %s
        or (%s <> '' and exists (
             select 1 from public.phone x
-            where x.debtor_id = p.id and x.e164 like %s))
+            where x.debtor_id = p.id and x.e164 like %s)))
     order by d.account_number
     limit %s
 """

@@ -41,7 +41,7 @@ export default function App() {
   const { debts, archived, dbError, apiError, reload } = useDebts(atIso)
   const [adding, setAdding] = useState(false)
   const selectedDebt = [...debts, ...archived].find((d) => d.account === selected)
-  const accounts = new Map(debts.map((d) => [d.id, d.name]))
+  const accounts = new Map([...debts, ...archived].map((d) => [d.id, d.name]))
   const atLabel = at
     ? `Checked for ${new Date(at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}`
     : 'Checked for right now'

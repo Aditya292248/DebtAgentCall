@@ -174,6 +174,9 @@ def check_person(fields: dict[str, Any], today: date | None = None) -> dict[str,
         if value is not None and len(value) > MAX_TEXT:
             problems[name] = f"must be at most {MAX_TEXT} characters"
     state = fields.get("state")
+    phone = fields.get("phone")
+    if "phone" not in problems and not (isinstance(phone, str) and len(phone) >= 9):
+        problems["phone"] = "must be E.164 with the country code, like +12135550123"
     if "state" not in problems and state not in US_STATES:
         problems["state"] = "is not a US state or territory code"
 
@@ -305,6 +308,9 @@ def _set_archived(
         if row is None:
             raise PersonNotFound(account)
         debtor_id, debt_id, name, archived_at = row
+        # Wait for a dial that holds this debt's lock, so it can't pass its checks and
+        # place a call after the archive: the dialer takes the same lock first.
+        conn.execute("select 1 from public.debt where id = %s for update", (debt_id,))
         if archive and archived_at is not None:
             raise WrongArchiveState(f"{account} is already archived")
         if not archive and archived_at is None:
