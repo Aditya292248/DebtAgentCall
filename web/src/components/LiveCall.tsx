@@ -94,13 +94,27 @@ function CallBody({ call }: { call: CallDetail }) {
   const timeline = buildTimeline(call)
   const end = useRef<HTMLDivElement>(null)
   const count = timeline.length
+  // Follow new turns only while the reader is at the bottom (or just opened the call).
+  const follow = useRef(true)
   useEffect(() => {
-    end.current?.scrollIntoView({ block: 'end' })
+    follow.current = true
+  }, [call.call_id])
+  useEffect(() => {
+    const box = end.current?.closest<HTMLElement>('.overflow-y-auto')
+    if (!box) return
+    const onScroll = () => {
+      follow.current = box.scrollHeight - box.scrollTop - box.clientHeight < 80
+    }
+    box.addEventListener('scroll', onScroll)
+    return () => box.removeEventListener('scroll', onScroll)
+  }, [])
+  useEffect(() => {
+    if (follow.current) end.current?.scrollIntoView({ block: 'end' })
   }, [count, call.call_id])
 
   return (
     <div className="space-y-5">
-      <header className="space-y-2">
+      <header className="sticky top-0 z-10 space-y-2 bg-background pb-3">
         <div className="flex items-baseline justify-between gap-3">
           <h3 className="text-base font-semibold">{call.debtor_name ?? 'Unknown caller'}</h3>
           <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
@@ -138,7 +152,7 @@ function CallBody({ call }: { call: CallDetail }) {
           <p className="text-sm text-muted-foreground">Nothing has been said yet.</p>
         )}
         {timeline.map((item) => (
-          <Row key={item.key} item={item} />
+          <Row key={item.key} item={item} ended={call.ended} />
         ))}
         {call.pending_plans.map((p, i) => (
           <PendingPlanNote key={i} plan={p} />
@@ -151,7 +165,7 @@ function CallBody({ call }: { call: CallDetail }) {
   )
 }
 
-function Row({ item }: { item: TimelineItem }) {
+function Row({ item, ended }: { item: TimelineItem; ended: boolean }) {
   if (item.kind === 'message') {
     const agent = item.message.speaker === 'agent'
     return (
@@ -168,7 +182,7 @@ function Row({ item }: { item: TimelineItem }) {
       </div>
     )
   }
-  if (item.kind === 'tool') return <Tool tool={item.tool} />
+  if (item.kind === 'tool') return <Tool tool={item.tool} ended={ended} />
   const { label, sentence } = describeEvent(item.event)
   return (
     <p className="px-1 text-xs leading-relaxed text-muted-foreground">
@@ -183,7 +197,7 @@ function Row({ item }: { item: TimelineItem }) {
   )
 }
 
-function Tool({ tool }: { tool: CallTool }) {
+function Tool({ tool, ended }: { tool: CallTool; ended: boolean }) {
   const args = JSON.stringify(tool.arguments, null, 2)
   return (
     <details className="group rounded-lg border bg-card text-xs" data-tool={tool.name}>
@@ -193,7 +207,9 @@ function Tool({ tool }: { tool: CallTool }) {
         <span>
           Ran <span className="font-medium text-foreground">{tool.name}</span>
         </span>
-        {tool.result === null && <span className="ml-auto">waiting for the answer</span>}
+        {tool.result === null && (
+          <span className="ml-auto">{ended ? 'no answer saved' : 'waiting for the answer'}</span>
+        )}
       </summary>
       <div className="space-y-3 border-t px-3 py-3">
         <section>
@@ -205,7 +221,7 @@ function Tool({ tool }: { tool: CallTool }) {
         <section>
           <h4 className="mb-1 text-muted-foreground">Result</h4>
           <pre className="rounded-md bg-muted p-2 font-mono leading-relaxed break-all whitespace-pre-wrap">
-            {tool.result ?? 'No answer saved yet.'}
+            {tool.result ?? (ended ? 'No answer was saved.' : 'No answer saved yet.')}
           </pre>
         </section>
       </div>
