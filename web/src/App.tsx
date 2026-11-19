@@ -1,10 +1,11 @@
-import { ChartColumn, Clock, Moon, ScrollText, Sun } from 'lucide-react'
+import { ChartColumn, Clock, Moon, Radio, ScrollText, Sun } from 'lucide-react'
 import { useState } from 'react'
 
 import { AuditLog } from '@/components/AuditLog'
 import { ChatPanel } from '@/components/ChatPanel'
 import { DebtorDetail } from '@/components/DebtorDetail'
 import { DebtorList } from '@/components/DebtorList'
+import { LiveCall } from '@/components/LiveCall'
 import { Overview } from '@/components/Overview'
 import { Button } from '@/components/ui/button'
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from '@/components/ui/sheet'
@@ -14,7 +15,7 @@ import { useDebts } from '@/lib/debts'
 import { applyTheme, loadTheme, type Theme } from '@/lib/theme'
 
 /** What the side sheet shows, if it is open. */
-type Panel = 'debtor' | 'overview' | 'log'
+type Panel = 'debtor' | 'overview' | 'log' | 'call'
 
 /** The value a datetime-local input wants, for a Date in the browser's own zone. */
 function toLocalInput(date: Date): string {
@@ -35,6 +36,8 @@ export default function App() {
   const [at, setAt] = useState('')
   const [selected, setSelected] = useState<string | null>(null)
   const [panel, setPanel] = useState<Panel | null>(null)
+  // The call the live view shows; null means the most recent one.
+  const [callId, setCallId] = useState<string | null>(null)
 
   const atIso = at ? new Date(at).toISOString() : null
   const { debts, dbError, apiError } = useDebts(atIso)
@@ -75,6 +78,7 @@ export default function App() {
     debtor: selectedDebt?.name ?? 'Debtor',
     overview: 'Overview',
     log: 'Compliance log',
+    call: 'Live call',
   }
 
   return (
@@ -100,6 +104,9 @@ export default function App() {
             Now
           </Button>
           <span aria-hidden className="mx-2 h-5 w-px bg-border" />
+          <Button variant="ghost" onClick={() => setPanel('call')}>
+            <Radio /> Live call
+          </Button>
           <Button variant="ghost" onClick={() => setPanel('overview')}>
             <ChartColumn /> Overview
           </Button>
@@ -127,11 +134,17 @@ export default function App() {
           />
         </aside>
         <main className="min-h-0 min-w-0">
-          <ChatPanel precallCheck={precallCheck} />
+          <ChatPanel
+            precallCheck={precallCheck}
+            onOpenCall={(id) => {
+              setCallId(id)
+              setPanel('call')
+            }}
+          />
         </main>
       </div>
       <Sheet open={shown !== null} onOpenChange={(open) => !open && setPanel(null)}>
-        <SheetContent>
+        <SheetContent className={shown === 'call' ? 'max-w-2xl' : undefined}>
           <div className="space-y-4 border-b px-6 pt-5 pb-4">
             <SheetTitle>{shown ? titles[shown] : ''}</SheetTitle>
             <SheetDescription className="sr-only">
@@ -150,6 +163,9 @@ export default function App() {
                 <TabsTrigger value="log" className="px-3">
                   Compliance log
                 </TabsTrigger>
+                <TabsTrigger value="call" className="px-3">
+                  Live call
+                </TabsTrigger>
               </TabsList>
             </Tabs>
           </div>
@@ -159,6 +175,7 @@ export default function App() {
             )}
             {shown === 'overview' && <Overview debts={debts} atLabel={atLabel} />}
             {shown === 'log' && <AuditLog accounts={accounts} />}
+            {shown === 'call' && <LiveCall callId={callId} onSelect={setCallId} />}
           </div>
         </SheetContent>
       </Sheet>

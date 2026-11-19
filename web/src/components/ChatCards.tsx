@@ -121,7 +121,13 @@ export function ToolCallCard({ call }: { call: ToolCall }) {
 }
 
 /** What the server did after an approval: blocked by the checks, or dialed. */
-export function DialResult({ dial }: { dial: Dial }) {
+export function DialResult({
+  dial,
+  onWatch,
+}: {
+  dial: Dial
+  onWatch?: (callId: string) => void
+}) {
   if (dial.blocked) {
     return (
       <div className="flex flex-wrap items-center gap-1.5 text-xs">
@@ -140,6 +146,15 @@ export function DialResult({ dial }: { dial: Dial }) {
         Outcome <span className="font-medium text-foreground">{dial.outcome ?? 'unknown'}</span>
       </span>
       {dial.call_id && <span>call {dial.call_id}</span>}
+      {dial.call_id && onWatch && (
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => onWatch(dial.call_id as string)}
+        >
+          Watch live
+        </Button>
+      )}
     </div>
   )
 }
