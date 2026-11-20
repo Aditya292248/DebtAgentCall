@@ -16,6 +16,7 @@ import pytest
 
 from harness import Agent
 from harness.db import DEFAULT_DATABASE_URL, database_url, find_account
+from harness.tool_outcome import tool_body
 from harness.tools import default_tools, lookup_account, run_tool
 from model import fake, tool_call, tool_reply
 
@@ -60,7 +61,7 @@ def test_names_match_without_case_or_extra_spaces():
 def test_the_agent_loop_gets_its_answer_from_the_database(no_instructions: Path):
     def model(msgs: list[dict]):
         if msgs[-1]["role"] == "tool":
-            account = json.loads(msgs[-1]["content"])
+            account = json.loads(tool_body(msgs[-1]["content"]))
             return f"You owe ${account['balance']} to {account['creditor']}."
         return tool_reply(tool_call("lookup_account", name="Sam Doe"))
 
@@ -70,7 +71,7 @@ def test_the_agent_loop_gets_its_answer_from_the_database(no_instructions: Path)
 
     assert reply == "You owe $1250.00 to Northwind Furniture."
     assert [m["role"] for m in agent.messages] == ["user", "assistant", "tool", "assistant"]
-    assert json.loads(agent.messages[2]["content"])["account_id"] == "ACC-1001"
+    assert json.loads(tool_body(agent.messages[2]["content"]))["account_id"] == "ACC-1001"
 
 
 @pytest.mark.db

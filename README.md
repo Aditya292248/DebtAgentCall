@@ -18,6 +18,7 @@ harness/
   agent.py              Agent, which keeps the conversation and resends it every turn
   instructions.py       load_system_prompt(path), which reads the system prompt from a file
   tools.py              Tool, ToolRegistry, run_tool() and the first tool, lookup_account
+  tool_outcome.py       ToolOutcome: the one outcome every tool call ends in, and the text the model reads
   db.py                 connect(), find_account(name) and the pre-call loaders, which read Postgres
   precall.py            check_and_record(conn, account, when): run the pre-call checks, log every decision
   memory.py             Session, JsonlSession and PostgresSession: each call's saved history
@@ -164,9 +165,27 @@ print(agent.run("I'm Sam Doe. How much do I owe?"))  # the balance comes from th
 
 There is one tool so far, `lookup_account(name)`. It reads the database (see below) and returns the matching account, or `error: no account found for '...'`.
 
-A bad tool request never crashes the loop. An unknown tool, broken JSON, a missing or extra argument, or an error inside the tool all come back to the model as an `error: ...` message, so it can try again. Every tool request gets a result.
+A bad tool request never crashes the loop. An unknown tool, broken JSON, a missing or extra argument, or an error inside the tool all come back to the model as an `error: ...` message, so it can read what went wrong. Every tool request gets a result, and every result has one outcome (below).
 
 If the model keeps asking for tools, `run()` stops after `max_steps` model calls (10 by default) and returns `stopped: used all N steps without a final answer`. `send()` still makes exactly one call and runs no tools.
+
+### Tool outcomes
+
+Every tool call ends in exactly one outcome (`harness/tool_outcome.py`), and the model is told which on the first line of the tool message: `outcome: success`, then the text.
+
+| Outcome | Meaning |
+| --- | --- |
+| `success` | The tool ran and returned a result. |
+| `error` | It ran and failed cleanly: bad arguments, an unknown tool, a result that isn't text, or an `error:` result of its own. A tool that raises is `error` only if it is safe to retry. |
+| `timeout` | A tool that is safe to retry did not finish within its `timeout_seconds`. |
+| `denied` | Not allowed: a compliance gate block, or the approver said no. Retrying won't change it. |
+| `aborted` | The turn was cancelled (`Agent.abort()`) before the tool started, so it never ran. |
+| `not_started` | An earlier call in the same batch ended `unknown` or was aborted, so this one was held back. |
+| `unknown` | Nobody can tell whether it ran: a crash between the request and its saved result, an exception from a tool that may have written, or a timeout of a tool with side effects. Never retried automatically. |
+
+A `Tool` is `safe_to_retry=False` unless it only reads. Today that is `lookup_account` (both versions), `load_skill` and the operator's read tools (`find_debtor`, `check_call`, `call_status`, `payment_history`, `on_time_report`, `list_debtors`, `account_summary`, `call_history`, `next_allowed_call`, `portfolio_summary`, `audit_for`). `run_tool_result()` gives the outcome; `run_tool()` returns the same text as before. `Agent(on_tool_outcome=...)` is called once per tool call, for logging.
+
+On a live call an `unknown` outcome is treated like a failed save: the fixed line and a hangup, and a person checks. In the operator chat, an approved payment, note, callback or dial that fails part-way is "not confirmed": it is never marked done and never run a second time.
 
 ## The database
 
@@ -370,7 +389,7 @@ Agent(session=JsonlSession.for_call("sessions", "call_123")).run("What name did 
 A crash can leave a few kinds of damage, and each one is handled:
 
 - If the process died while writing a line, that half line is skipped on load and cut off before the next write. A broken line anywhere else is treated as corruption and raises an error.
-- If a turn died after the model asked for a tool but before the result was saved, the next load adds a placeholder result. Without it, the model API would reject the history.
+- If a turn died after the model asked for a tool but before the result was saved, the next load adds a result with the outcome `unknown`, since the tool may have run. Without a result, the model API would reject the history.
 - If a model call fails, the turn is taken back out of the saved history too, so a retry doesn't send the caller's words twice.
 
 The `call_message` table needs the new migration. Run `supabase migration up` on an existing local database, or `supabase db reset` to rebuild it.

@@ -712,6 +712,7 @@ def _locked_turn(
 
     live = LiveTools(debtor, state, phone, turn.open_backend, before_first_save=mark_started)
     agent.tools = live.registry(offered=state.stage == Stage.DISCUSS)
+    agent.on_tool_outcome = live.on_outcome
     if state.stage != Stage.DISCUSS:
         # No tools offered and no skill playbooks before verify and disclosure.
         agent.skills = lambda: []  # type: ignore[method-assign]

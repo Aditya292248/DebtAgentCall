@@ -193,7 +193,7 @@ def test_model_loads_a_skill_and_sees_its_body(skills_dir: Path, no_instructions
     assert calls[1][-1] == {
         "role": "tool",
         "tool_call_id": "call_1",
-        "content": "SECRET-HARDSHIP-STEPS",
+        "content": "outcome: success\nSECRET-HARDSHIP-STEPS",
     }
 
 

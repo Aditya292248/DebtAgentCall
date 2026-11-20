@@ -11,6 +11,7 @@ Before DISCUSS the tools are not offered to the model (no schemas), as before.
 A tool the model asks for anyway still runs through the gate, so
 ``lookup_account`` comes back as ``error: blocked`` rather than an account.
 The state the gate reads is the server's, never anything the model said.
+A tool whose outcome is ``unknown`` (``on_outcome``) fails the turn like a failed save.
 
 The backend (store, audit writer, flags, plan policy) is opened only when the
 model first calls a tool, so a turn without tools never touches the database.
@@ -53,6 +54,7 @@ from harness.call_tools import (
     audit_to_conn,
     load_plan_policy,
 )
+from harness.tool_outcome import ToolOutcome, ToolResult
 from harness.tools import Tool, ToolRegistry
 
 log = logging.getLogger(__name__)
@@ -193,6 +195,14 @@ class LiveTools:
         if self.failure is None:
             self.failure = why
 
+    def on_outcome(self, call_id: str, name: str, result: ToolResult) -> None:
+        """``Agent.on_tool_outcome``: a tool whose outcome is unknown may have saved
+        something, so the turn fails closed like a failed save: nothing the model says
+        is spoken, a fixed line and a hangup, and a person checks."""
+        log.info("tool %s (%s): %s", name, call_id, result.outcome.value)
+        if result.outcome is ToolOutcome.UNKNOWN:
+            self.fail(f"{name} ended with an unknown outcome: {result.text}")
+
     def before_save(self) -> None:
         """Run ``before_first_save`` once, before this turn's first row is written."""
         hook, self._before_first_save = self._before_first_save, None
@@ -212,7 +222,13 @@ class LiveTools:
         call it makes anyway still goes through the gate."""
         spec = CallTools(self._context(MemoryCallStore(), lambda *a: None, [], PlanPolicy()))
         tools = [
-            Tool(t.name, t.description, t.params, partial(self._run, t.name))
+            Tool(
+                t.name,
+                t.description,
+                t.params,
+                partial(self._run, t.name),
+                safe_to_retry=t.safe_to_retry,
+            )
             for t in spec.registry()
         ]
         return ToolRegistry(tools) if offered else _OfferedTools(tools)
