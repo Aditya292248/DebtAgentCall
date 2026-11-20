@@ -112,6 +112,7 @@ from dataclasses import dataclass, replace
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 
 from compliance import Decision, Flag, SpeechState, block, check_sentence, split_sentences
@@ -123,6 +124,7 @@ from harness.memory import PostgresSession, Session
 from harness.stages import ENDING, STOPPED_CLOSE, instructions_path, next_stage, purpose_line
 from model import Provider
 from model.provider import _load_dotenv
+from phone import timing
 from phone.call_end import EndedCall, EndResult, parse_ended, record_call_end
 from phone.live_tools import (
     COMMITMENT_RULE,
@@ -323,6 +325,7 @@ def create_app(
     hold_after: float = HOLD_AFTER,
     on_call_ended: CallEnded | None = None,
     load_earlier: LoadEarlier = earlier_from_db,
+    record_timing: timing.RecordTiming | None = None,
 ) -> FastAPI:
     """The webhook app.
 
@@ -345,6 +348,9 @@ def create_app(
     ``on_call_ended(ended)`` records a finished call (database, and ``provider`` for the
     summary's narrative, by default). ``load_earlier(debt_id, call_id)`` reads the
     earlier calls' summaries; they reach the model only once the person is verified.
+    ``record_timing(row)`` stores each staged turn's timing (``phone/timing.py``) after
+    the reply has been sent; None (the default) turns timing off. ``uv run serve``
+    passes the database writer. A failed write is logged and changes nothing.
     ``stages=False`` turns the call stages and the sentence filter off.
     """
     if secret is None:
@@ -376,10 +382,13 @@ def create_app(
 
     @app.post(WEBHOOK_PATH)
     async def agentphone(request: Request) -> Response:
+        timer = timing.start(record_timing)
         raw = await request.body()  # the exact bytes that were signed
         problem = verify(raw, request.headers, secret, clock())
         if problem:
             return JSONResponse({"error": problem}, status_code=401)
+        if timer is not None:
+            timer.mark_verified()
 
         webhook_id = request.headers.get(ID_HEADER)
         if webhook_id and (earlier := seen.get(webhook_id)) is not None:
@@ -394,12 +403,26 @@ def create_app(
 
         reply = await _handle(envelope, turn, webhook_id)
         if isinstance(reply, _Live):
-            return await reply.respond(seen, webhook_id)
+            return await reply.respond(seen, webhook_id, timer)
         if webhook_id:
             seen.remember(webhook_id, reply)
-        return JSONResponse(reply)
+        return _json(reply, timer)
 
     return app
+
+
+def create_served_app() -> FastAPI:
+    """The app ``uv run serve`` runs: ``create_app`` with each turn's timing saved."""
+    return create_app(record_timing=timing.record_in_db)
+
+
+def _json(body: dict, timer: timing.TurnTimer | None) -> JSONResponse:
+    """A plain reply; the turn's timing is written after it has been sent."""
+    if timer is None:
+        return JSONResponse(body)
+    timer.first_line()
+    timer.finish()
+    return JSONResponse(body, background=BackgroundTask(timer.write))
 
 
 @dataclass(frozen=True)
@@ -462,7 +485,9 @@ class _Live:
         self._task = asyncio.ensure_future(run())
         return self
 
-    async def respond(self, seen: _SeenIds, webhook_id: str | None) -> Response:
+    async def respond(
+        self, seen: _SeenIds, webhook_id: str | None, timer: timing.TurnTimer | None = None
+    ) -> Response:
         """One JSON reply if the turn finished before anything was sent, else NDJSON."""
         first: tuple[str, object] | None
         try:
@@ -472,26 +497,43 @@ class _Live:
         if first is not None and isinstance(first[1], _Said):
             if webhook_id:
                 seen.remember(webhook_id, first[1].whole)
-            return JSONResponse(first[1].whole)
+            return _json(first[1].whole, timer)
         if first is not None and isinstance(first[1], Exception):
             raise first[1]  # nothing was sent yet: a 500, as before streaming
         lead = HOLD_LINE if first is None else str(first[1])
-        return StreamingResponse(self._lines(lead, seen, webhook_id), media_type=NDJSON)
+        if timer is not None:
+            timer.hold, timer.streamed = first is None, True
+        return StreamingResponse(
+            self._lines(lead, seen, webhook_id, timer),
+            media_type=NDJSON,
+            background=None if timer is None else BackgroundTask(timer.write),
+        )
 
     async def _lines(
-        self, lead: str, seen: _SeenIds, webhook_id: str | None
+        self,
+        lead: str,
+        seen: _SeenIds,
+        webhook_id: str | None,
+        timer: timing.TurnTimer | None = None,
     ) -> AsyncIterator[bytes]:
+        if timer is not None:
+            timer.first_line()
         yield ndjson_line(interim(lead))
         while True:
             _, value = await self._events.get()
             if isinstance(value, _Said):
                 if webhook_id:
                     seen.remember(webhook_id, value.whole)
+                if timer is not None:
+                    timer.finish()
                 yield ndjson_line(value.last)
                 return
             if isinstance(value, Exception):
                 # Lines were already spoken, so a 500 is too late: close the turn safely.
                 log.error("a turn failed after it started speaking", exc_info=value)
+                if timer is not None:
+                    timer.kind = "failure"
+                    timer.finish()
                 yield ndjson_line(say(SAFE_LINE))
                 return
             yield ndjson_line(interim(str(value)))
@@ -566,6 +608,7 @@ def _staged_reply(
     phone = data.get("to") if outbound else data.get("from")
     if not (isinstance(call_id, str) and call_id and isinstance(phone, str) and phone):
         return say_and_hangup(CANT_CONTINUE)  # can't tell whose call this is
+    timing.set_turn(call_id=call_id)
     debtor = turn.find_debtor(phone)
     if debtor is None:
         return say_and_hangup(CANT_CONTINUE)
@@ -575,9 +618,12 @@ def _staged_reply(
         # A webhook we already answered (a retry, maybe after a restart) gets the
         # same reply again: no model, no tools, nothing saved twice.
         if webhook_id and (earlier := _earlier_reply(turn, call_id, webhook_id)) is not None:
+            timing.set_kind("replay")
             return earlier
         # Stop triggers come first: the model never sees a turn that must end the call.
-        if hits := detect(transcript):
+        with timing.span():
+            hits = detect(transcript)
+        if hits:
             return _stop_turn(turn, call_id, debtor, phone, transcript, hits, webhook_id)
         return _locked_turn(turn, call_id, debtor, phone, transcript, webhook_id, emit)
 
@@ -634,6 +680,9 @@ def _stop_turn(
     except Exception:
         log.exception("call %s: could not read the call state for a stop trigger", call_id)
     verified = state is not None and state.verified  # unreadable state: not verified
+    timing.set_kind("stop")
+    if state is not None:
+        timing.set_turn(seq=state.turns + 1, stage=state.stage.value)
     trigger = _pick(hits, verified)
     stop = Stop(trigger, call_id, debtor, phone, state.stage if state else None, verified)
     try:
@@ -685,7 +734,9 @@ def _locked_turn(
         return say_and_hangup(CANT_CONTINUE)  # the saved call is about another debt
 
     disclosed_before = state.disclosed
-    state, fixed = next_stage(state, transcript, debtor)
+    with timing.span():
+        state, fixed = next_stage(state, transcript, debtor)
+    timing.set_turn(seq=state.turns, stage=state.stage.value)
     if fixed is not None and state.disclosed and not disclosed_before:
         state, fixed = _add_purpose(turn, state, fixed, call_id, debtor)
     if fixed is not None:
@@ -710,6 +761,7 @@ def _locked_turn(
     live = LiveTools(debtor, state, phone, turn.open_backend, before_first_save=mark_started)
     agent.tools = live.registry(offered=state.stage == Stage.DISCUSS)
     agent.on_tool_outcome = live.on_outcome
+    timing.attach(agent)
     if state.stage != Stage.DISCUSS:
         # No tools offered and no skill playbooks before verify and disclosure.
         agent.skills = lambda: []  # type: ignore[method-assign]
@@ -780,6 +832,8 @@ def _model_turn(
         fallback = PENDING_LINE if pending else SAFE_LINE
     elif not spoken:
         fallback = SAFE_LINE
+    if blocked is not None:
+        timing.set_kind("blocked")
     if live.ended and fallback == SAFE_LINE:
         fallback = STOPPED_CLOSE
     heard = " ".join(x for x in [*step, fallback] if x)
@@ -848,6 +902,7 @@ def _tools_failed(
     if last.get("role") == "assistant" and not last.get("tool_calls"):
         agent.messages[-1] = {**last, "content": CANT_CONTINUE}
         session.replace(agent.messages)
+    timing.set_kind("failure")
     state = live.state
     if state.stage != Stage.STOPPED:
         state = replace(state, stage=Stage.WRAP)

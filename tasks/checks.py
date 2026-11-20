@@ -2737,3 +2737,57 @@ def _demo_call_view() -> None:
 
 ACCEPTANCE["call-view"] = _accept_call_view
 DEMOS["call-view"] = _demo_call_view
+
+
+# ----------------------------------------------------------------------------
+# per-turn timing: what a turn costs on our side, from a simulated run
+# ----------------------------------------------------------------------------
+
+
+def _simulated_rows(calls: int) -> list[dict]:
+    import dataclasses
+
+    from tasks.latency_sim import simulate
+
+    return [dataclasses.asdict(r) for r in simulate(calls)]
+
+
+def _accept_latency() -> bool:
+    import json
+
+    rows = _simulated_rows(3)
+    kinds = {r["kind"] for r in rows}
+    stored = json.dumps(rows)
+    ok = (
+        len(rows) == 21  # 7 turns a call
+        and {"fixed", "model"} <= kinds
+        and all(r["model_calls"] == 0 for r in rows if r["kind"] == "fixed")
+        and all(r["model_calls"] >= 1 for r in rows if r["kind"] == "model")
+        and all(
+            r["first_line_ms"] is not None and r["first_line_ms"] <= r["total_ms"] for r in rows
+        )
+        and "Sam" not in stored
+        and "Northwind" not in stored
+    )
+    print(f"  {len(rows)} simulated turns, kinds {sorted(kinds)}")
+    return ok
+
+
+def _demo_latency() -> None:
+    from tasks.latency_report import render, slowest, summarize
+    from tasks.latency_sim import paired_overhead
+
+    calls = 100
+    rows = _simulated_rows(calls)
+    print(f"simulated, server overhead only, no model network time: {calls} calls\n")
+    print(render(summarize(rows), slowest(rows, full_ids=False)))
+    off, on = paired_overhead(calls)
+    off.sort()
+    on.sort()
+    mid = len(off) // 2
+    print(f"\nreply left the app, timing off vs on ({len(off)} turns each), p50 ms: "
+          f"{off[mid] * 1000:.2f} vs {on[mid] * 1000:.2f}")  # fmt: skip
+
+
+ACCEPTANCE["latency"] = _accept_latency
+DEMOS["latency"] = _demo_latency

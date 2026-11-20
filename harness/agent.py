@@ -58,7 +58,8 @@ Adapted from codingHarness.
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable, Generator
+import time
+from collections.abc import Callable, Generator, Iterator
 from pathlib import Path
 
 from harness.compact import SUMMARIZE_PROMPT, compact_messages, estimate_tokens, render
@@ -76,6 +77,35 @@ MAX_CONTEXT_TOKENS = 16_000  # set to your model's context length
 COMPACT_AT = 0.8  # compact once the next call passes this share of the limit
 KEEP_HEAD = 2  # first messages kept word for word: how the call opened
 KEEP_TAIL = 6  # recent messages kept word for word: what is being said now
+
+
+def _timed(pieces: Iterator, report: Callable[[float, float], None]) -> Iterator:
+    """Pass ``pieces`` on, adding up only the time spent waiting for the model itself
+    (not the time its reader spends between pieces), and report it once, when done."""
+    spent = 0.0
+    first: float | None = None
+    source = iter(pieces)
+    try:
+        while True:
+            began = time.perf_counter()
+            try:
+                piece = next(source)
+            except StopIteration:
+                spent += time.perf_counter() - began
+                return
+            took = time.perf_counter() - began
+            spent += took
+            if first is None:
+                first = took
+            yield piece
+    finally:
+        close = getattr(pieces, "close", None)
+        if callable(close):
+            close()
+        try:
+            report(spent, spent if first is None else first)
+        except Exception:  # noqa: BLE001 - timing must not end the turn
+            pass
 
 
 class Agent:
@@ -113,6 +143,10 @@ class Agent:
         self.keep_tail = keep_tail
         # Called as (tool_call_id, tool name, result) once per tool call, after it ends.
         self.on_tool_outcome = on_tool_outcome
+        # Optional timing hooks (phone/timing.py): (seconds in one streamed model call,
+        # seconds to its first output) and (tool name, seconds in that tool). Numbers only.
+        self.on_model_call: Callable[[float, float], None] | None = None
+        self.on_tool_time: Callable[[str, float], None] | None = None
         self._aborted = threading.Event()
         self.compactions = 0
         self.compact_error: str | None = None  # why the last compaction failed, if it did
@@ -225,6 +259,8 @@ class Agent:
                 tools=self._tools(skills).schemas() or None,
                 provider=self.provider,
             )
+            if self.on_model_call is not None:
+                pieces = _timed(pieces, self.on_model_call)
             try:
                 for piece in pieces:
                     if isinstance(piece, LLMResponse):
@@ -371,7 +407,10 @@ class Agent:
             if held is not None:
                 result = ToolResult(held, "")
             else:
+                began = time.perf_counter()
                 result = run_tool_result(tools, name, fn.get("arguments"))
+                if self.on_tool_time is not None:
+                    self.on_tool_time(name, time.perf_counter() - began)
                 if result.outcome is ToolOutcome.UNKNOWN:
                     held = ToolOutcome.NOT_STARTED
             self._add({"role": "tool", "tool_call_id": call["id"], "content": tool_message(result)})
