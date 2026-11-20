@@ -166,11 +166,11 @@ Every event has `stream`, `seq`, `type`, `body`, `cause`, `schema_version`, `cre
 | `webhook_replied` | `webhook_id`, `reply` | The webhook when the reply is final. `cause` is the `webhook_received`. |
 | `session_forked` | `from_stream`, `upto_seq` | Fork (3.7). First event of the new stream. |
 
-The seven tool outcomes, as the `tool-outcomes` work defines them: `success`, `error`, `timeout`, `denied`, `aborted_before_start`, `not_started`, `outcome_unknown`. In this design they are values of one event type, not seven types, because every fold wants "the last word on this `tool_call_id`" and one type gives that with one lookup. What each means for the fold:
+The seven tool outcomes, as the open tool-outcomes PR (#44, `harness/tool_outcome.py`) names them: `success`, `error`, `timeout`, `denied`, `aborted`, `not_started`, `unknown`. In this design they are values of one event type, not seven types, because every fold wants "the last word on this `tool_call_id`" and one type gives that with one lookup. What each means for the fold:
 
 - `success`, `error`, `timeout`, `denied`: the model is shown the content, as a `tool` message.
-- `aborted_before_start` and `not_started`: the model is told the tool did not run, so it may ask again.
-- `outcome_unknown`: the model is told the result is unknown and that it must not assume either way. It is the outcome written at resume when a `tool_requested` has no `tool_outcome` (3.6). A tool with a side effect is never run again because of it.
+- `aborted` and `not_started`: the tool did not run (the turn was cancelled, or an earlier call in the batch ended `unknown` or aborted).
+- `unknown`: nobody can tell whether the tool ran. It is the outcome written at resume when a `tool_requested` has no `tool_outcome` (3.6). A tool with a side effect is never run again because of it. On a live call #44 treats it like a failed save: the fixed line and a hang up, for a person to check; in the operator chat the action is never marked done and never rerun. The fold only records the outcome; what is said is decided by that code, not by the log.
 
 This replaces `unanswered_tool_calls` and its placeholder `INTERRUPTED` string (memory.py:50, 199-207), which says "it may not have run" in free text.
 
@@ -219,7 +219,7 @@ flowchart TD
     S --> V[call view and call_end]
     P --> OP[operator decide]
     Y --> WH[webhook reply]
-    X -->|outcome_unknown events| L
+    X -->|unknown events| L
 ```
 
 ### 3.1 The message list for the next request
@@ -267,13 +267,15 @@ Rendering a tool outcome into a message:
 
 ```python
 def tool_message(e: Event) -> dict:
+    """The tool message the model sees. #44 puts `outcome: <name>` on its first line;
+    the wording below is a placeholder for that module's own rendering."""
     b = e.body
     text = {
         "success": b["content"], "error": b["content"], "timeout": "error: the tool timed out",
         "denied": b["content"],
-        "aborted_before_start": "error: the tool did not run (the turn was stopped first)",
+        "aborted": "error: the tool did not run (the turn was stopped first)",
         "not_started": "error: the tool did not run",
-        "outcome_unknown": "error: the result is unknown; the tool may or may not have run. "
+        "unknown": "error: the result is unknown; the tool may or may not have run. "
                            "Do not assume either, and do not run it again without asking",
     }[b["outcome"]]
     return {"role": "tool", "tool_call_id": b["tool_call_id"], "content": text}
@@ -334,7 +336,7 @@ def pending_approvals(events: list[Event]) -> list[Approval]:
 
 Two choices to flag. First, compaction does not appear: an approval opened before a compaction is still pending after it, which is the fix for 1.4. Second, an approval whose causing tool outcome was withdrawn (the turn failed) is excluded, which keeps today's behaviour. If the owner prefers it to stay pending, drop the last condition.
 
-`Operator.decide` then closes the approval by appending `approval_closed` first, under the chat lock in `harness/api.py` (`_chat_lock`), and then does the write. If the process dies between the two, resume sees a closed approval with no result: it must be treated as `outcome_unknown` and shown to the operator, never redone. That is the same rule as for tools.
+`Operator.decide` then closes the approval by appending `approval_closed` first, under the chat lock in `harness/api.py` (`_chat_lock`), and then does the write. If the process dies between the two, resume sees a closed approval with no result: it must be treated as `unknown` and shown to the operator, never redone. That is the same rule as for tools.
 
 ### 3.5 The replay answer for a duplicate webhook
 
@@ -350,7 +352,7 @@ def replay(events: list[Event], webhook_id: str) -> Replay:
     return Replay.CANNOT_CONTINUE if started_a_row else Replay.RETRY
 ```
 
-This keeps today's three behaviours (`_earlier_reply`, webhook.py:588-611): the saved reply is sent again; a retry of a turn that started a tool row and never replied gets the fixed line and a hang up; and now also: a retry of a turn that had not yet done anything is simply run. It covers every webhook of the call, not only the newest, because the lookup is by id across the stream. The unique index (2.1) makes the first step safe across processes: a second `webhook_received` insert for the same id fails, and the loser reads the existing event and applies this fold instead of racing. On `RETRY` the turn reuses the existing `webhook_received` event and does not append another.
+Today (`_earlier_reply`, webhook.py:588-611) the saved reply is sent again, and a retry of a turn that saved a tool's row and never replied gets the fixed line and a hang up (`mark_started` is called only before the first row is saved, webhook.py:708-713). This fold is stricter: any `tool_requested` after the webhook counts, including a read-only `lookup_account` that saved nothing. That is the safer side and is open question 4. A retry of a turn that had not yet requested a tool is simply run. It covers every webhook of the call, not only the newest, because the lookup is by id across the stream. The unique index (2.1) makes the first step safe across processes: a second `webhook_received` insert for the same id fails, and the loser reads the existing event and applies this fold instead of racing. On `RETRY` the turn reuses the existing `webhook_received` event and does not append another.
 
 `_SeenIds` can stay as a fast path in front. It is no longer the thing correctness depends on.
 
@@ -361,11 +363,11 @@ def resume(events: list[Event]) -> list[Event]:
     """Events to append when a stream is opened after a crash: close every gap."""
     closing = []
     for req in open_tool_requests(events):          # tool_requested with no tool_outcome
-        closing.append(tool_outcome(req, "outcome_unknown"))
+        closing.append(tool_outcome(req, "unknown"))
     return closing
 ```
 
-The agent applies `resume()` when it is built, in the place `unanswered_tool_calls` is used today (agent.py:119-121). A crash mid-tool is never retried; the model is told the result is unknown. A turn that crashed before any tool request needs nothing: the next webhook sees `webhook_received` without `webhook_replied` and `replay` says `RETRY`.
+The agent applies `resume()` when it is built, in the place `unanswered_tool_calls` is used today (agent.py:119-121). A crash mid-tool is never retried; the result is recorded as `unknown` and handled as #44 does. A turn that crashed before any tool request needs nothing: the next webhook sees `webhook_received` without `webhook_replied` and `replay` says `RETRY`.
 
 ### 3.7 Forking
 
@@ -447,7 +449,7 @@ The steps are in order; each names its negative test (a test that fails if the c
 
 - A script, `uv run backfill-events`, converts existing `call_message` rows into events (one `stream_opened`, `user_turn` and `model_reply` and `tool_outcome` per message, `compaction` rows turned into a `compaction` event with `covers` computed by diffing against the previous list, `state` rows into `state_changed`). It is idempotent: a stream that already has events is skipped. Old calls that cannot be converted exactly keep a `legacy_import` event with the original rows' digest, and are read through the old path.
 - `Agent.__init__` loads with `messages(events)` and applies `resume()` in place of `unanswered_tool_calls`. `load_state` becomes the indexed query.
-- Negative tests: "a crash between `tool_requested` and `tool_outcome` resumes with `outcome_unknown` and the tool is not run again"; "deleting every snapshot does not change the folded history".
+- Negative tests: "a crash between `tool_requested` and `tool_outcome` resumes with `unknown` and the tool is not run again"; "deleting every snapshot does not change the folded history".
 - Rollback: a setting flips reads back to `call_message`. This is why dual writing continues here.
 
 ### 5.4 Step 4: approvals, webhook replay and the live view from the log
@@ -489,7 +491,7 @@ The log holds full transcripts and tool arguments, in one place, immutable. That
 
 ### 6.3 Migration risk
 
-This system places live calls. A bug in the fold that returns a different message list changes what the model sees mid-call, and a bug in `replay` could repeat a spoken line or, worse, run a tool twice. Mitigations: dual write with a shadow comparison for as long as it takes to see zero mismatches on real traffic (step 2); reads switched by a setting (step 3); `outcome_unknown` as the only resume path for tools; the compliance code (stop triggers, stages, sentence check) is not touched by any step.
+This system places live calls. A bug in the fold that returns a different message list changes what the model sees mid-call, and a bug in `replay` could repeat a spoken line or, worse, run a tool twice. Mitigations: dual write with a shadow comparison for as long as it takes to see zero mismatches on real traffic (step 2); reads switched by a setting (step 3); `unknown` as the only resume path for tools; the compliance code (stop triggers, stages, sentence check) is not touched by any step.
 
 ### 6.4 Determinism of folds
 
@@ -577,7 +579,7 @@ A straight answer for a small demo codebase, given it is the owner's decision.
 
 What to do instead, in order:
 
-1. Finish `tool-outcomes` as designed. Its event shape (`tool_requested`, `tool_outcome` with seven outcomes, `outcome_unknown` on resume) is the part of this design with the clearest payoff, and it is useful without a log.
+1. Finish `tool-outcomes` as designed. Its seven outcomes and the `unknown` result on resume are the part of this design with the clearest payoff, and they are useful without a log.
 2. Fix the approval problem on its own, in one small PR: keep opened approvals out of the compactable span (for example, a `pinned` flag on the tool message that `compact.split` will not cut into), or store approvals in a small table. Negative test: "an approval opened before a compaction is still pending after it". This is the one claim that cost something real.
 3. If the owner wants the "what did the model see" answer, do step 5's recording part alone: a small append-only `model_request` table with the parts and the digest. That is a day of work and needs no fold.
 4. Do steps 1 and 2 of the migration (the table and the dual write) only when there is a second reason: several servers, real call volume, or a need to prove the record to an outside party. Then the rest follows in order.
