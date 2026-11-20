@@ -1,0 +1,60 @@
+import { PhoneCall, ShieldCheck, UserPlus, type LucideIcon } from 'lucide-react'
+
+type Step = { icon: LucideIcon; title: string; body: string }
+
+const STEPS: Step[] = [
+  {
+    icon: UserPlus,
+    title: 'Add your people',
+    body: 'Each person, their phone number and what they owe. The form to add them is coming next.',
+  },
+  {
+    icon: ShieldCheck,
+    title: 'Checks run first',
+    body: 'Calling hours, call limits, consent and stop requests are checked by code before every call. The AI never decides.',
+  },
+  {
+    icon: PhoneCall,
+    title: 'You approve each call',
+    body: 'The agent asks you here. Nothing dials until you approve, and the checks run again at that moment.',
+  },
+]
+
+/** Shown in the chat while nobody has been added: what this is and the three steps.
+ *  Plain information only; it holds no data and does nothing when clicked. */
+export function GettingStarted() {
+  return (
+    <section aria-labelledby="getting-started" className="space-y-5">
+      <div className="space-y-1.5 text-center">
+        <h2 id="getting-started" className="text-lg font-semibold tracking-tight">
+          Welcome. Nobody is here yet.
+        </h2>
+        <p className="mx-auto max-w-md text-sm leading-relaxed text-muted-foreground">
+          This is a calm place to run debt-collection calls that follow the rules. Here is how it
+          works.
+        </p>
+      </div>
+      <ol className="grid gap-3 sm:grid-cols-3">
+        {STEPS.map(({ icon: Icon, title, body }, i) => (
+          <li
+            key={title}
+            className="flex flex-col gap-3 rounded-xl border bg-card p-4 shadow-xs transition-colors hover:bg-accent/40"
+          >
+            <div className="flex items-center justify-between">
+              <span className="flex size-9 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                <Icon className="size-[18px]" aria-hidden />
+              </span>
+              <span className="text-xs font-medium text-muted-foreground tabular-nums">
+                Step {i + 1}
+              </span>
+            </div>
+            <div className="space-y-1">
+              <h3 className="text-sm font-semibold">{title}</h3>
+              <p className="text-sm leading-relaxed text-muted-foreground">{body}</p>
+            </div>
+          </li>
+        ))}
+      </ol>
+    </section>
+  )
+}

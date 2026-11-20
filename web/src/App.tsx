@@ -3,6 +3,7 @@ import { useState } from 'react'
 
 import { AuditLog } from '@/components/AuditLog'
 import { ChatPanel } from '@/components/ChatPanel'
+import { GettingStarted } from '@/components/GettingStarted'
 import { DebtorDetail } from '@/components/DebtorDetail'
 import { DebtorList } from '@/components/DebtorList'
 import { LiveCall } from '@/components/LiveCall'
@@ -137,6 +138,7 @@ export default function App() {
         <main className="min-h-0 min-w-0">
           <ChatPanel
             precallCheck={precallCheck}
+            emptyIntro={loaded && debts.length === 0 && !dbError ? <GettingStarted /> : undefined}
             onOpenCall={(id) => {
               setCallId(id)
               setPanel('call')
