@@ -23,12 +23,12 @@ from fastapi.testclient import TestClient
 
 from harness import Agent
 from harness.memory import (
-    INTERRUPTED,
     JsonlSession,
     PostgresSession,
     Session,
     unanswered_tool_calls,
 )
+from harness.tool_outcome import INTERRUPTED, tool_message
 from harness.tools import ToolRegistry
 from model import FakeProvider, LLMResponse, Provider
 from model.fake import tool_call, tool_reply
@@ -199,7 +199,11 @@ def test_turn_that_died_after_a_tool_call_gets_a_placeholder(open_session, no_in
         system_prompt_path=no_instructions,
         session=open_session("call_crash"),
     )
-    placeholder = {"role": "tool", "tool_call_id": "call_9", "content": INTERRUPTED}
+    placeholder = {
+        "role": "tool",
+        "tool_call_id": "call_9",
+        "content": tool_message(INTERRUPTED),
+    }
     assert agent.messages[-1] == placeholder
     assert open_session("call_crash").load()[-1] == placeholder  # saved, not just in memory
 

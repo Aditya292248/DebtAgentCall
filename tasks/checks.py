@@ -883,6 +883,7 @@ def _accept_part17() -> bool:
 
 def _demo_part17() -> None:
     from harness.skills import skills_prompt
+    from harness.tool_outcome import tool_body
     from model import fake
     from model.fake import Reply, tool_call, tool_reply
 
@@ -899,7 +900,7 @@ def _demo_part17() -> None:
     reply = agent.run(_PART17_LINE)
     for m in agent.messages:
         if m["role"] == "tool":
-            first = m["content"].splitlines()[0]
+            first = tool_body(m["content"]).splitlines()[0]
             print(f"  load_skill -> {first} ...")
     print(f"  loaded: {_loaded_skills(agent.messages) or 'none'}")
     print(f"agent: {reply}")
@@ -1516,8 +1517,10 @@ def _part24_fake_model(messages: list[dict]):
         for c in m.get("tool_calls") or []
     }
     tool = asked.get(last.get("tool_call_id"))
-    body = str(last.get("content") or "")
-    if body.startswith("error"):
+    from harness.tool_outcome import outcome_of, tool_body
+
+    body = tool_body(str(last.get("content") or ""))
+    if outcome_of(str(last.get("content"))) != "success":
         return f"That didn't work: {body}"
     data = json.loads(body)
     if tool == "find_debtor":

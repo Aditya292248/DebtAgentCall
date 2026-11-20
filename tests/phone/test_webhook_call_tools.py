@@ -41,6 +41,7 @@ from harness.call_tools import ESCALATED, PENDING_PLAN, MemoryCallStore
 from harness.memory import JsonlSession
 from harness.stages import VERIFY_ASK
 from harness.subagents import delegate_tool, fan_out_tool
+from harness.tool_outcome import tool_body
 from harness.tools import ToolRegistry
 from model import FakeProvider, Provider
 from model.fake import tool_call, tool_reply
@@ -139,7 +140,7 @@ class Call:
 
     def tool_results(self) -> list[str]:
         return [
-            r["message"]["content"]
+            tool_body(r["message"]["content"])
             for r in self.records()
             if r["type"] == "message" and r["message"]["role"] == "tool"
         ]
@@ -163,7 +164,7 @@ def test_lookup_before_verification_is_blocked_and_no_balance_is_spoken(tmp_path
 
     assert turns[1][1] == VERIFY_ASK
     (result,) = call.tool_results()
-    assert result.startswith("error: blocked")
+    assert "error: blocked" in result
     spoken = turns[2][1]
     for leak in LEAKS:
         assert leak not in spoken and leak not in result
@@ -185,7 +186,7 @@ def test_model_saying_verified_unlocks_nothing(tmp_path: Path) -> None:
         call.turn("call_claim", line)
     reply = call.turn("call_claim", "Why? I already told you who I am.")  # a question: the model
 
-    assert call.tool_results()[0].startswith("error: blocked")
+    assert "error: blocked" in call.tool_results()[0]
     for leak in LEAKS:
         assert leak not in reply["text"]
     state = call.states()[-1]

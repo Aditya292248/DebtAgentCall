@@ -8,7 +8,10 @@ The model never runs anything. It replies with a request ("call lookup_account
 with name=Sam Doe"); ``run_tool`` checks the request, runs it, and returns a
 string. Every failure (unknown tool, broken JSON, missing or wrong arguments, an
 exception inside the tool) comes back as an ``error: ...`` string, so the model
-can read what went wrong and try again instead of the loop crashing.
+can read what went wrong instead of the loop crashing. ``run_tool_result`` also
+says how the call ended (``harness/tool_outcome.py``): a tool that raises, or
+outlives its time limit, and is not ``safe_to_retry`` is ``unknown``, never an
+automatic retry.
 
 A ``ToolRegistry`` is the set of tools one agent may use. ``default_tools()``
 holds the one tool so far, ``lookup_account``, which reads made-up accounts from
@@ -20,10 +23,12 @@ Adapted from codingHarness.
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 
 from harness.db import find_account
+from harness.tool_outcome import Denied, ToolError, ToolOutcome, ToolResult
 
 
 @dataclass(frozen=True)
@@ -32,6 +37,10 @@ class Tool:
     description: str
     params: dict[str, str]  # argument name -> description; all are required strings
     fn: Callable[..., str]  # fn(**arguments) -> result text
+    # Repeating it is harmless: only pure reads. Anything that writes or dials stays False,
+    # so a crash or timeout in the middle of it is "unknown" and never run again.
+    safe_to_retry: bool = False
+    timeout_seconds: float | None = None  # stop waiting after this long; None: no limit
 
     def schema(self) -> dict:
         return {
@@ -84,10 +93,52 @@ class ToolRegistry:
 
 
 def run_tool(registry: ToolRegistry, name: str, arguments: str | dict | None) -> str:
-    """Run one tool call from the model. Always returns a string, never raises."""
+    """Run one tool call from the model. Always returns a string, never raises.
+
+    The text is the same as before outcomes existed; ``run_tool_result`` adds which
+    outcome it was.
+    """
+    return run_tool_result(registry, name, arguments).text
+
+
+class _TimedOut(Exception):
+    pass
+
+
+def _error(text: str) -> ToolResult:
+    return ToolResult(ToolOutcome.ERROR, text)
+
+
+def _call(tool: Tool, args: dict) -> tuple[bool, object]:
+    """Run ``tool.fn``: ``(True, result)``, or ``(False, exception)``.
+
+    A tool with a time limit runs in a worker thread and is not waited for past it,
+    which gives ``(False, _TimedOut())``. The thread may still finish, and write.
+    """
+    if tool.timeout_seconds is None:
+        try:
+            return True, tool.fn(**args)
+        except Exception as exc:  # noqa: BLE001 - a tool bug must not kill the loop
+            return False, exc
+    box: list[tuple[bool, object]] = []
+
+    def work() -> None:
+        try:
+            box.append((True, tool.fn(**args)))
+        except Exception as exc:  # noqa: BLE001
+            box.append((False, exc))
+
+    worker = threading.Thread(target=work, name=f"tool-{tool.name}", daemon=True)
+    worker.start()
+    worker.join(tool.timeout_seconds)
+    return box[0] if box else (False, _TimedOut())
+
+
+def run_tool_result(registry: ToolRegistry, name: str, arguments: str | dict | None) -> ToolResult:
+    """Run one tool call and say how it ended. Never raises, and never runs a tool twice."""
     tool = registry.get(name)
     if tool is None:
-        return f"error: unknown tool {name!r}; available: {', '.join(registry.names())}"
+        return _error(f"error: unknown tool {name!r}; available: {', '.join(registry.names())}")
 
     # Models send arguments as a JSON string; a few servers already decode it.
     if isinstance(arguments, dict):
@@ -96,28 +147,40 @@ def run_tool(registry: ToolRegistry, name: str, arguments: str | dict | None) ->
         try:
             args = json.loads(arguments or "{}")
         except json.JSONDecodeError as exc:
-            return f"error: arguments for {name} are not valid JSON ({exc})"
+            return _error(f"error: arguments for {name} are not valid JSON ({exc})")
         if not isinstance(args, dict):
-            return f"error: arguments for {name} must be a JSON object"
+            return _error(f"error: arguments for {name} must be a JSON object")
 
     missing = [p for p in tool.params if p not in args]
     if missing:
-        return f"error: {name} is missing argument(s): {', '.join(missing)}"
+        return _error(f"error: {name} is missing argument(s): {', '.join(missing)}")
     extra = [a for a in args if a not in tool.params]
     if extra:
-        return f"error: {name} got unexpected argument(s): {', '.join(extra)}"
+        return _error(f"error: {name} got unexpected argument(s): {', '.join(extra)}")
     wrong = [a for a, v in args.items() if not isinstance(v, str)]
     if wrong:
-        return f"error: {name} argument(s) must be strings: {', '.join(wrong)}"
+        return _error(f"error: {name} argument(s) must be strings: {', '.join(wrong)}")
 
-    try:
-        result = tool.fn(**args)
-    except Exception as exc:  # noqa: BLE001 - a tool bug must not kill the loop
-        return f"error: {name} failed: {exc!r}"
+    ok, result = _call(tool, args)
+    if not ok:
+        if isinstance(result, _TimedOut):
+            text = f"error: {name} did not finish within {tool.timeout_seconds} seconds"
+            return ToolResult(
+                ToolOutcome.TIMEOUT if tool.safe_to_retry else ToolOutcome.UNKNOWN, text
+            )
+        text = f"error: {name} failed: {result!r}"
+        if isinstance(result, ToolError):
+            return _error(text)
+        # It raised, so it may have written first. Only a pure read is known to be harmless.
+        return ToolResult(ToolOutcome.ERROR if tool.safe_to_retry else ToolOutcome.UNKNOWN, text)
     # The result goes straight into a tool message, which must be text.
     if not isinstance(result, str):
-        return f"error: {name} returned {type(result).__name__}, not a string"
-    return result
+        return _error(f"error: {name} returned {type(result).__name__}, not a string")
+    if isinstance(result, Denied):
+        return ToolResult(ToolOutcome.DENIED, str(result))
+    if result.startswith("error:"):
+        return _error(result)
+    return ToolResult(ToolOutcome.SUCCESS, result)
 
 
 # ----------------------------------------------------------------------------
@@ -144,6 +207,7 @@ LOOKUP_ACCOUNT = Tool(
     ),
     params={"name": "The person's full name, for example 'Sam Doe'."},
     fn=lambda name: lookup_account(name),
+    safe_to_retry=True,
 )
 
 
