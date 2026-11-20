@@ -28,8 +28,9 @@ Loading is forgiving where a crash can leave damage and strict elsewhere:
     the next write cuts it off first, so it never ends up in the middle
   - a broken line anywhere else is an error: that's corruption, not a crash
   - a tool request whose result never got saved (the turn died mid-tool) gets a
-    placeholder result from ``unanswered_tool_calls``, because the model API
-    rejects a tool request with no answer
+    result with outcome ``unknown`` from ``unanswered_tool_calls``, because the
+    model API rejects a tool request with no answer and it is not known whether
+    the tool ran
 
 Adapted from codingHarness.
 """
@@ -44,10 +45,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from harness.tool_outcome import INTERRUPTED, tool_message
+
 if TYPE_CHECKING:
     import psycopg
 
-INTERRUPTED = "error: the call stopped before this tool finished; it may not have run"
 KINDS = ("session", "message", "compaction", "state")
 _SAFE_ID = re.compile(r"[A-Za-z0-9_-]{1,100}")
 
@@ -197,10 +199,14 @@ class PostgresSession(Session):
 
 
 def unanswered_tool_calls(messages: list[dict]) -> list[dict]:
-    """Placeholder results for tool requests that never got one, in request order."""
+    """An ``unknown`` result for each tool request that never got one, in request order.
+
+    A crash between the request and its saved result is the unknown case: the tool
+    may have run, so it is neither retried nor taken for a success.
+    """
     answered = {m["tool_call_id"] for m in messages if m.get("role") == "tool"}
     return [
-        {"role": "tool", "tool_call_id": call["id"], "content": INTERRUPTED}
+        {"role": "tool", "tool_call_id": call["id"], "content": tool_message(INTERRUPTED)}
         for m in messages
         for call in m.get("tool_calls") or []
         if call.get("id") not in answered

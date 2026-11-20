@@ -7,9 +7,6 @@ look at it (escalate).
 
 | kind                  | caller says, for example              | flag         | escalate |
 | --------------------- | ------------------------------------- | ------------ | -------- |
-| `attorney`            | "I have a lawyer", "call my attorney" | `attorney`   | yes      |
-| `bankruptcy`          | "I filed for bankruptcy", "chapter 7" | `bankruptcy` | yes      |
-| `deceased`            | "he passed away", "she died"          | `deceased`   | yes      |
 | `cease`               | "stop calling", "take me off your list" | `cease`    | no       |
 | `dispute`             | "that's not my debt", "I don't owe"   | none         | yes      |
 | `recording_objection` | "don't record this"                   | none         | no       |
@@ -30,10 +27,8 @@ Choices:
     kind fits, and neither one stops future calls to the right person.
 
 Matching ignores case and works on whole words. It is deliberately eager: a
-false alarm only ends the call politely, a miss can break the law. So any
-mention of a lawyer fires, even "my lawyer friend said this is fine", and
-"don't call me" fires even inside "please don't call me at work". It does
-not understand "not": "I'm not bankrupt" fires too.
+false alarm only ends the call politely, a miss can break the law. So
+"don't call me" fires even inside "please don't call me at work".
 
 Several triggers can fire at once. They come back in ``PRIORITY`` order, so
 the first one's ``close`` is the line to say.
@@ -63,12 +58,8 @@ class Trigger:
     escalate: bool  # a person must follow up
 
 
-# Most important first: who we may not talk to at all (lawyer, bankruptcy
-# stay, a death), then what the caller asks for, then a mixed-up call.
+# Most important first: what the caller asks for, then a mixed-up call.
 PRIORITY: tuple[str, ...] = (
-    "attorney",
-    "bankruptcy",
-    "deceased",
     "cease",
     "dispute",
     "recording_objection",
@@ -79,26 +70,6 @@ _NOT = r"(?:don'?t|do not|never)"
 _CALL = r"(?:call|calling|calls|contact|contacting|phone|phoning|ring|ringing|text|texting)"
 
 _PATTERNS: dict[str, list[str]] = {
-    "attorney": [
-        r"\b(?:lawyers?|attorneys?|counsel|solicitors?)\b",
-        r"\blegal (?:aid|representation|representative)\b",
-        r"\brepresented by\b",
-    ],
-    "bankruptcy": [
-        r"\bbankrupt(?:cy|cies)?\b",
-        r"\b(?:chapter|ch\.?)\s*(?:7|11|13|seven|eleven|thirteen)\b",
-    ],
-    "deceased": [
-        r"\bpassed (?:away|on)\b",
-        # A person who "passed", not a deadline that "has passed", and not
-        # someone who passed something ("passed me the phone", "passed the exam").
-        r"\b(?:he|she|they|husband|wife|mother|father|mom|mum|dad|son|daughter|brother"
-        r"|sister|partner|grandmother|grandfather)(?:'s| has| have| had| just)? passed\b"
-        r"(?!\s+(?:the|his|her|their|my|me|it|that|this|your|him|them|us)\b)",
-        r"\b(?:died|deceased)\b",
-        r"\b(?:is|was|'s) dead\b",
-        r"\bno longer (?:with us|alive|living)\b",
-    ],
     "cease": [
         rf"\b(?:stop|quit|cease)\s+(?:all\s+)?{_CALL}\b",
         rf"\b{_NOT}\s+(?:ever\s+)?{_CALL}\b",
@@ -155,25 +126,17 @@ _COMPILED: dict[str, list[re.Pattern[str]]] = {
 }
 
 FLAGS: dict[str, str | None] = {
-    "attorney": "attorney",
-    "bankruptcy": "bankruptcy",
-    "deceased": "deceased",
     "cease": "cease",
     "dispute": None,
     "recording_objection": None,
     "wrong_number": None,
 }
 
-_ESCALATE = frozenset({"attorney", "bankruptcy", "deceased", "dispute"})
+_ESCALATE = frozenset({"dispute"})
 
 # Fixed closing lines. None of them names the debt, the amount or the
 # creditor, so they are safe to say even to the wrong person.
 CLOSES: dict[str, str] = {
-    "attorney": "Thank you for letting me know. We'll be in touch with your attorney instead. "
-    "Goodbye.",
-    "bankruptcy": "Thank you for letting me know. I'll stop here and pass this to a specialist. "
-    "Goodbye.",
-    "deceased": "I'm very sorry for your loss. I'll end the call here. Goodbye.",
     "cease": "Understood. We'll stop calling you. Goodbye.",
     "dispute": "Thank you. I've noted that you dispute this, and someone will follow up "
     "in writing. Goodbye.",

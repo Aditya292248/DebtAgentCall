@@ -39,7 +39,7 @@
     open an approval like ``place_call``; nothing is written before it. A
     callback the pre-call checks would block at that moment is refused, both
     when it is asked for and again when it is approved.
-  - ``record_stop(debtor_id, kind)``: cease, dispute, attorney or bankruptcy.
+  - ``record_stop(debtor_id, kind)``: cease or dispute.
     It writes at once, with an audit row, and needs no approval, because a stop
     can only ever mean fewer calls. No tool removes a stop, records consent,
     edits a balance or deletes anything.
@@ -97,6 +97,7 @@ from harness import payments as pay
 from harness.agent import Agent
 from harness.bills import BillDb
 from harness.memory import Session
+from harness.tool_outcome import ToolOutcome, outcome_of, tool_body
 from harness.tools import Tool, ToolRegistry
 from model import Provider
 from phone.client import PhoneClient
@@ -212,7 +213,7 @@ def pending_approvals(messages: list[dict]) -> list[Approval]:
         if m.get("role") != "tool":
             continue
         try:
-            body = json.loads(m.get("content") or "")
+            body = json.loads(tool_body(m.get("content")))
         except (TypeError, ValueError):
             continue
         if isinstance(body, dict) and body.get("status") == NEEDS_APPROVAL:
@@ -244,7 +245,8 @@ def _tool_calls_since(messages: list[dict], start: int) -> list[dict[str, Any]]:
                 {
                     "name": fn.get("name"),
                     "arguments": fn.get("arguments"),
-                    "result": results.get(call.get("id")),
+                    "result": tool_body(results.get(call.get("id"))),
+                    "outcome": outcome_of(results.get(call.get("id"))),
                 }
             )
     return out
@@ -342,6 +344,7 @@ class Operator:
                     "name and masked phone number.",
                     {"query": "A name, part of a name, or phone digits."},
                     self.find_debtor,
+                    safe_to_retry=True,
                 ),
                 Tool(
                     "check_call",
@@ -349,6 +352,7 @@ class Operator:
                     "a call is allowed and, for each rule, its id and reason.",
                     {"debtor_id": debtor},
                     self.check_call,
+                    safe_to_retry=True,
                 ),
                 Tool(
                     "place_call",
@@ -362,6 +366,7 @@ class Operator:
                     "The status of a call attempt, by attempt id or call id.",
                     {"call_id": "The attempt id or call id from an earlier result."},
                     self.call_status,
+                    safe_to_retry=True,
                 ),
                 Tool(
                     "record_payment",
@@ -395,6 +400,7 @@ class Operator:
                         "since": "'last 3 days', 'yesterday', YYYY-MM-DD, or 'all'.",
                     },
                     self.payment_history,
+                    safe_to_retry=True,
                 ),
                 Tool(
                     "on_time_report",
@@ -402,6 +408,7 @@ class Operator:
                     "the plan's due dates, and the debts that have no plan.",
                     {},
                     self.on_time_report,
+                    safe_to_retry=True,
                 ),
                 Tool(
                     "list_debtors",
@@ -416,6 +423,7 @@ class Operator:
                         "limit": f"How many to show, up to {reads.MAX_LIST}.",
                     },
                     self.list_debtors,
+                    safe_to_retry=True,
                 ),
                 Tool(
                     "account_summary",
@@ -424,6 +432,7 @@ class Operator:
                     "and upcoming callbacks.",
                     {"debtor_id": debtor},
                     self.account_summary,
+                    safe_to_retry=True,
                 ),
                 Tool(
                     "call_history",
@@ -431,6 +440,7 @@ class Operator:
                     "calls in the last 7 days count toward the 7-in-7 limit.",
                     {"debtor_id": debtor},
                     self.call_history,
+                    safe_to_retry=True,
                 ),
                 Tool(
                     "next_allowed_call",
@@ -438,18 +448,21 @@ class Operator:
                     "no time will (a stop that waiting does not clear).",
                     {"debtor_id": debtor},
                     self.next_allowed_call,
+                    safe_to_retry=True,
                 ),
                 Tool(
                     "portfolio_summary",
                     "Totals for every debt by status, and payments and calls in a period.",
                     {"period": "'last 7 days', 'this month', 'today', YYYY-MM-DD, or 'all'."},
                     self.portfolio_summary,
+                    safe_to_retry=True,
                 ),
                 Tool(
                     "audit_for",
                     f"One debt's audit log, newest first, at most {reads.MAX_AUDIT} rows.",
                     {"debtor_id": debtor, "limit": f"Up to {reads.MAX_AUDIT}."},
                     self.audit_for,
+                    safe_to_retry=True,
                 ),
                 Tool(
                     "add_note",
@@ -472,13 +485,13 @@ class Operator:
                 ),
                 Tool(
                     "record_stop",
-                    "Record that a debtor asked us to stop (cease), disputes the debt, "
-                    "has an attorney, or filed for bankruptcy. Takes effect at once; "
+                    "Record that a debtor asked us to stop (cease) or disputes the debt. "
+                    "Takes effect at once; "
                     "calls are blocked from then on. It can't be undone in chat.",
                     {
                         "debtor_id": "The exact id find_debtor returned, e.g. 'ACC-1001'. "
                         "A name is refused.",
-                        "kind": "cease, dispute, attorney or bankruptcy.",
+                        "kind": "cease or dispute.",
                     },
                     self.record_stop,
                 ),
@@ -730,7 +743,12 @@ class Operator:
                 reason = str(exc)
                 audit_record(
                     conn,
-                    Decision(False, approval.action, reason, {"approval_id": approval.id, **d}),
+                    Decision(
+                        False,
+                        approval.action,
+                        reason,
+                        {"approval_id": approval.id, "outcome": ToolOutcome.DENIED.value, **d},
+                    ),
                     kind="payment",
                     call_id=self.session.call_id,
                     debt_id=account.debt_id if account else None,
@@ -745,6 +763,7 @@ class Operator:
                     {
                         **d,
                         "approval_id": approval.id,
+                        "outcome": ToolOutcome.SUCCESS.value,
                         "payment_id": payment_id,
                         "recorded_by": self._recorded_by(),
                         "balance_before_cents": account.balance_cents,
@@ -911,7 +930,12 @@ class Operator:
             except (reads.ReadError, pay.PaymentError, KeyError, ValueError) as exc:
                 audit_record(
                     conn,
-                    Decision(False, approval.action, str(exc), {"approval_id": approval.id}),
+                    Decision(
+                        False,
+                        approval.action,
+                        str(exc),
+                        {"approval_id": approval.id, "outcome": ToolOutcome.DENIED.value},
+                    ),
                     kind="operator",
                     call_id=self.session.call_id,
                     debt_id=row["debt_id"] if row else None,
@@ -923,7 +947,12 @@ class Operator:
                     True,
                     approval.action,
                     "approved by the operator",
-                    {"approval_id": approval.id, "id": written, **reads.mask_in(d)},
+                    {
+                        "approval_id": approval.id,
+                        "outcome": ToolOutcome.SUCCESS.value,
+                        "id": written,
+                        **reads.mask_in(d),
+                    },
                 ),
                 kind="operator",
                 call_id=self.session.call_id,
@@ -979,7 +1008,16 @@ class Operator:
             self.agent._add({"role": "assistant", "content": reply})
             return ChatTurn(reply=reply, pending_approvals=self.pending())
 
-        dial = self._dial(approval.debtor_id)
+        try:
+            dial = self._dial(approval.debtor_id)
+        except Exception as exc:  # noqa: BLE001 - it may have rung; dialing is never retried
+            self._audit_unknown(approval, repr(exc))
+            reply = (
+                f"{marker} Not confirmed: it is unknown whether the call to {approval.name} "
+                f"was placed ({exc!r}). It was not retried. Check call history before trying again."
+            )
+            self.agent._add({"role": "assistant", "content": reply})
+            return ChatTurn(reply=reply, pending_approvals=self.pending())
         if dial["blocked"]:
             reasons = "; ".join(dial["reasons"])
             reply = f"{marker} Not dialed: the checks block {approval.name} ({reasons})."
@@ -993,6 +1031,47 @@ class Operator:
         self.agent._add({"role": "assistant", "content": reply})
         return ChatTurn(reply=reply, pending_approvals=self.pending(), dial=dial)
 
+    def _attempt(
+        self, approval: Approval, write: Callable[[Approval], dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Run one approved write once. If it raises, whether it was saved is unknown:
+        say so, record that if the database allows, and never run it again. The approval
+        is already closed, so a second click finds nothing to run."""
+        try:
+            return write(approval)
+        except Exception as exc:  # noqa: BLE001 - the outcome is unknown, never "done"
+            self._audit_unknown(approval, repr(exc))
+            return {"written": False, "unknown": True, "reason": repr(exc)}
+
+    def _audit_unknown(self, approval: Approval, why: str) -> None:
+        try:
+            with self._connect() as conn, conn.transaction():
+                audit_record(
+                    conn,
+                    Decision(
+                        False,
+                        approval.action,
+                        "outcome unknown: not confirmed",
+                        {
+                            "approval_id": approval.id,
+                            "outcome": ToolOutcome.UNKNOWN.value,
+                            "error": why,
+                        },
+                    ),
+                    kind="operator",
+                    call_id=self.session.call_id,
+                    debt_id=None,
+                )
+        except Exception:  # noqa: BLE001 - the database may be what failed
+            pass
+
+    @staticmethod
+    def _not_confirmed(what: str, done: dict[str, Any]) -> str:
+        return (
+            f"Not confirmed: it is unknown whether {what} was saved ({done['reason']}). "
+            "Nothing was retried. Check the account before trying again."
+        )
+
     def _decide_payment(self, approval: Approval, approve: bool, marker: str) -> ChatTurn:
         d = approval.details
         what = (
@@ -1004,8 +1083,10 @@ class Operator:
         if not approve:
             reply = f"{marker} Not recorded: you denied {what}."
         else:
-            done = self._write_payment(approval)
-            if done["written"]:
+            done = self._attempt(approval, self._write_payment)
+            if done.get("unknown"):
+                reply = f"{marker} {self._not_confirmed(what, done)}"
+            elif done["written"]:
                 reply = (
                     f"{marker} Recorded {what}. Entry {done['payment_id']}. "
                     f"Balance now {done['balance_after']}."
@@ -1025,8 +1106,10 @@ class Operator:
         if not approve:
             reply = f"{marker} Not saved: you denied {what}."
         else:
-            done = self._write_other(approval)
-            if done["written"]:
+            done = self._attempt(approval, self._write_other)
+            if done.get("unknown"):
+                reply = f"{marker} {self._not_confirmed(what, done)}"
+            elif done["written"]:
                 reply = f"{marker} Saved {what}. Entry {done['id']}."
             else:
                 reply = f"{marker} Not saved: {what} failed a check ({done['reason']})."

@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from harness import Agent
+from harness.tool_outcome import tool_body
 from harness.tools import Tool, ToolRegistry, default_tools, lookup_account, run_tool
 from model import FakeProvider, LLMResponse, fake, tool_call, tool_reply
 
@@ -58,7 +59,7 @@ def _responder(agent: Agent) -> FakeProvider:
 
 def _answer_from_tool_result(messages: list[dict]) -> str:
     """A scripted "model" that reads the last tool result and quotes the balance."""
-    account = json.loads(messages[-1]["content"])
+    account = json.loads(tool_body(messages[-1]["content"]))
     return f"Your balance with {account['creditor']} is ${account['balance']}."
 
 
@@ -168,7 +169,8 @@ def test_run_looks_up_the_account_and_answers_with_the_balance(no_instructions: 
     assert [m["role"] for m in agent.messages] == ["user", "assistant", "tool", "assistant"]
     tool_msg = agent.messages[2]
     assert tool_msg["tool_call_id"] == "call_1"
-    assert json.loads(tool_msg["content"])["balance"] == "1250.00"
+    assert tool_msg["content"].startswith("outcome: success\n")
+    assert json.loads(tool_body(tool_msg["content"]))["balance"] == "1250.00"
     assert len(_responder(agent).calls) == 2
 
 
@@ -186,8 +188,8 @@ def test_bad_calls_are_answered_and_the_model_can_recover(no_instructions: Path)
 
     assert agent.run("hi") == "Sorry, let me try again."
     results = {m["tool_call_id"]: m["content"] for m in agent.messages if m["role"] == "tool"}
-    assert results["a"].startswith("error: unknown tool 'transfer_money'")
-    assert results["b"] == "error: lookup_account is missing argument(s): name"
+    assert results["a"].startswith("outcome: error\nerror: unknown tool 'transfer_money'")
+    assert results["b"] == "outcome: error\nerror: lookup_account is missing argument(s): name"
 
 
 def test_missing_tool_call_ids_are_filled_in(no_instructions: Path):

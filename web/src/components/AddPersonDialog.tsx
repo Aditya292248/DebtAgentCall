@@ -8,6 +8,7 @@ import { Input } from '@/components/ui/input'
 import {
   addPerson,
   EMPTY_FORM,
+  FIELD_NAMES,
   PersonError,
   validateForm,
   type FieldName,
@@ -152,8 +153,14 @@ export function AddPersonDialog({ open, onOpenChange, onAdded }: Props) {
     const found = validateForm(form)
     setProblems(found)
     setError(null)
-    if (Object.keys(found).length) {
-      setError('Some fields need another look.')
+    const bad = FIELD_NAMES.filter((n) => found[n])
+    if (bad.length) {
+      setError(
+        bad.length === 1
+          ? 'One field needs another look.'
+          : `${bad.length} fields need another look.`,
+      )
+      document.getElementById(`person-${bad[0]}`)?.focus()
       return
     }
     setBusy(true)
@@ -270,18 +277,20 @@ export function AddPersonDialog({ open, onOpenChange, onAdded }: Props) {
                   <div className="space-y-0.5">
                     <h3 className="text-sm font-semibold">Consent to be called</h3>
                     <p className="text-xs leading-relaxed text-muted-foreground">
-                      Fill this in only if the person has given consent, and say where. If you leave
-                      it empty, they are saved but cannot be called until consent is recorded.
+                      Consent means the person agreed to receive calls from an automated voice at
+                      this number. Record it only if they did, and say how and when they agreed.
+                      Leave both fields empty if you do not have it: the person is saved, but cannot
+                      be called until consent is recorded.
                     </p>
                   </div>
                 </div>
                 <Field
                   {...common}
                   name="consent_source"
-                  label="Source"
-                  placeholder="For example, signed form"
+                  label="How they agreed"
+                  placeholder="For example, signed form or recorded call"
                 />
-                <Field {...common} name="consent_date" label="Date given" type="date" />
+                <Field {...common} name="consent_date" label="Date they agreed" type="date" />
               </section>
               {error && <Notice message={error} />}
             </div>

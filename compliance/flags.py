@@ -1,4 +1,4 @@
-"""Flags that stop calls: stop requests, do-not-call, lawyers, bankruptcy, death.
+"""Flags that stop calls: stop requests and do-not-call.
 
 A ``Flag`` is a fact someone recorded about a debtor. One with no ``debt_id``
 covers all of their debts; one with a ``debt_id`` covers only that debt. A flag
@@ -8,11 +8,6 @@ One check per rule, each blocking if a matching flag applies to this call:
   - ``check_cease``      ``cease`` or ``opt_out_phone``: they told us to stop
                          (FDCPA 805(c)), or to stop using this number.
   - ``check_dnc``        ``dnc``: the number is on a do-not-call list.
-  - ``check_attorney``   ``attorney``: they have a lawyer for this debt, so we
-                         talk to the lawyer, not them (FDCPA 805(a)(2)).
-  - ``check_bankruptcy`` ``bankruptcy``: the automatic stay stops collection.
-  - ``check_deceased``   ``deceased``: never call a dead person's number to
-                         collect; estates are handled another way.
 
 ``flags`` is ``None`` when they weren't loaded. Then every check blocks, since
 "no flags found" and "didn't look" are not the same thing.
@@ -93,40 +88,4 @@ def check_dnc(flags: list[Flag] | None, debt_id: str, phone_e164: str | None) ->
     """Block if the number is on a do-not-call list."""
     return _check(
         "dnc", ("dnc",), flags, debt_id, phone_e164, {"dnc": "number is on a do-not-call list"}
-    )
-
-
-def check_attorney(flags: list[Flag] | None, debt_id: str, phone_e164: str | None) -> Decision:
-    """Block if a lawyer represents the debtor on this debt."""
-    return _check(
-        "attorney",
-        ("attorney",),
-        flags,
-        debt_id,
-        phone_e164,
-        {"attorney": "debtor has a lawyer for this debt; contact the lawyer"},
-    )
-
-
-def check_bankruptcy(flags: list[Flag] | None, debt_id: str, phone_e164: str | None) -> Decision:
-    """Block if the debtor filed for bankruptcy."""
-    return _check(
-        "bankruptcy",
-        ("bankruptcy",),
-        flags,
-        debt_id,
-        phone_e164,
-        {"bankruptcy": "debtor filed for bankruptcy"},
-    )
-
-
-def check_deceased(flags: list[Flag] | None, debt_id: str, phone_e164: str | None) -> Decision:
-    """Block if the debtor has died."""
-    return _check(
-        "deceased",
-        ("deceased",),
-        flags,
-        debt_id,
-        phone_e164,
-        {"deceased": "debtor is recorded as deceased"},
     )

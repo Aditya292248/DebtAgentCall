@@ -6,7 +6,7 @@ or ``.env``. It is empty by default, and then nothing here changes anything.
 A number on the list skips two rules and nothing else: ``calling_hours`` and
 ``call_frequency`` (Reg F's 7-in-7 limit and the 7-day pause after a
 conversation), the two the owner's repeated test calls would otherwise hit. The
-other pre-call checks (consent, cease, DNC, attorney, bankruptcy, deceased, debt
+other pre-call checks (consent, cease, DNC, debt
 status) still run and still block. The dialer still records every attempt.
 
 ``check_before_call`` is the only

@@ -23,14 +23,7 @@ from compliance.archive import check_archived
 from compliance.attempts import Attempt, check_call_frequency
 from compliance.consent import PhoneConsent, check_consent
 from compliance.decision import Decision, block
-from compliance.flags import (
-    Flag,
-    check_attorney,
-    check_bankruptcy,
-    check_cease,
-    check_deceased,
-    check_dnc,
-)
+from compliance.flags import Flag, check_cease, check_dnc
 from compliance.hours import Contact, check_calling_hours
 from compliance.testnumbers import configured_test_numbers, exempt_for_test_number
 
@@ -76,9 +69,6 @@ def check_before_call(
         check_consent(facts.phone),
         check_cease(facts.flags, facts.debt_id, e164),
         check_dnc(facts.flags, facts.debt_id, e164),
-        check_attorney(facts.flags, facts.debt_id, e164),
-        check_bankruptcy(facts.flags, facts.debt_id, e164),
-        check_deceased(facts.flags, facts.debt_id, e164),
         check_archived(facts.archived),
     ]
 

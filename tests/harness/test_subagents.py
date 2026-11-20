@@ -74,7 +74,7 @@ def test_run_subagent_can_use_its_tools() -> None:
     assert _responder(provider).calls[1][-1] == {
         "role": "tool",
         "tool_call_id": "call_1",
-        "content": "hi",
+        "content": "outcome: success\nhi",
     }
 
 

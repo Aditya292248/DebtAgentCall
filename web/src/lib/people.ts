@@ -80,7 +80,7 @@ export function validateForm(f: Form, now: Date = new Date()): Problems {
   need('creditor', 'Creditor')
 
   if (!/^\d{5}(-\d{4})?$/.test(f.zip)) p.zip = 'Use a 5-digit ZIP, or ZIP+4 like 90012-1234'
-  if (!STATES.has(f.state)) p.state = 'Use a two-letter state code, like CA'
+  if (!STATES.has(f.state)) p.state = 'Two letters, like CA'
   if (!/^\+[1-9]\d{7,14}$/.test(f.phone)) p.phone = 'Use E.164, like +12135550123'
   if (f.line_type !== 'cell' && f.line_type !== 'landline') p.line_type = 'Choose cell or landline'
 
@@ -180,9 +180,16 @@ export function personError(status: number, detail: unknown, raw = ''): PersonEr
       const problems: Problems = {}
       for (const [k, v] of Object.entries(d.problems)) {
         const name = SERVER_FIELD[k] ?? k
-        if ((FIELD_NAMES as readonly string[]).includes(name)) problems[name as FieldName] = v
+        if ((FIELD_NAMES as readonly string[]).includes(name)) {
+          problems[name as FieldName] = v.charAt(0).toUpperCase() + v.slice(1)
+        }
       }
-      return new PersonError(status, 'Some fields need another look.', problems)
+      const n = Object.keys(problems).length
+      return new PersonError(
+        status,
+        n === 1 ? 'One field needs another look.' : 'Some fields need another look.',
+        problems,
+      )
     }
     if (d.message) {
       const problems: Problems = {}

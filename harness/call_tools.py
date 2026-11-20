@@ -2,7 +2,11 @@
 
 These tools are built on ``harness/tools.py`` (``Tool``, ``ToolRegistry``,
 ``run_tool``), so a failure always comes back as an ``error: ...`` string and
-never raises into the call loop. On a live call ``phone/live_tools.py`` builds
+never raises into the call loop. A gate block, or an approver that says no, comes
+back as ``Denied`` text, so the model is told the outcome is ``denied``
+(``harness/tool_outcome.py``). Only ``lookup_account`` is ``safe_to_retry``; a tool
+that writes and then fails is ``unknown``, not retried, and a live call fails closed.
+On a live call ``phone/live_tools.py`` builds
 the ``CallContext`` for each turn and the webhook gives the model this registry.
 
 ``CallContext`` is everything one call's tools may touch: the person and the
@@ -57,6 +61,7 @@ from compliance.decision import Decision, allow, block
 from compliance.flags import Flag, check_cease
 from compliance.hours import Contact, check_calling_hours
 from harness.call_state import CallState, Debtor, Stage, money
+from harness.tool_outcome import Denied, ToolOutcome
 from harness.tools import Tool, ToolRegistry
 
 AuditWriter = Callable[[Decision, str, str | None], None]  # (decision, call_id, debt_id)
@@ -269,6 +274,11 @@ _PARSERS: dict[str, Callable[[CallContext, Any], object]] = {
 }
 
 
+def _denied(rule: str, reason: str, evidence: dict[str, Any]) -> Decision:
+    """A block, with the outcome the model will be told (``denied``) in its audit evidence."""
+    return block(rule, reason, {**evidence, "outcome": ToolOutcome.DENIED.value})
+
+
 def _fail(why: str) -> None:
     raise BadArgs(why)
 
@@ -298,16 +308,16 @@ class PolicyApprover:
         evidence: dict[str, Any] = {"tool": name}
         parser = _PARSERS.get(name)
         if parser is None:
-            return block(APPROVER_RULE, f"unknown tool {name!r}", evidence)
+            return _denied(APPROVER_RULE, f"unknown tool {name!r}", evidence)
         try:
             parsed = parser(self.ctx, args)
         except BadArgs as exc:
-            return block(APPROVER_RULE, f"arguments not understood: {exc}", evidence)
+            return _denied(APPROVER_RULE, f"arguments not understood: {exc}", evidence)
         if isinstance(parsed, PaymentPlan):
             evidence["plan"] = asdict(parsed)
             evidence["policy"] = asdict(self.ctx.policy)
             if why := outside_policy(parsed, self.ctx.debtor.balance_cents, self.ctx.policy):
-                return block(APPROVER_RULE, f"outside plan policy: {why}", evidence)
+                return _denied(APPROVER_RULE, f"outside plan policy: {why}", evidence)
             return allow(APPROVER_RULE, "inside plan policy", evidence)
         return allow(APPROVER_RULE, "arguments understood", evidence)
 
@@ -357,23 +367,27 @@ class CallTools:
         if name in ("log_dispute", "escalate_to_human", "end_call"):
             return allow(GATE_RULE, f"{name} is always allowed", evidence)
         if s.stage not in TALK_STAGES or not (s.verified and s.disclosed):
-            return block(GATE_RULE, f"not verified and disclosed (stage {s.stage.value})", evidence)
+            return _denied(
+                GATE_RULE, f"not verified and disclosed (stage {s.stage.value})", evidence
+            )
         if name == "lookup_account":
             return allow(GATE_RULE, "verified and disclosed", evidence)
         if evidence["disputed"]:
-            return block(GATE_RULE, "dispute", evidence)
+            return _denied(GATE_RULE, "dispute", evidence)
         cease = check_cease(ctx.flags, ctx.debt_id, ctx.contact.phone_e164)
         if not cease.allow:
-            return block(GATE_RULE, f"cease: {cease.reason}", evidence | cease.evidence)
+            return _denied(GATE_RULE, f"cease: {cease.reason}", evidence | cease.evidence)
         if name == "schedule_callback" and when is not None:
             now = ctx.clock()
             if not now < when <= now + timedelta(days=MAX_CALLBACK_DAYS):
-                return block(
+                return _denied(
                     GATE_RULE, f"callback not in the next {MAX_CALLBACK_DAYS} days", evidence
                 )
             hours = check_calling_hours(ctx.contact, when)
             if not hours.allow:
-                return block(GATE_RULE, f"calling hours: {hours.reason}", evidence | hours.evidence)
+                return _denied(
+                    GATE_RULE, f"calling hours: {hours.reason}", evidence | hours.evidence
+                )
         return allow(GATE_RULE, "allowed", evidence)
 
     def _gated(self, name: str, when: datetime | None = None) -> str | None:
@@ -383,14 +397,14 @@ class CallTools:
         if decision.allow:
             return None
         if decision.reason == "dispute":
-            return BLOCKED_BY_DISPUTE
-        return f"error: blocked ({decision.reason})"
+            return Denied(BLOCKED_BY_DISPUTE)
+        return Denied(f"error: blocked ({decision.reason})")
 
     def lookup_account(self) -> str:
         if err := self._gated("lookup_account"):
             return err
         if not self.approver.approve("lookup_account", {}):
-            return "error: not approved"
+            return Denied("error: not approved")
         d = self.ctx.debtor
         return json.dumps(
             {
@@ -409,7 +423,7 @@ class CallTools:
             plan = parse_plan(args, self.ctx.debtor.balance_cents)
         except BadArgs as exc:
             self.approver.approve("offer_payment_plan", args)  # audited as denied
-            return f"error: offer_payment_plan arguments not understood: {exc}"
+            return Denied(f"error: offer_payment_plan arguments not understood: {exc}")
         if self.approver.approve("offer_payment_plan", args):
             self.ctx.store.save_plan(self.ctx, plan, "approved")
             return "approved: " + json.dumps(asdict(plan) | {"total_cents": plan.total_cents})
@@ -424,11 +438,11 @@ class CallTools:
             if err := self._gated("schedule_callback"):
                 return err
             self.approver.approve("schedule_callback", args)  # audited as denied
-            return f"error: schedule_callback arguments not understood: {exc}"
+            return Denied(f"error: schedule_callback arguments not understood: {exc}")
         if err := self._gated("schedule_callback", when):
             return err
         if not self.approver.approve("schedule_callback", args):
-            return "error: not approved"
+            return Denied("error: not approved")
         self.ctx.store.save_callback(self.ctx, when, zone)
         return f"ok: callback booked for {when:%Y-%m-%d %H:%M} {zone}"
 
@@ -477,6 +491,7 @@ class CallTools:
                     "The creditor and balance of the debt this call is about.",
                     {},
                     self.lookup_account,
+                    safe_to_retry=True,  # a read; every other call tool writes
                 ),
                 Tool(
                     "offer_payment_plan",

@@ -72,7 +72,7 @@ test('dollars become whole cents, and anything else is refused', () => {
 
 test('the API 422 and 409 bodies become messages on the right field', () => {
   const invalid = personError(422, { problems: { balance_cents: 'must be more than 0' } })
-  assert.equal(invalid.problems.amount, 'must be more than 0')
+  assert.equal(invalid.problems.amount, 'Must be more than 0')
   const dup = personError(409, { field: 'phone', message: 'on file under account ACC-1' })
   assert.equal(dup.message, 'on file under account ACC-1')
   assert.equal(dup.problems.phone, 'on file under account ACC-1')

@@ -10,7 +10,7 @@ What it checks:
   - A listed number with 7 recent attempts, or a conversation, passes
     ``call_frequency`` with the skip reason; missing call history is never skipped.
   - A listed number is still blocked by consent (missing or revoked) and by a
-    cease, attorney, bankruptcy or deceased flag. Only the two named rules skip.
+    cease or do-not-call flag. Only the two named rules skip.
   - A listed number inside hours is not marked as skipped.
   - A malformed entry is ignored, never a wildcard; an empty list changes nothing.
   - Against the local database (``db``): ``check_and_record`` writes one audit row
@@ -166,7 +166,7 @@ def test_missing_call_history_is_never_skipped():
     assert not by_rule(decisions)["call_frequency"].allow and not may_call(decisions)
 
 
-@pytest.mark.parametrize("kind", ["cease", "attorney", "bankruptcy", "deceased", "dnc"])
+@pytest.mark.parametrize("kind", ["cease", "opt_out_phone", "dnc"])
 def test_a_listed_number_with_a_stop_flag_is_still_blocked(kind):
     flag = Flag(kind, set_at=datetime(2026, 10, 1, tzinfo=UTC))
     f = CallFacts("d1", "90012", consent(), seven_attempts(NIGHT), [flag])

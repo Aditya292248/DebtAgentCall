@@ -162,7 +162,7 @@ def check_person(fields: dict[str, Any], today: date | None = None) -> dict[str,
         "balance_cents": fields.get("balance_cents"),
         "account_reference": fields.get("account_number"),
     }
-    problems = validate(shared, today)
+    problems = {k: "is needed" if v == "missing" else v for k, v in validate(shared, today).items()}
     if "account_reference" in problems:
         problems["account_number"] = problems.pop("account_reference")
     for name in ("first_name", "last_name"):

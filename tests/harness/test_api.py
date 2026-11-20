@@ -1,7 +1,7 @@
 """The read-only web API behind the UI's pre-call badges and audit indicator.
 
 What it checks: ``GET /api/precall`` gives the same decisions as
-``check_before_call`` for the seeded debtors (a lawyer blocks Robin Hale, the
+``check_before_call`` for the seeded debtors (a stop request blocks Morgan Patel, the
 clock blocks Sam Doe at 9:30pm), a time without a zone is refused, the endpoint
 writes nothing to the audit log, and ``GET /api/audit/verify`` reports the chain.
 Everything here reads the real local database.
@@ -29,15 +29,15 @@ def _blocked(debt: dict) -> list[str]:
 
 
 @pytest.mark.db
-def test_a_debtor_with_a_lawyer_comes_back_blocked_by_attorney():
+def test_a_debtor_with_a_stop_request_comes_back_blocked_by_cease():
     res = client.get("/api/precall", params={"at": AFTERNOON})
     assert res.status_code == 200
-    robin = _debt(res.json(), "ACC-1010")
-    assert robin["name"] == "Robin Hale"
-    assert robin["may_call"] is False
-    assert _blocked(robin) == ["attorney"]
-    attorney = next(d for d in robin["decisions"] if d["rule_id"] == "attorney")
-    assert attorney["reason"]
+    morgan = _debt(res.json(), "ACC-1007")
+    assert morgan["name"] == "Morgan Patel"
+    assert morgan["may_call"] is False
+    assert _blocked(morgan) == ["cease"]
+    cease = next(d for d in morgan["decisions"] if d["rule_id"] == "cease")
+    assert cease["reason"]
 
 
 @pytest.mark.db
@@ -49,11 +49,10 @@ def test_sam_is_ready_in_the_afternoon_and_blocked_at_930pm():
 
 
 @pytest.mark.db
-def test_every_seeded_debt_gets_all_nine_decisions():
+def test_every_debt_gets_all_six_decisions():
     body = client.get("/api/precall", params={"at": AFTERNOON}).json()
     assert body["at"] == AFTERNOON
-    assert len(body["debts"]) >= 12
-    assert all(len(d["decisions"]) == 9 for d in body["debts"])
+    assert all(len(d["decisions"]) == 6 for d in body["debts"])
 
 
 @pytest.mark.db

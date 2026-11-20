@@ -35,7 +35,8 @@ Memory. Give the agent a ``Session`` (``harness/memory.py``) and every message
 is saved the moment it joins the history (``_add``). A new ``Agent`` on the same
 session starts from what was saved, so each webhook turn of a call sees the
 turns before it. If the last turn died between a tool request and its result,
-the missing result is filled in with a placeholder first. When a turn is taken
+the missing result is filled in as outcome ``unknown`` first (``harness/tool_outcome.py``:
+every tool call ends in one outcome, and the model reads it on the first line). When a turn is taken
 back out after a failure, the session records the shorter history too.
 
 Skills. The agent looks in ``skills_dir`` (``skills/`` by default) and adds a
@@ -56,14 +57,16 @@ Adapted from codingHarness.
 
 from __future__ import annotations
 
-from collections.abc import Generator
+import threading
+from collections.abc import Callable, Generator
 from pathlib import Path
 
 from harness.compact import SUMMARIZE_PROMPT, compact_messages, estimate_tokens, render
 from harness.instructions import load_system_prompt
 from harness.memory import Session, unanswered_tool_calls
 from harness.skills import Skill, discover, load_skills, skill_tool, skills_prompt
-from harness.tools import ToolRegistry, default_tools, run_tool
+from harness.tool_outcome import ToolOutcome, ToolResult, tool_message
+from harness.tools import ToolRegistry, default_tools, run_tool_result
 from model import LLMResponse, Provider, chat, chat_stream
 
 DEFAULT_SYSTEM_PROMPT_PATH = Path(__file__).resolve().parent.parent / "instructions" / "system.md"
@@ -89,6 +92,7 @@ class Agent:
         keep_head: int = KEEP_HEAD,
         keep_tail: int = KEEP_TAIL,
         stage_prompt_path: str | Path | None = None,
+        on_tool_outcome: Callable[[str, str, ToolResult], None] | None = None,
     ) -> None:
         if max_steps < 1:
             raise ValueError("max_steps must allow at least one model call")
@@ -107,6 +111,9 @@ class Agent:
         self.max_context_tokens = max_context_tokens
         self.keep_head = keep_head
         self.keep_tail = keep_tail
+        # Called as (tool_call_id, tool name, result) once per tool call, after it ends.
+        self.on_tool_outcome = on_tool_outcome
+        self._aborted = threading.Event()
         self.compactions = 0
         self.compact_error: str | None = None  # why the last compaction failed, if it did
         self.messages: list[dict] = []
@@ -117,8 +124,12 @@ class Agent:
         self.session = session
         if session is not None:
             self.messages = session.load()
-            for placeholder in unanswered_tool_calls(self.messages):
-                self._add(placeholder)  # the last turn died mid-tool: close the gap
+            for unknown in unanswered_tool_calls(self.messages):
+                self._add(unknown)  # the last turn died mid-tool: it may have run
+
+    def abort(self) -> None:
+        """Cancel the turn: tools not yet started are answered ``aborted`` and never run."""
+        self._aborted.set()
 
     def _add(self, message: dict) -> None:
         """Append to the history and, if there's a session, save it there too."""
@@ -249,6 +260,7 @@ class Agent:
     def run_stream(self, user_text: str) -> Generator[str | None, None, None]:
         """``run()``, streamed: reply text as it comes, ``None`` after each model call."""
         self._maybe_compact(user_text)
+        self._aborted.clear()
         start = len(self.messages)
         try:
             yield from self._send_stream(user_text)
@@ -271,6 +283,7 @@ class Agent:
         it answers in plain text or ``max_steps`` model calls are used up."""
         # Compact before marking where the turn starts, so an undo can't cut the summary.
         self._maybe_compact(user_text)
+        self._aborted.clear()
         start = len(self.messages)
         try:
             reply = self._send(user_text)
@@ -343,8 +356,27 @@ class Agent:
         return resp.content
 
     def _run_tools(self, calls: list[dict]) -> None:
+        """Run each requested tool once and answer every call, in order.
+
+        Once a call ends ``unknown`` (it may have written) or the turn is aborted, the
+        rest of the batch is answered ``not_started`` / ``aborted`` and not run.
+        """
         tools = self._tools(self.skills())
+        held: ToolOutcome | None = None  # why the rest of the batch is not run
         for call in calls:
             fn = call.get("function") or {}
-            result = run_tool(tools, fn.get("name", ""), fn.get("arguments"))
-            self._add({"role": "tool", "tool_call_id": call["id"], "content": result})
+            name = fn.get("name", "")
+            if self._aborted.is_set():
+                held = ToolOutcome.ABORTED
+            if held is not None:
+                result = ToolResult(held, "")
+            else:
+                result = run_tool_result(tools, name, fn.get("arguments"))
+                if result.outcome is ToolOutcome.UNKNOWN:
+                    held = ToolOutcome.NOT_STARTED
+            self._add({"role": "tool", "tool_call_id": call["id"], "content": tool_message(result)})
+            if self.on_tool_outcome is not None:
+                try:
+                    self.on_tool_outcome(call["id"], name, result)
+                except Exception:  # noqa: BLE001 - logging an outcome must not end the turn
+                    pass

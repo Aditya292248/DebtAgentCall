@@ -13,14 +13,7 @@ from __future__ import annotations
 from compliance.attempts import Attempt, check_call_frequency
 from compliance.consent import PhoneConsent, check_consent
 from compliance.decision import Decision, allow, block
-from compliance.flags import (
-    Flag,
-    check_attorney,
-    check_bankruptcy,
-    check_cease,
-    check_deceased,
-    check_dnc,
-)
+from compliance.flags import Flag, check_cease, check_dnc
 from compliance.hours import Contact, check_calling_hours
 from compliance.precall import CallFacts, check_before_call, may_call
 from compliance.timezones import zones_for
@@ -36,14 +29,11 @@ __all__ = [
     "SpeechState",
     "allow",
     "block",
-    "check_attorney",
-    "check_bankruptcy",
     "check_before_call",
     "check_call_frequency",
     "check_calling_hours",
     "check_cease",
     "check_consent",
-    "check_deceased",
     "check_dnc",
     "check_sentence",
     "may_call",

@@ -3,9 +3,9 @@
 What it checks: each kind fires on a few phrasings, with the right flag,
 close line and escalation. Lines that must NOT fire ("I don't want to stop
 paying", "the bank is not my favourite") stay quiet, and look-alikes that
-must fire ("please stop calling me at work", "I filed chapter 7 last year")
-do. "My lawyer friend said this is fine" fires on purpose: any mention of a
-lawyer counts. Several triggers in one line come back in priority order.
+must fire ("please stop calling me at work") do. A lawyer, a bankruptcy or a
+death in what the caller says fires nothing: those rules are not handled in
+this version. Several triggers in one line come back in priority order.
 ``combine`` is a union. All offline, no model or database.
 """
 
@@ -28,15 +28,6 @@ def _kinds(text: str) -> list[str]:
 @pytest.mark.parametrize(
     ("kind", "text"),
     [
-        ("attorney", "I have a lawyer."),
-        ("attorney", "Talk to my attorney about it."),
-        ("attorney", "I'm represented by counsel."),
-        ("bankruptcy", "I filed for bankruptcy in March."),
-        ("bankruptcy", "We're in Chapter 13."),
-        ("bankruptcy", "I'm bankrupt, there's nothing left."),
-        ("deceased", "He passed away last month."),
-        ("deceased", "She died in June."),
-        ("deceased", "My father is deceased."),
         ("cease", "Stop calling me."),
         ("cease", "Don't call me again."),
         ("cease", "Never call this number again!"),
@@ -64,22 +55,19 @@ def test_ignores_case_and_curly_apostrophes() -> None:
 
 
 def test_trigger_fields() -> None:
-    (t,) = detect("I have a lawyer.")
+    (t,) = detect("Stop calling me.")
     assert t == Trigger(
-        kind="attorney",
-        matched="lawyer",
-        flag="attorney",
-        close=CLOSES["attorney"],
-        escalate=True,
+        kind="cease",
+        matched="Stop calling",
+        flag="cease",
+        close=CLOSES["cease"],
+        escalate=False,
     )
 
 
 @pytest.mark.parametrize(
     ("kind", "flag", "escalate"),
     [
-        ("attorney", "attorney", True),
-        ("bankruptcy", "bankruptcy", True),
-        ("deceased", "deceased", True),
         ("cease", "cease", False),
         ("dispute", None, True),
         ("recording_objection", None, False),
@@ -88,9 +76,6 @@ def test_trigger_fields() -> None:
 )
 def test_flag_and_escalate_per_kind(kind: str, flag: str | None, escalate: bool) -> None:
     samples = {
-        "attorney": "call my attorney",
-        "bankruptcy": "chapter 7",
-        "deceased": "she passed away",
         "cease": "stop calling",
         "dispute": "not my debt",
         "recording_objection": "don't record me",
@@ -134,11 +119,6 @@ def test_closes_never_name_the_debt() -> None:
         ("That's not mine.", ["dispute"]),
         ("I never owed anything.", ["dispute"]),
         ("I don't recognize this debt.", ["dispute"]),
-        ("My husband passed.", ["deceased"]),
-        ("She's passed.", ["deceased"]),
-        ("He's dead.", ["deceased"]),
-        ("We filed Ch. 7.", ["bankruptcy"]),
-        ("I'm working with a bankruptcy attorney.", ["attorney", "bankruptcy"]),
         ("You've got the wrong guy.", ["wrong_number"]),
         ("I don't know anyone named Sam.", ["wrong_number"]),
         ("I'm asking you not to call me.", ["cease"]),
@@ -146,9 +126,6 @@ def test_closes_never_name_the_debt() -> None:
         ("Stop with the calls.", ["cease"]),
         ("Lose my number.", ["cease"]),
         ("I object to being recorded.", ["recording_objection"]),
-        ("Mom passed last spring.", ["deceased"]),
-        ("My wife has passed.", ["deceased"]),
-        ("He's no longer alive.", ["deceased"]),
         ("I paid that off years ago.", ["dispute"]),
         ("Nobody named Sam lives here.", ["wrong_number"]),
         ("Wrong #", ["wrong_number"]),
@@ -212,27 +189,39 @@ def test_stop_calling_me_at_work_fires_cease() -> None:
     assert _kinds("Please stop calling me at work.") == ["cease"]
 
 
-def test_chapter_7_last_year_fires_bankruptcy() -> None:
-    assert _kinds("I filed chapter 7 last year.") == ["bankruptcy"]
+@pytest.mark.parametrize(
+    "text",
+    [
+        "I have a lawyer.",
+        "Talk to my attorney about it.",
+        "I'm represented by counsel.",
+        "I filed for bankruptcy in March.",
+        "We're in Chapter 13.",
+        "He passed away last month.",
+        "She died in June.",
+        "My father is deceased.",
+    ],
+)
+def test_lawyer_bankruptcy_and_death_fire_nothing(text: str) -> None:
+    # Negative case: these rules were removed, so the call just goes on.
+    assert detect(text) == []
 
 
-def test_any_mention_of_a_lawyer_fires() -> None:
-    # Deliberate: being eager costs a polite hang-up, missing a represented
-    # debtor breaks FDCPA 805(a)(2). So a lawyer friend counts too.
-    assert _kinds("My lawyer friend said this is fine.") == ["attorney"]
+def test_removed_kinds_are_gone_from_every_table() -> None:
+    for kind in ("attorney", "bankruptcy", "deceased"):
+        assert kind not in PRIORITY and kind not in FLAGS and kind not in CLOSES
 
 
-def test_a_friend_who_is_not_a_lawyer_does_not_fire() -> None:
-    # The other side of the same choice: no lawyer word, no trigger.
-    assert _kinds("My friend said this is fine.") == []
+def test_stop_calling_still_fires_when_a_lawyer_is_mentioned() -> None:
+    assert _kinds("Stop calling me, my lawyer says so.") == ["cease"]
 
 
 # --- several at once -------------------------------------------------------
 
 
 def test_several_triggers_come_back_in_priority_order() -> None:
-    text = "Stop calling me, this isn't my debt, and talk to my lawyer. I filed chapter 13."
-    assert _kinds(text) == ["attorney", "bankruptcy", "cease", "dispute"]
+    text = "Wrong number, and this isn't my debt. Stop calling me."
+    assert _kinds(text) == ["cease", "dispute", "wrong_number"]
 
 
 def test_priority_order_does_not_depend_on_word_order() -> None:
@@ -250,8 +239,8 @@ def test_each_kind_at_most_once() -> None:
 
 def test_combine_is_a_union_in_priority_order() -> None:
     regex = detect("stop calling me")
-    classifier = [Trigger("attorney", "(classifier)", "attorney", CLOSES["attorney"], True)]
-    assert [t.kind for t in combine(regex, classifier)] == ["attorney", "cease"]
+    classifier = [Trigger("dispute", "(classifier)", None, CLOSES["dispute"], True)]
+    assert [t.kind for t in combine(regex, classifier)] == ["cease", "dispute"]
 
 
 def test_combine_keeps_the_regex_hit_when_both_fire() -> None:

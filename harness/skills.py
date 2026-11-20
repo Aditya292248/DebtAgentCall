@@ -138,4 +138,5 @@ def skill_tool(skills: list[Skill]) -> Tool:
         description="Load the full playbook of one of your skills, by name.",
         params={"name": "The skill's name, exactly as listed under Skills."},
         fn=load,
+        safe_to_retry=True,
     )
