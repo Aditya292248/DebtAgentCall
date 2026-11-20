@@ -2737,3 +2737,126 @@ def _demo_call_view() -> None:
 
 ACCEPTANCE["call-view"] = _accept_call_view
 DEMOS["call-view"] = _demo_call_view
+
+
+# ----------------------------------------------------------------------------
+# add a person by chat: the model talks, code decides what is missing and what is saved
+# ----------------------------------------------------------------------------
+
+
+def _add_person_run() -> bool:
+    """A scripted chat (no real model): missing details, an approval, a save with no consent."""
+    import json
+    import tempfile
+    import uuid
+    from datetime import UTC, datetime
+    from pathlib import Path
+
+    from compliance import check_before_call
+    from harness.db import connect, load_call_facts
+    from harness.memory import JsonlSession
+    from harness.operator import Operator
+    from model.fake import fake, tool_call, tool_reply
+    from phone.client import FakePhoneClient
+
+    tail = str(uuid.uuid4().int)[:6]
+    phone = f"+12135{tail}"
+    typed = f"213 5{tail[:2]} {tail[2:]}"
+    last = f"Demo-{uuid.uuid4().hex[:6].upper()}"
+    known = {"first_name": "Sam", "last_name": last, "creditor": "Acme Credit", "amount": "480"}
+    script: list[Any] = [
+        tool_reply(tool_call("add_person", phone=typed, **known)),
+        "Thanks. What is Sam's date of birth, and the street address, ZIP and state?",
+        tool_reply(
+            tool_call(
+                "add_person",
+                phone=typed,
+                date_of_birth="March 3 85",
+                address="12 Elm Street",
+                zip="02115",
+                **known,
+            )  # fmt: skip
+        ),
+        "Do you have permission to call this number?",
+        tool_reply(
+            tool_call(
+                "add_person",
+                phone=typed,
+                date_of_birth="March 3 85",
+                address="12 Elm Street",
+                zip="02115",
+                consent_source="none",
+                **known,
+            )  # fmt: skip
+        ),
+        "Please approve adding Sam. Nothing is saved yet.",
+    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        op = Operator(
+            JsonlSession.for_call(Path(tmp), "demo-add"),
+            provider=fake(scripted=script),
+            connect=connect,
+            phone=FakePhoneClient(),
+            clock=lambda: datetime(2026, 11, 5, 19, 0, tzinfo=UTC),
+        )
+        try:
+            statuses = []
+            for said in (
+                "add Sam, owes Acme Credit $480, phone " + typed,
+                "born March 3 85, 12 Elm Street, 02115",
+                "no, I don't have permission",
+            ):
+                turn = op.chat(said)
+                body = json.loads(turn.tool_calls[0]["result"])
+                statuses.append(body["status"])
+                print(f"operator: {said}")
+                print(f"  code: {body['status']}, missing {body['missing']}")
+                print(f"  agent: {turn.reply}")
+            (pending,) = turn.pending_approvals
+            print("card:", pending.name, pending.phone, pending.details["amount"],
+                  "|", pending.details["consent_line"])  # fmt: skip
+            with connect() as conn:
+                row = conn.execute(
+                    "select count(*) from public.phone where e164 = %s", (phone,)
+                ).fetchone()
+                before = row[0] if row else -1
+            done = op.decide(pending.id, True)
+            print("after approve:", done.reply)
+            with connect() as conn:
+                found = conn.execute(
+                    "select d.account_number from public.debt d join public.phone ph"
+                    " on ph.debtor_id = d.debtor_id where ph.e164 = %s",
+                    (phone,),
+                ).fetchone()
+                assert found is not None, "the approved person was not saved"
+                account = found[0]
+                facts = load_call_facts(account, conn)
+            blocked = [
+                d.rule_id
+                for d in check_before_call(facts, datetime(2026, 11, 5, 19, 0, tzinfo=UTC))
+                if not d.allow
+            ]
+            print("the pre-call checks block it with:", blocked)
+        finally:
+            with connect() as conn:
+                conn.execute(
+                    "delete from public.debtor where id in (select debtor_id from public.phone"
+                    " where e164 = %s)",
+                    (phone,),
+                )
+    return (
+        statuses == ["needs_more", "needs_more", "ready"]
+        and before == 0
+        and "Saved" in done.reply
+        and "blocked" in done.reply
+        and "tcpa_consent" in blocked
+    )
+
+
+def _demo_add_person() -> None:
+    _add_person_run()
+    print("\n   # nothing was saved until the approval; no consent means calls stay blocked")
+
+
+ACCEPTANCE["add-person-by-chat"] = _add_person_run
+DEMOS["add-person-by-chat"] = _demo_add_person

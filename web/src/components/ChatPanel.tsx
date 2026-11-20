@@ -2,6 +2,7 @@ import { LoaderCircle, SendHorizontal } from 'lucide-react'
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
 
 import {
+  AddPersonApprovalCard,
   ApprovalCard,
   DialResult,
   NoteApprovalCard,
@@ -134,7 +135,14 @@ export function ChatPanel({ precallCheck, onOpenCall }: Props) {
             <Message key={i} item={item} onOpenCall={onOpenCall} />
           ))}
           {pending.map((a) =>
-            a.action === 'record_payment' || a.action === 'reverse_payment' ? (
+            a.action === 'add_person' ? (
+              <AddPersonApprovalCard
+                key={a.id}
+                approval={a}
+                busy={busy}
+                onDecide={(approve) => void decide(a, approve)}
+              />
+            ) : a.action === 'record_payment' || a.action === 'reverse_payment' ? (
               <PaymentApprovalCard
                 key={a.id}
                 approval={a}
