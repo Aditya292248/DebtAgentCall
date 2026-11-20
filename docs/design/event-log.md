@@ -230,8 +230,11 @@ Three steps over the events: keep message-bearing events, drop withdrawn ranges,
 def messages(events: list[Event]) -> list[dict]:
     withdrawn = [(e.body["from_seq"], e.body["to_seq"]) for e in events if e.type == "withdrawn"]
     gone = lambda seq: any(a <= seq <= b for a, b in withdrawn)
-    spoken = {e.body["model_reply_seq"]: e.body["text"]
-              for e in events if e.type == "reply_spoken" and e.body["model_reply_seq"]}
+    spoken = {
+        e.body["model_reply_seq"]: e.body["text"]
+        for e in events
+        if e.type == "reply_spoken" and e.body["model_reply_seq"]
+    }
     # (sort key, message). A compaction summary sorts at the start of the span it covers.
     live: list[tuple[tuple[int, int], dict]] = []
     for e in events:
@@ -271,12 +274,14 @@ def tool_message(e: Event) -> dict:
     the wording below is a placeholder for that module's own rendering."""
     b = e.body
     text = {
-        "success": b["content"], "error": b["content"], "timeout": "error: the tool timed out",
+        "success": b["content"],
+        "error": b["content"],
+        "timeout": "error: the tool timed out",
         "denied": b["content"],
         "aborted": "error: the tool did not run (the turn was stopped first)",
         "not_started": "error: the tool did not run",
         "unknown": "error: the result is unknown; the tool may or may not have run. "
-                           "Do not assume either, and do not run it again without asking",
+        "Do not assume either, and do not run it again without asking",
     }[b["outcome"]]
     return {"role": "tool", "tool_call_id": b["tool_call_id"], "content": text}
 ```
@@ -303,10 +308,10 @@ For C: the 40 `request_sent` events are about 300 bytes each (12 KB), plus the p
 def request_for(events: list[Event], request_seq: int) -> dict:
     req = event_at(events, request_seq)
     upto = [e for e in events if e.seq < request_seq]
-    msgs = messages(upto)                     # the same fold, stopped just before the request
+    msgs = messages(upto)  # the same fold, stopped just before the request
     parts = {name: part_text(events, request_seq, name, h) for name, h in req.body["parts"].items()}
     payload = [{"role": "system", "content": parts["system"]}] + msgs
-    assert sha256(canonical(payload)) == req.body["payload_digest"]   # fails if the fold drifted
+    assert sha256(canonical(payload)) == req.body["payload_digest"]  # fails if the fold drifted
     return {"messages": payload, "tools": parts["tools"]}
 ```
 
@@ -328,10 +333,13 @@ Same as `last_state()` today, but it can be answered by one indexed query (`even
 def pending_approvals(events: list[Event]) -> list[Approval]:
     closed = {e.body["approval_id"] for e in events if e.type == "approval_closed"}
     withdrawn = ranges(events, "withdrawn")
-    return [Approval.from_body(e.body) for e in events
-            if e.type == "approval_opened"
-            and e.body["approval_id"] not in closed
-            and not any(a <= e.cause <= b for a, b in withdrawn)]   # cause = the tool_outcome
+    return [
+        Approval.from_body(e.body)
+        for e in events
+        if e.type == "approval_opened"
+        and e.body["approval_id"] not in closed
+        and not any(a <= e.cause <= b for a, b in withdrawn)
+    ]  # cause = the tool_outcome
 ```
 
 Two choices to flag. First, compaction does not appear: an approval opened before a compaction is still pending after it, which is the fix for 1.4. Second, an approval whose causing tool outcome was withdrawn (the turn failed) is excluded, which keeps today's behaviour. If the owner prefers it to stay pending, drop the last condition.
@@ -342,7 +350,9 @@ Two choices to flag. First, compaction does not appear: an approval opened befor
 
 ```python
 def replay(events: list[Event], webhook_id: str) -> Replay:
-    got = first(e for e in events if e.type == "webhook_received" and e.body["webhook_id"] == webhook_id)
+    got = first(
+        e for e in events if e.type == "webhook_received" and e.body["webhook_id"] == webhook_id
+    )
     if got is None:
         return Replay.NEW
     done = first(e for e in events if e.type == "webhook_replied" and e.cause == got.seq)
@@ -362,7 +372,7 @@ Today (`_earlier_reply`, webhook.py:588-611) the saved reply is sent again, and 
 def resume(events: list[Event]) -> list[Event]:
     """Events to append when a stream is opened after a crash: close every gap."""
     closing = []
-    for req in open_tool_requests(events):          # tool_requested with no tool_outcome
+    for req in open_tool_requests(events):  # tool_requested with no tool_outcome
         closing.append(tool_outcome(req, "unknown"))
     return closing
 ```
@@ -376,6 +386,7 @@ A fork is a new stream whose first event points at a parent and a sequence:
 ```python
 def fork(parent: str, upto_seq: int, new_stream: str) -> None:
     append(new_stream, "session_forked", {"from_stream": parent, "upto_seq": upto_seq})
+
 
 def read(stream: str) -> list[Event]:
     own = events_of(stream)
