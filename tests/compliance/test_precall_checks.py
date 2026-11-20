@@ -1,4 +1,4 @@
-"""Pre-call checks: call limits, consent, stop requests, lawyers, bankruptcy.
+"""Pre-call checks: call limits, consent, stop requests, do-not-call.
 
 What it checks: each check in ``compliance/`` blocks the call it should (the 8th
 call in 7 days, a call within 7 days of a conversation, no or revoked consent,
@@ -21,13 +21,10 @@ from compliance import (
     PhoneConsent,
     allow,
     block,
-    check_attorney,
-    check_bankruptcy,
     check_before_call,
     check_call_frequency,
     check_cease,
     check_consent,
-    check_deceased,
     check_dnc,
     may_call,
 )
@@ -167,9 +164,6 @@ FLAG_CHECKS = [
     (check_cease, "cease", Flag(kind="cease", debt_id=DEBT)),
     (check_cease, "cease", Flag(kind="opt_out_phone", data={"e164": PHONE})),
     (check_dnc, "dnc", Flag(kind="dnc", data={"e164": PHONE})),
-    (check_attorney, "attorney", Flag(kind="attorney", debt_id=DEBT, data={"attorney": "Pat"})),
-    (check_bankruptcy, "bankruptcy", Flag(kind="bankruptcy", data={"chapter": 7})),
-    (check_deceased, "deceased", Flag(kind="deceased")),
 ]
 
 
@@ -194,7 +188,7 @@ def test_flags_not_loaded_block(check, rule_id, flag):
 
 
 def test_a_flag_on_another_debt_does_not_block_this_one():
-    assert check_attorney([Flag(kind="attorney", debt_id=OTHER_DEBT)], DEBT, PHONE).allow
+    assert check_cease([Flag(kind="cease", debt_id=OTHER_DEBT)], DEBT, PHONE).allow
 
 
 def test_a_flag_on_another_number_does_not_block_this_one():
@@ -205,7 +199,7 @@ def test_a_flag_on_another_number_does_not_block_this_one():
 
 
 def test_a_flag_of_another_kind_does_not_block():
-    assert check_cease([Flag(kind="bankruptcy")], DEBT, PHONE).allow
+    assert check_cease([Flag(kind="dnc")], DEBT, PHONE).allow
 
 
 # --- check_before_call and may_call ----------------------------------------------
@@ -219,16 +213,21 @@ def test_clean_facts_allow_the_call():
         "tcpa_consent",
         "cease",
         "dnc",
-        "attorney",
-        "bankruptcy",
-        "deceased",
     ]
     assert all(d.allow for d in decisions)
     assert may_call(decisions)
 
 
+@pytest.mark.parametrize("kind", ["attorney", "bankruptcy", "deceased"])
+def test_removed_rule_flags_are_ignored_by_the_pre_call_checks(kind):
+    """Old rows of a dropped kind are neither read nor a reason to block."""
+    decisions = check_before_call(_facts(flags=[Flag(kind=kind)]), WHEN)
+    assert [d.rule_id for d in decisions if not d.allow] == []
+    assert may_call(decisions)
+
+
 def test_one_block_among_many_allows_means_no_call():
-    decisions = check_before_call(_facts(flags=[Flag(kind="bankruptcy")]), WHEN)
+    decisions = check_before_call(_facts(flags=[Flag(kind="dnc")]), WHEN)
     assert sum(not d.allow for d in decisions) == 1
     assert not may_call(decisions)
 
@@ -244,6 +243,20 @@ def test_calling_hours_is_one_of_the_checks():
     decisions = check_before_call(_facts(), late)
     blocked = [d.rule_id for d in decisions if not d.allow]
     assert blocked == ["calling_hours"]
+
+
+@pytest.mark.parametrize(
+    "flag, rule_id",
+    [
+        (Flag(kind="cease", debt_id=DEBT), "cease"),
+        (Flag(kind="opt_out_phone", data={"e164": PHONE}), "cease"),
+        (Flag(kind="dnc", data={"e164": PHONE}), "dnc"),
+    ],
+)
+def test_a_stop_request_or_dnc_flag_still_blocks_the_call(flag, rule_id):
+    decisions = check_before_call(_facts(flags=[flag]), WHEN)
+    assert [d.rule_id for d in decisions if not d.allow] == [rule_id]
+    assert not may_call(decisions)
 
 
 @pytest.mark.parametrize(
@@ -307,10 +320,9 @@ def test_loaders_return_the_seeded_rows():
     taylor = load_call_facts("ACC-1006")
     assert taylor is not None and taylor.phone is not None and taylor.phone.consent_at is None
 
-    robin = load_call_facts("ACC-1010")
-    assert robin is not None and robin.flags is not None
-    assert [(f.kind, f.debt_id) for f in robin.flags] == [("attorney", robin.debt_id)]
-    assert robin.flags[0].data["attorney"] == "Pat Example, Esq."
+    morgan = load_call_facts("ACC-1007")
+    assert morgan is not None and morgan.flags is not None
+    assert [(f.kind, f.debt_id) for f in morgan.flags] == [("cease", morgan.debt_id)]
 
     parker = load_call_facts("ACC-1008")
     assert parker is not None and parker.flags is not None
@@ -330,9 +342,6 @@ SEEDED_EXPECTED = {
     "ACC-1007": ["cease"],  # Morgan: asked us to stop
     "ACC-1008": ["cease"],  # Parker: opted the number out
     "ACC-1009": ["dnc"],  # Avery
-    "ACC-1010": ["attorney"],  # Robin
-    "ACC-1011": ["bankruptcy"],  # Drew
-    "ACC-1012": ["deceased"],  # Quinn
 }
 
 

@@ -22,9 +22,6 @@ Enforced before a call is placed. `compliance/precall.py: check_before_call` run
 | Consent to call this number with an artificial voice must be on file and not revoked. | TCPA | `tcpa_consent` | `compliance/consent.py: check_consent` | `tests/compliance/test_precall_checks.py` | Checks that a consent record exists and has not been revoked. It cannot tell whether the consent is valid (what was disclosed, who gave it, whether it covers this caller). `line_type` (cell or landline) is stored but no compliance rule uses it. Bill uploads save a phone with no consent, so those numbers are blocked until a person records consent some other way (nothing in the repo records it). |
 | Stop if the debtor asked us to stop, or to stop using this number. | FDCPA 805(c) | `cease` | `compliance/flags.py: check_cease` (flag kinds `cease`, `opt_out_phone`) | `tests/compliance/test_precall_checks.py` | Only as good as the flags. A written request that nobody entered into `flags` is not seen. A flag for one number applies to that number; if the number is unknown, the flag applies. |
 | Stop if the number is on a do-not-call list. | Policy (no statute cited in code) | `dnc` | `compliance/flags.py: check_dnc` | `tests/compliance/test_precall_checks.py` | There is no integration with a national or state registry; only a `dnc` flag someone has entered. Which lists apply to which calls is a question for counsel. |
-| Do not contact the debtor directly if a lawyer represents them on this debt. | FDCPA 805(a)(2) | `attorney` | `compliance/flags.py: check_attorney` | `tests/compliance/test_precall_checks.py` | Flag-based. The lawyer's contact details are stored in the flag but nothing contacts the lawyer. |
-| Stop collection if the debtor filed for bankruptcy. | Policy (the code cites the automatic stay) | `bankruptcy` | `compliance/flags.py: check_bankruptcy` | `tests/compliance/test_precall_checks.py` | Flag-based. No bankruptcy-scrub integration. Exceptions and case specifics need a lawyer. |
-| Do not call a deceased person's number to collect. | Policy | `deceased` | `compliance/flags.py: check_deceased` | `tests/compliance/test_precall_checks.py` | Flag-based. Handling of estates is not implemented. |
 | Only a debt whose status is `active` may be called; disputed, paused and closed debts are blocked. | Policy | `debt_status` | `dialer/service.py: check_debt_status`, read under the same row lock | `tests/dialer/test_dialer.py` | Applies to the dialer only (including the operator's approved calls). `check_before_call` alone does not look at the status. A dispute on a live call sets the status, so it depends on that write succeeding; see in-call triggers. |
 | Missing data blocks: no facts for the debt, no phone record, no call history, no flags loaded. | Policy (fail closed) | `precall`, or the rule's own id | `compliance/precall.py: check_before_call`; each rule above | `tests/compliance/test_precall_checks.py` (`test_no_facts_at_all_blocks`, `test_missing_data_blocks`, `test_flags_not_loaded_block`) | None known beyond the data being wrong. |
 
@@ -32,7 +29,7 @@ Enforced before a call is placed. `compliance/precall.py: check_before_call` run
 
 `TEST_NUMBERS` is a comma-separated list of full E.164 numbers, set in the environment or `.env` (see `.env.example`). It is empty by default, and while empty nothing changes. It exists so the repo owner can place real test calls to their own phone at any hour and repeatedly.
 
-- It skips exactly two rules for a listed number: `calling_hours` and `call_frequency` (`EXEMPT_RULES` in `compliance/testnumbers.py`). Consent, cease, do-not-call, lawyer, bankruptcy, deceased and debt status still run and still block.
+- It skips exactly two rules for a listed number: `calling_hours` and `call_frequency` (`EXEMPT_RULES` in `compliance/testnumbers.py`). Consent, cease, do-not-call and debt status still run and still block.
 - It is applied in one place, `check_before_call`, so the dialer, the operator chat and `/api/precall` agree. It does not apply to the call tool gate: a callback booked during a call is still checked against calling hours.
 - A skip is audited: the decision is written with `evidence.exemption = "test_number"` and `would_have_blocked` (what the rule would have said), and a second audit row with `kind = "test_number_exemption"` is written for each skip (`harness/precall.py: check_and_record`). The dialer still records every attempt.
 - An entry must be a full E.164 number (a `+` and 8 to 15 digits; spaces, dashes, dots and brackets are ignored). Anything else is logged and ignored. There are no wildcards and no prefix matching.
@@ -46,9 +43,6 @@ Enforced on every caller turn before anything else sees the text. `compliance/tr
 
 | Rule in plain words | Source | Rule id (the trigger kind) | What the code does | Limits |
 | --- | --- | --- | --- | --- |
-| The caller has a lawyer: end the call, record it, flag for a person. | FDCPA 805(a)(2) | `attorney` | Saves an `attorney` flag for this debt, audit row, fixed close, hang up. | Regex. Fires on any mention of lawyer, attorney, counsel, solicitor, "represented by", legal aid, even "my lawyer friend said this is fine". Misses a lawyer mentioned in other words. |
-| Bankruptcy: end the call. | Policy | `bankruptcy` | Saves a `bankruptcy` flag for every debt of the debtor. | Regex on "bankrupt", "chapter 7/11/13". Does not understand negation: "I'm not bankrupt" fires. |
-| The person has died: end the call. | Policy | `deceased` | Saves a `deceased` flag for every debt. | Regex on "passed away", "died", "deceased", "is dead", "he/she/... passed" (with guards for "passed the exam"). It can fire on a stranger's story, and can miss unusual phrasing. |
 | "Stop calling": end the call and revoke consent for the number called. | FDCPA 805(c); TCPA | `cease` | Saves a `cease` flag for every debt, sets `phone.revoked_at` on the number called, audit row, close, hang up. It sets `cease` rather than `opt_out_phone` on purpose: "stop calling" may mean this number only, but `cease` stops every call, which is the safer reading. | Regex over many phrasings (stop calling, don't call me, take me off your list, opt out, unsubscribe, leave me alone, revoke consent). "Please stop calling me at work" fires `cease` for all calls. A request in words the patterns do not contain is not caught. |
 | The caller disputes the debt: end the call; stop collection until a person reviews it. | FDCPA 809 (disputes); the code does not cite a section | `dispute` | Only if the person is verified: saves a `dispute` row, sets `debt.status = 'disputed'` (so the dialer stops), audit row, close. Before verification: a neutral goodbye, a `dispute` row with `verified = false` for a person to review, and nothing changed on the debt (a stranger saying "it isn't mine" is not a dispute). | Regex ("not my debt", "I don't owe", "dispute", "already paid this", and so on). The code treats a spoken dispute as a stop, which is broader than the written-dispute rule; whether that is right, and what follow-up writing is owed, needs a lawyer. No validation notice or written follow-up is generated: the close says someone will follow up in writing, but nothing sends it. |
 | The caller objects to recording: end the call. | Policy | `recording_objection` | Fixed close, hang up. Sets no flag. | Regex. Ending the call does not stop AgentPhone's recording of the part already made, and whether recording can be turned off per call is unconfirmed (see below). |
@@ -58,7 +52,7 @@ Common limits:
 
 - Matching ignores case and works on whole words. It is deliberately eager: a false alarm only ends the call politely; a miss could break the law.
 - It reads the speech-to-text transcript. A mis-transcribed "stop calling" is missed.
-- Several triggers can fire at once; they are applied in priority order (attorney, bankruptcy, deceased, cease, dispute, recording objection, wrong number). Before verification, a dispute gives way to any other hit.
+- Several triggers can fire at once; they are applied in priority order (cease, dispute, recording objection, wrong number). Before verification, a dispute gives way to any other hit.
 - `compliance/triggers.py: combine` can merge regex hits with a second classifier's hits (a trigger fires if either finds it). No classifier exists in the repo yet; only the merge function and its tests do. Today the triggers are regex only.
 - The fixed closes never name the debt, the amount or the creditor, so they are safe to say to the wrong person (`tests/compliance/test_stop_triggers.py: test_closes_never_name_the_debt`).
 
@@ -139,6 +133,10 @@ The code is written to fail safe around these, but none of them has been verifie
 - **Recording toggle.** The dialer passes `disable_recording=None` and so leaves AgentPhone's default (a `TODO(recording consent)` in `dialer/service.py: dial_one` marks the spot). The disclosure says the call is recorded regardless. No recording-consent decision exists, and the code cannot confirm whether a call is recorded.
 - **Disconnection reasons.** Only `agent_hangup` (from AgentPhone's example) and the simulator's `user_hangup` are known; others are matched by words.
 
+## Not handled in this version
+
+Attorney representation (FDCPA 805(a)(2)), bankruptcy and deceased-person handling were removed to keep the demo simple. The code does not check for them before a call and does not react to them during one: a caller who says they have a lawyer, have filed for bankruptcy or that the debtor has died is not stopped by any rule. They are legal requirements for real collection calls. They must be added back, and reviewed by counsel, before any real use. Old rows of those kinds in `flags` are ignored.
+
 ## Needs a lawyer
 
 None of this is encoded, or what is encoded is a placeholder:
@@ -149,7 +147,7 @@ None of this is encoded, or what is encoded is a placeholder:
 - **Disclosure wording.** The fixed lines in `harness/stages.py` and `compliance/triggers.py`, including the debt collector statement, the recording and automated-assistant notices, and the closes.
 - **Validation notice and dispute handling.** Reg F's validation information and the timing of disputes are not implemented; a spoken dispute only stops calls.
 - **Time-barred debt.** No statute-of-limitations logic exists.
-- **Do-not-call lists, bankruptcy and deceased scrubs, and attorney handling.** The flags exist; the data sources and processes do not.
+- **Do-not-call lists.** The flag exists; the data sources and processes do not.
 - **The plan policy limits** and what may be promised on a call.
 - **Records.** How long to keep audit rows, call messages and summaries, and what must be deletable on request. The append-only design may conflict with some deletion obligations.
 - **Any use with real people.** This project has not been tested with real debtors and is not a product.

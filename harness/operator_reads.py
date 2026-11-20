@@ -8,7 +8,7 @@ nothing. The writes are:
   - ``insert_note`` and ``insert_callback``, which the operator runs only after
     the person approves (``add_note``, ``schedule_callback``);
   - ``record_stop``, which needs no approval because it can only ever mean
-    fewer calls: a cease, attorney or bankruptcy flag, or a dispute.
+    fewer calls: a cease flag, or a dispute.
 
 There is deliberately no way here, or in any operator tool, to remove a flag,
 record consent, change a balance or delete anything. Notes and payments are
@@ -22,7 +22,7 @@ their last four digits, in plain fields and inside audit evidence alike.
 through ``compliance.check_before_call`` with the facts the dialer loads, stops
 at the first moment every rule allows, and then confirms that moment with
 ``dialer.service.plan_queue``, the dialer's own dry run. A block that waiting
-can't fix (cease, consent, attorney, a disputed debt...) gives no time at all.
+can't fix (cease, consent, a disputed debt...) gives no time at all.
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ STEP = timedelta(minutes=15)
 HORIZON = timedelta(days=14)
 # Only these rules can pass later without anyone doing anything.
 TIME_RULES = frozenset({"calling_hours", "call_frequency"})
-STOP_KINDS = ("cease", "dispute", "attorney", "bankruptcy")
+STOP_KINDS = ("cease", "dispute")
 SORTS = ("balance", "last_payment", "status", "name")
 _PHONE_TEXT = re.compile(r"\+\d{8,15}")
 
@@ -523,7 +523,7 @@ def insert_callback(
 def record_stop(
     conn: psycopg.Connection, r: dict[str, Any], kind: str, source: str, call_id: str
 ) -> str:
-    """Write the stop. Only adds: a flag (cease, attorney, bankruptcy) or a dispute
+    """Write the stop. Only adds: a cease flag or a dispute
     that also marks an active debt disputed. Returns what changed, for the audit row."""
     from harness.db import mark_disputed, save_dispute, save_flag
 
@@ -531,7 +531,7 @@ def record_stop(
         save_dispute(conn, call_id, r["debt_id"], "recorded by the operator", True)
         changed = mark_disputed(conn, r["debt_id"])
         return "dispute logged; debt marked disputed" if changed else "dispute logged"
-    # A cease, attorney or bankruptcy covers every debt of the debtor.
+    # A cease covers every debt of the debtor.
     save_flag(conn, Flag(kind=kind, debt_id=None, data={}, source=source), r["person_id"])
     return f"{kind} flag set for every debt of this debtor"
 

@@ -5,7 +5,7 @@ What it checks, through the signed simulator and the webhook with stages on:
     flag is handed to the stop recorder, the reply hangs up, the call is
     STOPPED (the negative case: before this change the model answered)
   - every stop trigger kind does the same in DISCUSS, with its own fixed
-    close and flag; a lawyer's flag covers this debt only
+    close and flag (a stop flag covers every debt)
   - before verification a dispute leaves the debt alone and gets a neutral
     goodbye, and a wrong number in the same breath wins over it
   - saving the stop can fail (or the session can) and the call still ends
@@ -148,17 +148,15 @@ def test_stop_calling_through_the_simulator(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("said", "kind", "flag_kind", "this_debt_only"),
+    ("said", "kind", "flag_kind"),
     [
-        ("I have a lawyer handling this.", "attorney", "attorney", True),
-        ("I filed for bankruptcy last month.", "bankruptcy", "bankruptcy", False),
-        ("Please stop calling me.", "cease", "cease", False),
-        ("That's not my debt.", "dispute", None, False),
-        ("Sorry, wrong person.", "wrong_number", None, False),
+        ("Please stop calling me.", "cease", "cease"),
+        ("That's not my debt.", "dispute", None),
+        ("Sorry, wrong person.", "wrong_number", None),
     ],
 )
 def test_each_stop_trigger_in_discuss_ends_the_call(
-    tmp_path: Path, said: str, kind: str, flag_kind: str | None, this_debt_only: bool
+    tmp_path: Path, said: str, kind: str, flag_kind: str | None
 ) -> None:
     call = Call(tmp_path)
     for line in TO_DISCUSS:
@@ -176,7 +174,7 @@ def test_each_stop_trigger_in_discuss_ends_the_call(
         assert flag is None
     else:
         assert flag is not None and flag.kind == flag_kind
-        assert flag.debt_id == (SAM.debt_id if this_debt_only else None)
+        assert flag.debt_id is None
     assert stop.verified is True
     decision = stop.decision()
     assert not decision.allow and decision.rule_id == kind
@@ -185,10 +183,43 @@ def test_each_stop_trigger_in_discuss_ends_the_call(
     assert call.stages()[-1] == Stage.STOPPED
 
 
+@pytest.mark.parametrize(
+    "said",
+    [
+        "I have a lawyer handling this.",
+        "I filed for bankruptcy last month.",
+        "He passed away in June.",
+    ],
+)
+def test_a_lawyer_bankruptcy_or_death_no_longer_ends_the_call(tmp_path: Path, said: str) -> None:
+    """Negative case: these used to hang up. Now the call goes on, with no stop and no flag."""
+    call = Call(tmp_path)
+    for line in TO_DISCUSS:
+        call.turn("call_n", line)
+    reply = call.turn("call_n", said)
+    assert reply.get("hangup") is not True
+    assert call.stops == []
+    assert call.stages()[-1] == Stage.DISCUSS
+    assert len(call.responder.calls) >= 1  # the model answered the turn
+
+
+def test_stop_calling_still_ends_the_call_with_the_flag_and_close(tmp_path: Path) -> None:
+    call = Call(tmp_path)
+    for line in TO_DISCUSS:
+        call.turn("call_c", line)
+    reply = call.turn("call_c", "Please stop calling me, I have a lawyer.")
+    assert reply == {"text": CLOSES["cease"], "hangup": True}
+    (stop,) = call.stops
+    assert stop.trigger.kind == "cease"
+    flag = stop.flag()
+    assert flag is not None and flag.kind == "cease" and flag.debt_id is None
+    assert call.stages()[-1] == Stage.STOPPED
+
+
 def test_a_stopped_call_stays_stopped(tmp_path: Path) -> None:
     call = Call(tmp_path)
     call.turn("call_s", "Hello?")
-    call.turn("call_s", "I'm talking to my attorney about this.")
+    call.turn("call_s", "Please stop calling me about this.")
     assert call.turn("call_s", "How much was it again?") == {"text": STOPPED_CLOSE, "hangup": True}
     assert call.responder.calls == []
 
@@ -416,7 +447,6 @@ class _RecordingConn:
         ("stop calling me", True, ["insert into public.flags", "update public.phone", "audit"]),
         ("That's not my debt.", True, ["into public.dispute", "set status = 'disputed'", "audit"]),
         ("That's not my debt.", False, ["into public.dispute", "audit_event"]),  # debt untouched
-        ("I have a lawyer.", False, ["insert into public.flags", "audit_event"]),
         ("wrong number", False, ["audit_event"]),
     ],
 )

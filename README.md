@@ -4,7 +4,7 @@
 
 A debt-collection voice agent that puts compliance first, built one small step at a time.
 
-Right now the project can send messages to a language model and get a reply back, and it has an agent that remembers the conversation, follows a system prompt kept in a file, and can look up an account with a tool. The made-up debtors live in a local Postgres database run by Supabase. The pre-call compliance rules (calling hours, the 7-in-7 call limit, consent, stop requests, do-not-call, lawyers, bankruptcy and death) are here as plain Python checks; they are not wired into the agent yet. Every decision they make can be written to an append-only audit log that the database won't let anyone edit. There is a webhook that AgentPhone can call during a phone call, and a fake caller to test it without a phone. Each call's conversation is saved as it happens, so every turn of a call sees the turns before it. A first read-only web page shows the debtors with their pre-call result and the audit log. A dialer checks each debt right before dialing, writes the call to the ledger first, and places it once. The call flow and the other rules come later, each in its own step.
+Right now the project can send messages to a language model and get a reply back, and it has an agent that remembers the conversation, follows a system prompt kept in a file, and can look up an account with a tool. The made-up debtors live in a local Postgres database run by Supabase. The pre-call compliance rules (calling hours, the 7-in-7 call limit, consent, stop requests, do-not-call) are here as plain Python checks; they are not wired into the agent yet. Every decision they make can be written to an append-only audit log that the database won't let anyone edit. There is a webhook that AgentPhone can call during a phone call, and a fake caller to test it without a phone. Each call's conversation is saved as it happens, so every turn of a call sees the turns before it. A first read-only web page shows the debtors with their pre-call result and the audit log. A dialer checks each debt right before dialing, writes the call to the ledger first, and places it once. The call flow and the other rules come later, each in its own step.
 
 ## What is here
 
@@ -36,7 +36,7 @@ compliance/
   hours.py              Contact and check_calling_hours(contact, when)
   attempts.py           Attempt and check_call_frequency, the 7-calls-in-7-days limit
   consent.py            PhoneConsent and check_consent
-  flags.py              Flag and the checks for stop requests, do-not-call, lawyers, bankruptcy, death
+  flags.py              Flag and the checks for stop requests and do-not-call
   precall.py            CallFacts, check_before_call(facts, when) and may_call(decisions)
   audit.py              record(conn, decision) and verify_chain(conn), the audit log's hash chain
   utterance.py          SpeechState, check_sentence(sentence, state) and split_sentences(text)
@@ -241,11 +241,10 @@ Before any call, `check_before_call(facts, when)` runs every check and returns a
 | `tcpa_consent`   | the number has no consent on file, or the consent was revoked                         |
 | `cease`          | the debtor asked us to stop (`cease`), or to stop calling this number (`opt_out_phone`) |
 | `dnc`            | the number is on a do-not-call list                                                   |
-| `attorney`       | a lawyer represents the debtor on this debt                                           |
-| `bankruptcy`     | the debtor filed for bankruptcy                                                       |
-| `deceased`       | the debtor has died                                                                   |
 
 Missing data blocks too: no phone record, no call history or no flags loaded each turn into a blocked decision.
+
+Attorney representation, bankruptcy and deceased-person handling are not handled in this version. They are legal requirements for real collection calls; see "Not handled in this version" in [docs/compliance.md](docs/compliance.md).
 
 ```python
 from datetime import datetime, timezone
@@ -256,7 +255,7 @@ decisions = check_before_call(load_call_facts("ACC-1004"), datetime.now(timezone
 print(may_call(decisions), [d.reason for d in decisions if not d.allow])
 ```
 
-The facts come from two new tables: `call_attempt` (one row per call placed) and `flags` (stop requests, lawyers, bankruptcy and the rest). The seed adds one made-up debtor for each way a call can be blocked. `harness/db.py` only loads; the checks in `compliance/` do all the deciding, so they can be tested without a database.
+The facts come from two new tables: `call_attempt` (one row per call placed) and `flags` (stop requests, do-not-call and the rest). The seed adds one made-up debtor for each way a call can be blocked. `harness/db.py` only loads; the checks in `compliance/` do all the deciding, so they can be tested without a database.
 
 ```bash
 uv run demo part-07
@@ -266,7 +265,7 @@ The demo checks every made-up debtor at a fixed time (2026-11-05, 14:00 in New Y
 
 ## Test numbers
 
-`TEST_NUMBERS` (in the environment or `.env`; unset by default) is a comma-separated list of E.164 numbers, for the repo owner's own phone only, so real test calls can be placed outside calling hours and past the call limit. A listed number skips the `calling_hours` and `call_frequency` rules (the 7-in-7 limit and the pause after a conversation) and nothing else: consent, cease, DNC, attorney, bankruptcy, deceased and debt status still run and still block, and every attempt is still recorded. Every skip shows as an allow with the reason `skipped: test number (TEST_NUMBERS)` and, when the decision is recorded, as one `test_number_exemption` row per skipped rule in the audit log. A malformed entry is ignored and logged; there are no wildcards or prefixes. The dialer, the operator agent and `/api/precall` share the same check, and the phone webhook and live-call rules are not affected.
+`TEST_NUMBERS` (in the environment or `.env`; unset by default) is a comma-separated list of E.164 numbers, for the repo owner's own phone only, so real test calls can be placed outside calling hours and past the call limit. A listed number skips the `calling_hours` and `call_frequency` rules (the 7-in-7 limit and the pause after a conversation) and nothing else: consent, cease, DNC and debt status still run and still block, and every attempt is still recorded. Every skip shows as an allow with the reason `skipped: test number (TEST_NUMBERS)` and, when the decision is recorded, as one `test_number_exemption` row per skipped rule in the audit log. A malformed entry is ignored and logged; there are no wildcards or prefixes. The dialer, the operator agent and `/api/precall` share the same check, and the phone webhook and live-call rules are not affected.
 
 ```bash
 uv run demo part-27
@@ -283,8 +282,8 @@ from harness.db import connect
 from harness.precall import check_and_record
 
 with connect() as conn:
-    decisions = check_and_record(conn, "ACC-1011", datetime.now(timezone.utc))
-    print(may_call(decisions))  # False: Drew filed for bankruptcy, and that row is in the log
+    decisions = check_and_record(conn, "ACC-1007", datetime.now(timezone.utc))
+    print(may_call(decisions))  # False: Morgan asked us to stop, and that row is in the log
 ```
 
 The log can only grow. The database itself enforces this, so it doesn't depend on our code behaving:
@@ -493,7 +492,7 @@ cd web && npm install && npm run dev
 
 Before the first run, copy `web/.env.example` to `web/.env.local` and paste in the anon key that `npx supabase status` prints. Then open http://localhost:5173. The dev server forwards `/api` to the API on port 8000. If Windows blocks `api.exe`, `uv run python -m harness.api` starts the same thing.
 
-You need Node.js 18 or newer for `web/`. `npm run build` and `npm run lint` check it. The API's tests are in `tests/harness/test_api.py`; one checks that Robin Hale, who has a lawyer, comes back blocked by `attorney`.
+You need Node.js 18 or newer for `web/`. `npm run build` and `npm run lint` check it. The API's tests are in `tests/harness/test_api.py`; one checks that Morgan Patel, who asked us to stop, comes back blocked by `cease`.
 
 ```bash
 uv run demo part-12
@@ -526,18 +525,15 @@ Some things a caller says end the call by law, whatever the model thinks. So `de
 
 | Kind                  | Caller says, for example                 | Flag         | Escalate | Rule                     |
 | --------------------- | ---------------------------------------- | ------------ | -------- | ------------------------ |
-| `attorney`            | "I have a lawyer", "talk to my attorney" | `attorney`   | yes      | FDCPA 805(a)(2)          |
-| `bankruptcy`          | "I filed for bankruptcy", "chapter 7"    | `bankruptcy` | yes      | the bankruptcy stay      |
-| `deceased`            | "he passed away", "she died"             | `deceased`   | yes      | estates go another way   |
 | `cease`               | "stop calling", "take me off your list"  | `cease`      | no       | FDCPA 805(c), TCPA revocation |
 | `dispute`             | "not my debt", "I don't owe"             | none         | yes      | FDCPA 809                |
 | `recording_objection` | "don't record", "I don't consent to recording" | none   | no       | all-party recording states |
 | `wrong_number`        | "wrong number", "no one by that name"    | none         | no       | no third-party disclosure |
 
-- **Eager on purpose.** A false alarm only ends the call politely; a miss can break the law. So any mention of a lawyer fires, even "my lawyer friend said this is fine", and the matcher doesn't understand "not" ("I'm not bankrupt" fires too). Words match whole words, ignoring case.
-- **Not too eager.** "I don't want to stop paying", "the bank is not my favourite" and "the deadline has passed" fire nothing. "Please stop calling me at work" fires `cease`, and "I filed chapter 7 last year" fires `bankruptcy`.
+- **Eager on purpose.** A false alarm only ends the call politely; a miss can break the law. So "please don't call me at work" fires. Words match whole words, ignoring case.
+- **Not too eager.** "I don't want to stop paying", "the bank is not my favourite" and "I have a lawyer" fire nothing. "Please stop calling me at work" fires `cease`.
 - **Known false alarms, accepted:** "Don't contact my mother" and "I don't text much" fire `cease`, "I'm not disputing it" fires `dispute`, and "No, I'm not recording anything" fires `recording_objection`. Tests pin these down, so a change is a choice, not an accident.
-- **Several at once** come back in a fixed order (lawyer, bankruptcy, death, stop calling, dispute, recording, wrong number), so the first one's close is the line to say. No close mentions the debt, so it is safe to say to the wrong person.
+- **Several at once** come back in a fixed order (stop calling, dispute, recording, wrong number), so the first one's close is the line to say. No close mentions the debt, so it is safe to say to the wrong person.
 - **Flags:** `cease` sets the stricter `cease` flag, not `opt_out_phone`. A dispute sets no flag: it is the debt's `disputed` status, set later by `log_dispute`.
 - `combine(regex_hits, classifier_hits)` merges these with a later small classifier's hits: a trigger fires if either finds it.
 
@@ -572,12 +568,12 @@ The operator chat answers questions about accounts from the database, through re
 
 - `list_debtors(sort, filter, limit)`: sort by balance, last payment, status or name; filter by `state:XX`, `status:...`, `ready` or `blocked` (ready and blocked come from the dialer's own dry run). At most 25 rows, whatever limit is asked for, and the answer says when it was cut short.
 - `account_summary`, `call_history` (attempts, outcomes and the 7-in-7 count as the rule sees it), `portfolio_summary(period)` and `audit_for(debtor_id, limit)` (at most 50 rows). Phone numbers are masked to the last four digits everywhere, including inside audit evidence.
-- `next_allowed_call(debtor_id)`: steps forward 15 minutes at a time through `compliance.check_before_call` with the facts the dialer loads, for up to 14 days, and confirms the time it finds with `dialer.service.plan_queue`. It gives the time in the operator's zone too (`next_allowed_local`), so the model doesn't convert it. A block that waiting can't clear (cease, consent, attorney, a disputed debt) gives no time at all. It only answers a question; the dialer still runs every check when a call is approved.
+- `next_allowed_call(debtor_id)`: steps forward 15 minutes at a time through `compliance.check_before_call` with the facts the dialer loads, for up to 14 days, and confirms the time it finds with `dialer.service.plan_queue`. It gives the time in the operator's zone too (`next_allowed_local`), so the model doesn't convert it. A block that waiting can't clear (cease, consent, a disputed debt) gives no time at all. It only answers a question; the dialer still runs every check when a call is approved.
 
 Three tools write:
 
 - `add_note(debtor_id, text)` and `schedule_callback(debtor_id, when)` open an approval card like a call does. Nothing is written until Approve. A callback is refused, both when asked and on Approve, if the pre-call checks would block a call at that moment (calling hours, a cease, and the rest). Notes go in `debt_note`, which is append-only like `payment`. Each approved write has an audit row.
-- `record_stop(debtor_id, kind)` (cease, dispute, attorney or bankruptcy) writes at once with an audit row (`kind = stop`). It needs no approval because a stop can only mean fewer calls, but for that reason it takes only an exact account id, never a name: there is no card to catch a wrong match.
+- `record_stop(debtor_id, kind)` (cease or dispute) writes at once with an audit row (`kind = stop`). It needs no approval because a stop can only mean fewer calls, but for that reason it takes only an exact account id, never a name: there is no card to catch a wrong match.
 
 There is no chat tool to remove a stop flag, record consent, edit a balance or delete anything; a test checks the tool names, the code, and that running every tool leaves a stop in place.
 
