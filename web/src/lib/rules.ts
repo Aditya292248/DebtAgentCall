@@ -6,6 +6,7 @@ export const RULE_NAMES: Record<string, string> = {
   tcpa_consent: 'Phone consent',
   cease: 'Stop requests',
   dnc: 'Do-not-call list',
+  archived: 'Archived',
   precall: 'Missing data',
 }
 

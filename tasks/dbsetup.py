@@ -16,6 +16,7 @@ here so every caller shares them:
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 from collections.abc import Mapping
@@ -46,6 +47,8 @@ def _demo_debtor_ids() -> tuple[str, ...]:
 
 
 DEMO_DEBTOR_IDS = _demo_debtor_ids()
+if not DEMO_DEBTOR_IDS:  # an empty set would make "all demo people present" true of any database
+    raise RuntimeError("could not read the demo debtor ids from supabase/demo_seed.sql")
 
 
 class UnsafeDatabase(RuntimeError):
@@ -167,6 +170,39 @@ def load_demo_seed(conn: psycopg.Connection) -> str:
     conn.execute(DEMO_SEED.read_text(encoding="utf-8"))  # type: ignore[call-overload]
     conn.commit()
     return "loaded"
+
+
+def demo_seed_fingerprint() -> str:
+    return hashlib.sha256(DEMO_SEED.read_bytes()).hexdigest()
+
+
+def prepare_test_database(url: str) -> None:
+    """Make the test database current: migrated, with exactly today's demo seed.
+
+    The database is reused between runs, so a changed ``demo_seed.sql`` would
+    never reach it. A marker records which seed it was built from; when that is
+    not the current file, the database (only ever a ``_test`` one) is dropped
+    and built again, so a test run never sees rows from an older seed.
+    """
+    require_name_suffix(url, "_test")
+    create_database(url)
+    fingerprint = demo_seed_fingerprint()
+    with psycopg.connect(url, connect_timeout=3) as conn:
+        built = conn.execute("select to_regclass('public._applied_migration')").fetchone()
+        marker = conn.execute("select to_regclass('public._demo_seed_marker')").fetchone()
+        current = False
+        if marker and marker[0]:
+            row = conn.execute("select sha from public._demo_seed_marker").fetchone()
+            current = bool(row and row[0] == fingerprint)
+        used_before = bool(built and built[0])
+    if used_before and not current:
+        drop_database(url, "_test")
+        create_database(url)
+    prepare(url, seed=True)
+    with psycopg.connect(url, connect_timeout=3) as conn:
+        conn.execute("create table if not exists public._demo_seed_marker (sha text not null)")
+        conn.execute("delete from public._demo_seed_marker")
+        conn.execute("insert into public._demo_seed_marker (sha) values (%s)", (fingerprint,))
 
 
 def prepare(url: str, *, seed: bool) -> None:

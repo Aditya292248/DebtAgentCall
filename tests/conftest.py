@@ -39,7 +39,7 @@ def pytest_configure(config: pytest.Config) -> None:
         pytest.exit(f"test session aborted: {exc}", returncode=3)
     os.environ["DATABASE_URL"] = test_url
     try:
-        dbsetup.prepare(test_url, seed=True)
+        dbsetup.prepare_test_database(test_url)
     except dbsetup.UnsafeDatabase as exc:
         pytest.exit(f"test session aborted: {exc}", returncode=3)
     except Exception as exc:  # noqa: BLE001 - no server: db tests skip (or fail in CI)

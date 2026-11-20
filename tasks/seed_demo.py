@@ -20,6 +20,7 @@ from tasks.dbsetup import (
     demo_debtor_count,
     load_demo_seed,
     other_debtor_count,
+    require_local_server,
 )
 
 TOTAL = len(DEMO_DEBTOR_IDS)
@@ -33,9 +34,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    from harness.db import connect
+    from harness.db import connect, database_url
 
     try:
+        if not args.force and not args.check:
+            try:
+                require_local_server(database_url())
+            except UnsafeDatabase:
+                print(
+                    "refusing to load demo data into a database on another machine; "
+                    "it may be a hosted, real one. Pass --force if you are sure.",
+                    file=sys.stderr,
+                )
+                return 2
         with connect() as conn:
             demo, others = demo_debtor_count(conn), other_debtor_count(conn)
             if args.check:

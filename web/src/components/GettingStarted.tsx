@@ -1,12 +1,14 @@
 import { PhoneCall, ShieldCheck, UserPlus, type LucideIcon } from 'lucide-react'
 
+import { Button } from '@/components/ui/button'
+
 type Step = { icon: LucideIcon; title: string; body: string }
 
 const STEPS: Step[] = [
   {
     icon: UserPlus,
     title: 'Add your people',
-    body: 'Each person, their phone number and what they owe. The form to add them is coming next.',
+    body: 'Each person, their phone number and what they owe.',
   },
   {
     icon: ShieldCheck,
@@ -20,9 +22,9 @@ const STEPS: Step[] = [
   },
 ]
 
-/** Shown in the chat while nobody has been added: what this is and the three steps.
- *  Plain information only; it holds no data and does nothing when clicked. */
-export function GettingStarted() {
+/** Shown in the chat while nobody has been added: what this is and the three steps,
+ *  with a button that opens the add-person form. It holds no data of its own. */
+export function GettingStarted({ onAdd }: { onAdd: () => void }) {
   return (
     <section aria-labelledby="getting-started" className="space-y-5">
       <div className="space-y-1.5 text-center">
@@ -55,6 +57,11 @@ export function GettingStarted() {
           </li>
         ))}
       </ol>
+      <div className="flex justify-center">
+        <Button onClick={onAdd}>
+          <UserPlus /> Add your first person
+        </Button>
+      </div>
     </section>
   )
 }

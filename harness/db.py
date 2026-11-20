@@ -139,7 +139,7 @@ def read_debt_row(debt_id: str, conn: psycopg.Connection | None = None) -> DebtR
 # --- pre-call loaders ----------------------------------------------------------
 
 DEBT_SQL = """
-    select d.id::text, p.zip
+    select d.id::text, p.zip, p.archived_at is not null
     from public.debt d
     join public.debtor p on p.id = d.debtor_id
     where d.account_number = %s
@@ -221,13 +221,14 @@ def load_call_facts(
     row = conn.execute(DEBT_SQL, (account_number,)).fetchone()
     if row is None:
         return None
-    debt_id, zip_code = row
+    debt_id, zip_code, archived = row
     return CallFacts(
         debt_id=debt_id,
         zip=zip_code,
         phone=load_phone(conn, debt_id),
         attempts=load_attempts(conn, debt_id),
         flags=load_flags(conn, debt_id),
+        archived=archived,
     )
 
 

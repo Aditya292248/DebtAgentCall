@@ -77,3 +77,14 @@ def test_check_reports_without_writing(empty_database, capsys):
     assert seed_demo(["--check"]) == 0
     n = len(DEMO_DEBTOR_IDS)
     assert f"present ({n} of {n}" in capsys.readouterr().out
+
+
+def test_seed_demo_refuses_a_database_on_another_machine_without_force(monkeypatch, capsys):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://postgres:x@db.example.com:5432/postgres")
+    assert seed_demo([]) == 2  # refused before any connection is tried
+    assert "another machine" in capsys.readouterr().err
+
+
+def test_the_demo_people_are_read_from_the_seed_file():
+    assert len(DEMO_DEBTOR_IDS) >= 9
+    assert len(set(DEMO_DEBTOR_IDS)) == len(DEMO_DEBTOR_IDS)

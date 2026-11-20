@@ -88,3 +88,23 @@ def test_preparing_a_database_twice_changes_nothing(empty_database_url):
     dbsetup.prepare(empty_database_url, seed=False)
     with psycopg.connect(empty_database_url) as conn:
         assert dbsetup.apply_migrations(conn) == []
+
+
+@pytest.mark.db
+def test_a_test_database_built_from_an_older_seed_is_rebuilt(empty_database_url):
+    url = dbsetup.with_database(empty_database_url, "debtagentcall_stale_test")
+    try:
+        dbsetup.prepare_test_database(url)
+        with psycopg.connect(url) as conn:
+            conn.execute(
+                "insert into public.debtor (first_name, last_name, dob, address, zip, state)"
+                " values ('Left', 'Over', '1990-01-01', '1 St', '10001', 'NY')"
+            )
+            conn.execute("update public._demo_seed_marker set sha = 'an-older-seed'")
+        dbsetup.prepare_test_database(url)
+        with psycopg.connect(url) as conn:
+            assert dbsetup.other_debtor_count(conn) == 0  # the leftover row went with the old build
+            assert dbsetup.demo_debtor_count(conn) == len(dbsetup.DEMO_DEBTOR_IDS)
+        dbsetup.prepare_test_database(url)  # same seed again: kept, not rebuilt
+    finally:
+        dbsetup.drop_database(url, "_test")

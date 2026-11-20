@@ -229,7 +229,7 @@ def list_debtors(
     sort = (sort or "balance").strip().lower()
     if sort not in SORTS:
         raise ReadError(f"sort must be one of {', '.join(SORTS)}")
-    where, params, want = [], [], None
+    where, params, want = ["p.archived_at is null"], [], None
     for raw in filter(None, (f.strip().lower() for f in (filters or "").split(","))):
         key, _, value = raw.partition(":")
         if key == "state" and re.fullmatch(r"[a-z]{2}", value):
@@ -396,7 +396,8 @@ def portfolio_summary(
     """Totals for the whole portfolio, and payments and calls since ``since``."""
     by_status = conn.execute(
         "select d.status, count(*), coalesce(sum(d.balance_cents), 0), "
-        "coalesce(sum(public.current_balance_cents(d)), 0) from public.debt d group by 1"
+        "coalesce(sum(public.current_balance_cents(d)), 0) from public.debt d "
+        "join public.debtor p on p.id = d.debtor_id where p.archived_at is null group by 1"
     ).fetchall()
     start = since or date.min
     start_at = (
