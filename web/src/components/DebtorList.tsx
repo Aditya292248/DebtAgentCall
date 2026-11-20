@@ -1,31 +1,34 @@
-import { Search } from 'lucide-react'
+import { Plus, Search } from 'lucide-react'
 import { useState } from 'react'
 
 import { Notice } from '@/components/Notice'
 import { StatusPill } from '@/components/StatusPill'
+import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { money, type DebtView } from '@/lib/debts'
 import { cn } from '@/lib/utils'
 
-type Filter = 'all' | 'ready' | 'blocked'
+type Filter = 'all' | 'ready' | 'blocked' | 'archived'
 
 type Props = {
   debts: DebtView[]
+  archived: DebtView[]
+  onAdd: () => void
   selected: string | null
   onSelect: (account: string) => void
   dbError: string | null
   apiError: string | null
 }
 
-export function DebtorList({ debts, selected, onSelect, dbError, apiError }: Props) {
+export function DebtorList({ debts, archived, onAdd, selected, onSelect, dbError, apiError }: Props) {
   const [filter, setFilter] = useState<Filter>('all')
   const [query, setQuery] = useState('')
 
   const ready = debts.filter((d) => d.check?.may_call)
   const blocked = debts.filter((d) => d.check && !d.check.may_call)
-  const byFilter = { all: debts, ready, blocked }[filter]
+  const byFilter = { all: debts, ready, blocked, archived }[filter]
   const q = query.trim().toLowerCase()
   const shown = q
     ? byFilter.filter((d) =>
@@ -38,7 +41,9 @@ export function DebtorList({ debts, selected, onSelect, dbError, apiError }: Pro
       <div className="space-y-3 px-4 pt-5 pb-4">
         <div className="flex items-baseline justify-between">
           <h2 className="text-sm font-semibold">Debtors</h2>
-          <span className="text-xs text-muted-foreground tabular-nums">{debts.length} debts</span>
+          <Button size="sm" onClick={onAdd}>
+            <Plus /> Add person
+          </Button>
         </div>
         <div className="relative">
           <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
@@ -60,6 +65,10 @@ export function DebtorList({ debts, selected, onSelect, dbError, apiError }: Pro
             </TabsTrigger>
             <TabsTrigger value="blocked" className="text-xs">
               Can&apos;t call <span className="text-muted-foreground tabular-nums">{blocked.length}</span>
+            </TabsTrigger>
+            <TabsTrigger value="archived" className="text-xs">
+              Archived{' '}
+              <span className="text-muted-foreground tabular-nums">{archived.length}</span>
             </TabsTrigger>
           </TabsList>
         </Tabs>
@@ -98,7 +107,9 @@ export function DebtorList({ debts, selected, onSelect, dbError, apiError }: Pro
             </li>
           ))}
           {shown.length === 0 && !dbError && (
-            <li className="p-6 text-center text-sm text-muted-foreground">No debts match.</li>
+            <li className="p-6 text-center text-sm text-muted-foreground">
+              {filter === 'archived' ? 'No archived people.' : 'No debts match.'}
+            </li>
           )}
         </ul>
       </ScrollArea>

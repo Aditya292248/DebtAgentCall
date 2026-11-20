@@ -213,6 +213,7 @@ def test_clean_facts_allow_the_call():
         "tcpa_consent",
         "cease",
         "dnc",
+        "archived",
     ]
     assert all(d.allow for d in decisions)
     assert may_call(decisions)

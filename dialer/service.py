@@ -104,7 +104,13 @@ ORDER_SQL = """
     group by d.account_number
 """
 
-ACTIVE_SQL = "select account_number from public.debt where status = 'active' order by 1"
+ACTIVE_SQL = """
+    select d.account_number
+    from public.debt d
+    join public.debtor p on p.id = d.debtor_id
+    where d.status = 'active' and p.archived_at is null
+    order by 1
+"""
 
 
 @dataclass(frozen=True)

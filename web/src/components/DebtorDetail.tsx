@@ -1,10 +1,19 @@
 import { CircleCheck, CircleX } from 'lucide-react'
 
+import { ArchivePerson } from '@/components/ArchivePerson'
 import { StatusPill } from '@/components/StatusPill'
 import { money, type DebtView } from '@/lib/debts'
 import { ruleName } from '@/lib/rules'
 
-export function DebtorDetail({ debt, atLabel }: { debt: DebtView; atLabel: string }) {
+export function DebtorDetail({
+  debt,
+  atLabel,
+  onChanged,
+}: {
+  debt: DebtView
+  atLabel: string
+  onChanged: () => void
+}) {
   return (
     <div className="space-y-6">
       <p className="text-sm text-muted-foreground">
@@ -56,9 +65,14 @@ export function DebtorDetail({ debt, atLabel }: { debt: DebtView; atLabel: strin
         </ul>
       </section>
 
-      <p className="text-sm text-muted-foreground">
-        To call {debt.name}, ask the agent. Each call waits for your approval.
-      </p>
+      <div className="flex items-center justify-between gap-4">
+        <p className="text-sm text-muted-foreground">
+          {debt.archived
+            ? `${debt.name} is archived and cannot be called.`
+            : `To call ${debt.name}, ask the agent. Each call waits for your approval.`}
+        </p>
+        <ArchivePerson debt={debt} onDone={onChanged} />
+      </div>
     </div>
   )
 }

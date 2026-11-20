@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
+from compliance.archive import check_archived
 from compliance.attempts import Attempt, check_call_frequency
 from compliance.consent import PhoneConsent, check_consent
 from compliance.decision import Decision, block
@@ -34,6 +35,9 @@ class CallFacts:
     phone: PhoneConsent | None
     attempts: list[Attempt] | None
     flags: list[Flag] | None
+    # None means unknown, which blocks. The default is only for hand-built test facts;
+    # harness/db.py always reads it from the database.
+    archived: bool | None = False
 
 
 def check_before_call(
@@ -65,6 +69,7 @@ def check_before_call(
         check_consent(facts.phone),
         check_cease(facts.flags, facts.debt_id, e164),
         check_dnc(facts.flags, facts.debt_id, e164),
+        check_archived(facts.archived),
     ]
 
 
