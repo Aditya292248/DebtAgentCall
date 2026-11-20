@@ -52,7 +52,9 @@ export function Overview({ debts, atLabel }: { debts: DebtView[]; atLabel: strin
   return (
     <div className="space-y-6">
       <p className="text-sm text-muted-foreground">
-        {atLabel}. Pick a debtor in the list to see every check.
+        {debts.length === 0
+          ? 'No people yet. The numbers below are all zero until someone is added.'
+          : `${atLabel}. Pick a debtor in the list to see every check.`}
       </p>
       <div className="grid grid-cols-2 gap-3">
         <Tile label="Debts" value={String(debts.length)} />

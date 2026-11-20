@@ -1,5 +1,7 @@
--- Made-up debtors for local development. None of these people are real.
--- 555-01xx numbers are reserved for fiction. `supabase db reset` loads this file.
+-- Made-up debtors for demos and tests. None of these people are real.
+-- 555-01xx numbers are reserved for fiction. Nothing loads this file by itself:
+-- `uv run seed-demo` loads it into DATABASE_URL (and refuses a database that holds
+-- real people), and the test session loads it into its own `_test` database.
 --
 -- Each debtor from Casey Morgan on exists to trip one pre-call check. The call
 -- history is dated around 2026-11-05, the fixed time `uv run demo part-07` uses.
@@ -98,20 +100,3 @@ from (values
 ) as f (debtor_id, account_number, kind, data, set_at, source)
 join public.debtor p on p.id = f.debtor_id::uuid
 left join public.debt d on d.account_number = f.account_number;
-
--- Read-only access for the local web UI (web/), which signs in as nobody and uses
--- the anon key. This lives in the seed, not in a migration, on purpose: the seed
--- only runs on a local `supabase db reset`, and `supabase db push` never sends it
--- to a hosted project, where anon read access would expose every debtor.
--- Only `select` on the tables the UI reads; anon still can't write anything.
--- `payment` is read by `current_balance_cents`, the balance the list shows.
-create policy "anon can read debtors (local dev)" on public.debtor
-    for select to anon using (true);
-create policy "anon can read phones (local dev)" on public.phone
-    for select to anon using (true);
-create policy "anon can read debts (local dev)" on public.debt
-    for select to anon using (true);
-create policy "anon can read audit events (local dev)" on public.audit_event
-    for select to anon using (true);
-create policy "anon can read payments (local dev)" on public.payment
-    for select to anon using (true);

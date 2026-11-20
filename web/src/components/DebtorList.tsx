@@ -13,13 +13,15 @@ type Filter = 'all' | 'ready' | 'blocked'
 
 type Props = {
   debts: DebtView[]
+  /** True once the people have been read, so "no people" is never shown while loading. */
+  loaded: boolean
   selected: string | null
   onSelect: (account: string) => void
   dbError: string | null
   apiError: string | null
 }
 
-export function DebtorList({ debts, selected, onSelect, dbError, apiError }: Props) {
+export function DebtorList({ debts, loaded, selected, onSelect, dbError, apiError }: Props) {
   const [filter, setFilter] = useState<Filter>('all')
   const [query, setQuery] = useState('')
 
@@ -97,7 +99,15 @@ export function DebtorList({ debts, selected, onSelect, dbError, apiError }: Pro
               </button>
             </li>
           ))}
-          {shown.length === 0 && !dbError && (
+          {debts.length === 0 && loaded && !dbError && (
+            <li className="p-6 text-center">
+              <p className="text-sm font-medium">No people yet</p>
+              <p className="mt-1 text-sm text-muted-foreground">
+                Nobody has been added. People you add will show up here.
+              </p>
+            </li>
+          )}
+          {shown.length === 0 && debts.length > 0 && !dbError && (
             <li className="p-6 text-center text-sm text-muted-foreground">No debts match.</li>
           )}
         </ul>

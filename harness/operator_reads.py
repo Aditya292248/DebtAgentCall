@@ -39,6 +39,8 @@ import psycopg
 from compliance import Flag, check_before_call, may_call
 from harness import payments as pay
 
+NO_PEOPLE = "There are no people yet. Add a person first; there is nothing to list or call."
+
 MAX_LIST = 25
 MAX_SCAN = 500  # debts looked at for one list call; past this the result says so
 MAX_AUDIT = 50
@@ -269,7 +271,7 @@ def list_debtors(
         if want:
             item["blocked_by"] = _blocking(checks[r["debtor_id"]][1])
         shown.append(item)
-    return {
+    result: dict[str, Any] = {
         "sort": sort,
         "filters": filters or "",
         "count": len(rows),
@@ -278,6 +280,9 @@ def list_debtors(
         "truncated": len(rows) > len(shown) or not scanned_all,
         "debtors": shown,
     }
+    if not rows and not conn.execute("select 1 from public.debt limit 1").fetchone():
+        result["note"] = NO_PEOPLE
+    return result
 
 
 ATTEMPTS_SQL = """
@@ -411,7 +416,9 @@ def portfolio_summary(
         (start_at, now),
     ).fetchone()
     stops = conn.execute("select kind, count(*) from public.flags group by 1 order by 1").fetchall()
+    note = {} if by_status else {"note": NO_PEOPLE}
     return {
+        **note,
         "from": since.isoformat() if since else None,
         "to": now.astimezone(tz).date().isoformat(),
         "debts": {

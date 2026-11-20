@@ -40,7 +40,7 @@ export default function App() {
   const [callId, setCallId] = useState<string | null>(null)
 
   const atIso = at ? new Date(at).toISOString() : null
-  const { debts, dbError, apiError } = useDebts(atIso)
+  const { debts, dbError, apiError, loaded } = useDebts(atIso)
   const selectedDebt = debts.find((d) => d.account === selected)
   const accounts = new Map(debts.map((d) => [d.id, d.name]))
   const atLabel = at
@@ -127,6 +127,7 @@ export default function App() {
         <aside className="min-h-0 border-r bg-sidebar">
           <DebtorList
             debts={debts}
+            loaded={loaded}
             selected={selected}
             onSelect={select}
             dbError={dbError}
