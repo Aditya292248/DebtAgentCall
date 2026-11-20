@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/Aditya292248/DebtAgentCall/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Aditya292248/DebtAgentCall/actions/workflows/ci.yml)
 
-A debt-collection voice agent that puts compliance first, built one small step at a time.
+A collection agent that calls people about unpaid accounts and follows the rules in code: the model talks, the code decides.
 
 Right now the project can send messages to a language model and get a reply back, and it has an agent that remembers the conversation, follows a system prompt kept in a file, and can look up an account with a tool. The made-up debtors live in a local Postgres database run by Supabase. The pre-call compliance rules (calling hours, the 7-in-7 call limit, consent, stop requests, do-not-call) are here as plain Python checks; they are not wired into the agent yet. Every decision they make can be written to an append-only audit log that the database won't let anyone edit. There is a webhook that AgentPhone can call during a phone call, and a fake caller to test it without a phone. Each call's conversation is saved as it happens, so every turn of a call sees the turns before it. A first read-only web page shows the debtors with their pre-call result and the audit log. A dialer checks each debt right before dialing, writes the call to the ledger first, and places it once. The call flow and the other rules come later, each in its own step.
 

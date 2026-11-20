@@ -1,12 +1,12 @@
 [project]
 name = "debt-agent-call"
 version = "0.1.0"
-description = "A compliance-first debt-collection voice agent, built one part at a time."
+description = "A collection agent that calls people about unpaid accounts and follows the rules in code."
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{ name = "Aditya Bisht" }]
-keywords = ["voice-agent", "debt-collection", "compliance", "fastapi", "agentphone"]
+keywords = ["voice-agent", "collection-agent", "compliance", "fastapi", "agentphone"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Programming Language :: Python :: 3",
