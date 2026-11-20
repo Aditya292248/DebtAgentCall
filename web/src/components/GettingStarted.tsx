@@ -26,16 +26,7 @@ const STEPS: Step[] = [
  *  with a button that opens the add-person form. It holds no data of its own. */
 export function GettingStarted({ onAdd }: { onAdd: () => void }) {
   return (
-    <section aria-labelledby="getting-started" className="space-y-5">
-      <div className="space-y-1.5 text-center">
-        <h2 id="getting-started" className="text-lg font-semibold tracking-tight">
-          Welcome. Nobody is here yet.
-        </h2>
-        <p className="mx-auto max-w-md text-sm leading-relaxed text-muted-foreground">
-          This is a calm place to run debt-collection calls that follow the rules. Here is how it
-          works.
-        </p>
-      </div>
+    <section aria-label="Getting started" className="space-y-5">
       <ol className="grid gap-3 sm:grid-cols-3">
         {STEPS.map(({ icon: Icon, title, body }, i) => (
           <li

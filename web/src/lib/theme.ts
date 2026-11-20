@@ -4,9 +4,10 @@ const KEY = 'debtagentcall-theme'
 
 export function loadTheme(): Theme {
   try {
-    return localStorage.getItem(KEY) === 'dark' ? 'dark' : 'light'
+    // Dark unless the person chose light on an earlier visit.
+    return localStorage.getItem(KEY) === 'light' ? 'light' : 'dark'
   } catch {
-    return 'light'
+    return 'dark'
   }
 }
 
