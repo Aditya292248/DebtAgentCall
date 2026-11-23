@@ -33,6 +33,8 @@ SMOKE_MODULES = [
     "dialer.cli",
     "dialer.reconcile",
     "phone.call_end",
+    "phone.timing",
+    "tasks.latency_report",
     "harness.call_summary",
     "harness.operator",
     "harness.operator_reads",

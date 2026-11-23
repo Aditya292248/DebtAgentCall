@@ -72,6 +72,7 @@ tasks/
   checks.py             the live checks and demos the two scripts above run
   audit_verify.py       `uv run audit-verify`, which checks every hash in the audit log
   serve.py              `uv run serve`, which runs the webhook on this machine
+  latency_report.py     `uv run latency-report`, which reports how long live caller turns took on our side (see docs/latency.md)
 web/                    the browser UI (Vite, React, TypeScript, Tailwind, shadcn/ui), read-only for now
 tests/
   <area>/               offline tests by feature, in the same folders as the code
