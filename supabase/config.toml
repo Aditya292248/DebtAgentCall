@@ -13,8 +13,10 @@ shadow_port = 54320
 major_version = 17
 
 [db.seed]
+# local_dev.sql only grants the web UI read access; it adds no people or debts.
+# Sample people are opt in: `uv run seed-demo` (supabase/demo_seed.sql).
 enabled = true
-sql_paths = ["./seed.sql"]
+sql_paths = ["./local_dev.sql"]
 
 [studio]
 enabled = true

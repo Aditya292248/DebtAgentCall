@@ -60,6 +60,7 @@ const NOW_REFRESH_MS = 60_000
 export function useDebts(at: string | null) {
   const [rows, setRows] = useState<DebtorRow[]>([])
   const [dbError, setDbError] = useState<string | null>(supabaseConfigError)
+  const [loaded, setLoaded] = useState(false)
   const [result, setResult] = useState<CheckResult | null>(null)
   const [tick, setTick] = useState(0)
   const [reloads, setReloads] = useState(0)
@@ -83,7 +84,10 @@ export function useDebts(at: string | null) {
       .order('last_name')
       .then(({ data, error }) => {
         if (error) setDbError(error.message)
-        else setRows((data ?? []) as unknown as DebtorRow[])
+        else {
+          setRows((data ?? []) as unknown as DebtorRow[])
+          setLoaded(true)
+        }
       })
   }, [reloads])
 
@@ -137,6 +141,7 @@ export function useDebts(at: string | null) {
     archived: all.filter((d) => d.archived),
     dbError,
     apiError,
+    loaded,
     reload,
   }
 }

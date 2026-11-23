@@ -1068,7 +1068,7 @@ _PART13_LEAKY = "Sure. Your balance with Northwind Furniture is $1,250.00. Anyth
 
 
 def _part13_debtors() -> dict:
-    """Sam and Jordan as supabase/seed.sql has them, so the demo needs no database."""
+    """Sam and Jordan as supabase/demo_seed.sql has them, so the demo needs no database."""
     from datetime import date
 
     from harness.call_state import Debtor
@@ -1568,7 +1568,7 @@ def _demo_part24() -> None:
     print(f"chat history: {root}")
     print(
         "\nTo use it:\n"
-        "  1. npx supabase start, with the synthetic seed loaded (debtors, phones)\n"
+        "  1. npx supabase start, then uv run seed-demo (a fresh database has no people)\n"
         "  2. this terminal: uv run demo part-24   (serves /api on "
         f"http://127.0.0.1:{port})\n"
         "  3. another one: cd web && npm run dev, then open http://localhost:5173\n"

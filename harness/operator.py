@@ -541,6 +541,10 @@ class Operator:
             {"id": account, "name": name, "phone": mask_phone(e164)} for account, name, e164 in rows
         ]
         if not matches:
+            with self._connect() as conn:
+                anyone = conn.execute("select 1 from public.debtor limit 1").fetchone()
+            if not anyone:
+                return f"error: {reads.NO_PEOPLE}"
             return f"error: no debtor matches {query!r}"
         return json.dumps({"matches": matches})
 

@@ -61,11 +61,14 @@ skills/                 short playbooks for hard conversations (hardship, angry 
 supabase/
   config.toml           local Supabase settings (database on port 54322)
   migrations/           the debtor, phone, debt, call_attempt, flags, audit_event, call_message, payment and debt_note tables
-  seed.sql              made-up debtors, with call history and flags for each pre-call check
+  demo_seed.sql         made-up debtors, with call history and flags for each pre-call check (opt in: `uv run seed-demo`)
+  local_dev.sql         loaded on a local start: read access for the web UI, no people
 tasks/
   verify.py             offline checks: format, lint, types, tests, import
   accept.py             live check against a real model
   demo.py               a short live demo
+  seed_demo.py          `uv run seed-demo`, which loads the made-up debtors on request
+  dbsetup.py            makes, migrates and guards the throwaway test and demo databases
   checks.py             the live checks and demos the two scripts above run
   audit_verify.py       `uv run audit-verify`, which checks every hash in the audit log
   serve.py              `uv run serve`, which runs the webhook on this machine
@@ -195,11 +198,23 @@ The made-up debtors live in Postgres, run locally by [Supabase](https://supabase
 supabase start
 ```
 
-This starts a local database on port 54322 and creates the tables in `supabase/migrations/`. The first time, it also loads `supabase/seed.sql`. To wipe the database and load the seed again:
+This starts a local database on port 54322 and creates the tables in `supabase/migrations/`. **A fresh start is empty: no people, no phones, no debts.** `supabase/local_dev.sql` is the only file loaded, and it only lets the web UI read the tables. You add real people yourself.
+
+`npx supabase db reset` rebuilds the local database from the migrations and also gives an empty one. **It deletes everything in the local database**, every person, call and audit row you added, so only run it on a database you are happy to lose.
+
+If you started this project before the sample data was made opt in, your local database still holds the old sample people plus anything you added. The clean path is `npx supabase db reset` (which wipes it all) and then adding your own people again.
+
+### Sample people (demos and tests only)
+
+The made-up people live in `supabase/demo_seed.sql`, with call history and one flag for each way a call can be blocked. Nothing loads them by itself.
 
 ```bash
-supabase db reset
+uv run seed-demo           # load them into the database DATABASE_URL points at (safe to repeat)
+uv run seed-demo --check   # say whether they are there; changes nothing
+uv run seed-demo --force   # load them even though the database holds other people
 ```
+
+`seed-demo` refuses, with a message, when the database already holds anyone who is not one of them, so it cannot be pointed at real data by accident. Demos and acceptance checks from `part-06` on need these people. On an empty database they stop and say so. Add `--demo-db` (for example `uv run demo part-07 --demo-db`) to run on a throwaway `debtagentcall_demo` database that the command creates, migrates and fills first; it never touches the database the app uses.
 
 There are three tables:
 
@@ -213,7 +228,7 @@ The app connects with `DATABASE_URL` (see `.env.example`). It defaults to the lo
 
 `harness/db.py` has `find_account(name)`, which `lookup_account` uses. It matches the full name, ignoring case and extra spaces. If the database is down, the tool returns an `error: lookup_account failed: ...` message instead of crashing.
 
-The tests in `tests/harness/test_account_lookup_db.py` that need the database are marked `db`. They run against the real local database. When it isn't running, they are skipped with "run `supabase start`", so `uv run verify` still works offline. CI (`.github/workflows/ci.yml`) starts the database with `supabase db start` and sets `REQUIRE_DATABASE=1`, which turns that skip into a failure, so the database tests always run there. A `db` test that writes against a debt uses the `scratch_sam` fixture (`tests/conftest.py`): its own debtor and debt with fresh ids, deleted afterwards, so it passes on a fresh or a used database and leaves the seed rows alone.
+The tests in `tests/harness/test_account_lookup_db.py` that need the database are marked `db`. They never run against the database the app uses. `tests/conftest.py` makes a separate database on the same local server (`debtagentcall_test`, or the one in `TEST_DATABASE_URL`), applies `supabase/migrations/` in order, loads `supabase/demo_seed.sql`, and points `DATABASE_URL` at it for the whole run. The run aborts before any test starts unless that database's name ends in `_test`, and it refuses to create a database on a server that is not this machine. Your own `DATABASE_URL` is only used to find the server. Tests that need no people at all use a second `_test` database, `debtagentcall_empty_test`, made fresh and dropped at the end. When the server isn't running, the `db` tests are skipped with "run `supabase start`", so `uv run verify` still works offline. CI (`.github/workflows/ci.yml`) starts the server with `supabase db start` and sets `REQUIRE_DATABASE=1`, which turns that skip into a failure; it uses the same mechanism. A `db` test that writes against a debt uses the `scratch_sam` fixture (`tests/conftest.py`): its own debtor and debt with fresh ids, deleted afterwards.
 
 ```bash
 uv run pytest -m db -v
@@ -274,13 +289,13 @@ decisions = check_before_call(load_call_facts("ACC-1004"), datetime.now(timezone
 print(may_call(decisions), [d.reason for d in decisions if not d.allow])
 ```
 
-The facts come from two new tables: `call_attempt` (one row per call placed) and `flags` (stop requests, do-not-call and the rest). The seed adds one made-up debtor for each way a call can be blocked. `harness/db.py` only loads; the checks in `compliance/` do all the deciding, so they can be tested without a database.
+The facts come from two new tables: `call_attempt` (one row per call placed) and `flags` (stop requests, do-not-call and the rest). `uv run seed-demo` adds one made-up debtor for each way a call can be blocked. `harness/db.py` only loads; the checks in `compliance/` do all the deciding, so they can be tested without a database.
 
 ```bash
 uv run demo part-07
 ```
 
-The demo checks every made-up debtor at a fixed time (2026-11-05, 14:00 in New York), so the seeded call history always gives the same answers. This is not legal advice.
+The demo checks every made-up debtor at a fixed time (2026-11-05, 14:00 in New York), so the sample call history always gives the same answers. This is not legal advice.
 
 ## Test numbers
 
@@ -492,7 +507,7 @@ Nothing on the page is made up in the browser: every number and badge comes from
 
 Where the data comes from:
 
-- Debtors, phones, debts and the audit rows are read straight from Supabase by the browser, with the anon key. The end of `supabase/seed.sql` lets `anon` read those four tables, and nothing else: no writes, and no other tables. It is in the seed rather than a migration on purpose: the seed only runs on a local `supabase db reset`, so `supabase db push` never gives a hosted project with real data this open read access. If your local database predates it, run `supabase db reset`.
+- Debtors, phones, debts and the audit rows are read straight from Supabase by the browser, with the anon key. `supabase/local_dev.sql` lets `anon` read those four tables, and nothing else: no writes, and no other tables. It is in that file rather than a migration on purpose: it only runs on a local `supabase db reset`, so `supabase db push` never gives a hosted project with real data this open read access. If your local database predates it, run `supabase db reset` (which wipes it).
 - The badges and the chain check come from the Python code itself, through `harness/api.py` (`GET /api/precall?at=...` and `GET /api/audit/verify`), so the page never repeats the rules in JavaScript. Looking at the page doesn't write to the audit log.
 
 To run it, start the database, the API and the web app, each in its own terminal:
@@ -610,7 +625,7 @@ The operator chat can record what a debtor paid and answer questions about it. "
 - **One balance everywhere.** `debt.balance_cents` stays the amount the debt was placed with. `public.current_balance_cents(debt)` = `balance_cents` - payments + reversals is the only place the current balance is computed. `find_debtor_by_phone` reads it on each call turn, so the call tools, `lookup_account` and the sentence filter's known amount all reflect a payment on the next turn, and the old amount is blocked as `amount_mismatch`.
 - **Read-only questions:** `payment_history(debtor_id, since)` ("last 3 days" is today and the two days before, in the operator's time zone) gives the rows and their total. `on_time_report()` compares each debt's newest approved or confirmed `payment_plan` with its due dates: the down payment is due the day the plan was made, installment `k` is due `k` weeks, `2k` weeks or `k` months later; payments dated on or after the plan's start fill the installments in order; each one due so far is on time, late (covered only by a later payment) or missed (not covered yet), with no grace period. Debts without a plan are listed apart.
 
-Debts that existed before the payments migration get the day it ran as `opened_on`, so a backdated payment on one of them is refused until a person sets the real date. The seed sets it for the made-up debts. On an existing local database run `supabase migration up` (never against a hosted project).
+Debts that existed before the payments migration get the day it ran as `opened_on`, so a backdated payment on one of them is refused until a person sets the real date. The sample data sets it for the made-up debts. On an existing local database run `supabase migration up` (never against a hosted project).
 
 ```bash
 uv run demo part-31
@@ -654,7 +669,7 @@ uv run demo bills
 uv run dialer --dry-run
 ```
 
-The dry run prints who would be called and why each of the others is blocked, and writes nothing. Without `--dry-run`, the command refuses to start unless `AGENTPHONE_API_KEY` is set **and** `--confirm` is passed. `--when` works only with `--dry-run`: a real call rings now, so it is checked and logged at now. `uv run demo part-18` is the dry run on the seed data at a fixed time. This is not legal advice.
+The dry run prints who would be called and why each of the others is blocked, and writes nothing. Without `--dry-run`, the command refuses to start unless `AGENTPHONE_API_KEY` is set **and** `--confirm` is passed. `--when` works only with `--dry-run`: a real call rings now, so it is checked and logged at now. `uv run demo part-18` is the dry run on the sample people at a fixed time. With no people in the database, `uv run dialer` prints that there is nothing to dial and how to add people, and exits 0. This is not legal advice.
 
 ## Commands
 
@@ -674,7 +689,7 @@ The dry run prints who would be called and why each of the others is blocked, an
 | `uv run demo part-05`     | No             | Prints allow/block for the example debtors at several times     |
 | `uv run accept part-06`   | Yes            | Runs the earlier checks, then looks up Sam Doe in the database  |
 | `uv run demo part-06`     | No (needs DB)  | Prints the debt table and two lookups, one for an unknown name  |
-| `uv run accept part-07`   | Yes            | Runs the earlier checks, then the pre-call checks on every seeded debtor |
+| `uv run accept part-07`   | Yes            | Runs the earlier checks, then the pre-call checks on every sample debtor (needs `seed-demo`) |
 | `uv run demo part-07`     | No (needs DB)  | Prints every pre-call decision for each made-up debtor          |
 | `uv run accept part-08`   | Yes            | Runs the earlier checks, then records every debtor's decisions and checks the chain |
 | `uv run demo part-08`     | No (needs DB)  | Records the pre-call decisions, prints the audit rows and the chain check |
@@ -697,8 +712,8 @@ The dry run prints who would be called and why each of the others is blocked, an
 | `uv run demo part-16`     | No             | Plays a long call with a small limit and shows each compaction (real model if set, else the fake) |
 | `uv run accept part-17`   | Yes            | Runs the earlier checks, then checks the model loads the hardship skill for a caller who lost their job |
 | `uv run demo part-17`     | No             | Prints the skills menu and a call where the model loads a playbook (real model if set, else the fake) |
-| `uv run accept part-18`   | Yes            | Runs the earlier checks, then a dialer dry run over every seeded debtor |
-| `uv run demo part-18`     | No (needs DB)  | A dialer dry run on the seed: who would be called, and why the rest are blocked |
+| `uv run accept part-18`   | Yes            | Runs the earlier checks, then a dialer dry run over every sample debtor (needs `seed-demo`) |
+| `uv run demo part-18`     | No (needs DB)  | A dialer dry run on the sample people: who would be called, and why the rest are blocked |
 | `uv run reconcile --dry-run` | No (needs DB and AgentPhone settings) | Attempts older than 30 minutes with no end recorded, and what would be recorded for each; writes nothing |
 | `uv run dialer --dry-run` | No (needs DB) | Who would be called now, and why the others are blocked; writes nothing |
 | `uv run accept part-13`   | Yes (needs DB) | Runs the earlier checks, then plays three calls and checks the disclosure comes before any amount, and nothing leaks otherwise |

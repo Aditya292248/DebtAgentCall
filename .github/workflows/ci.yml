@@ -19,8 +19,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      # The local Supabase database `supabase db start` brings up, the same
-      # default harness/db.py uses. No hosted project, no secrets.
+      # The local Supabase server `supabase db start` brings up, the same default
+      # harness/db.py uses. No hosted project, no secrets. The tests never write
+      # to this `postgres` database: tests/conftest.py creates `debtagentcall_test`
+      # beside it, migrates it, loads supabase/demo_seed.sql, and aborts unless
+      # the database name ends in `_test`.
       DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
       # Fail, don't skip, a `db` test that can't reach the database.
       REQUIRE_DATABASE: "1"
@@ -38,7 +41,7 @@ jobs:
         with:
           version: 2.122.0
 
-      - name: Start the database (migrations and seed)
+      - name: Start the database (migrations only; it starts empty)
         run: supabase db start
 
       - name: Verify (format, lint, types, tests, smoke import)
