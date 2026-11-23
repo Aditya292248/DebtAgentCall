@@ -193,7 +193,13 @@ def test_a_wrong_value_is_not_also_listed_as_missing():
 def test_missing_facts_include_only_information_still_needed():
     got = intake({"creditor": "Acme", "amount": "125", "consent_source": "none"}, TODAY)
     assert set(got.missing) == {
-        "first_name", "last_name", "phone", "date_of_birth", "address", "zip", "state",
+        "first_name",
+        "last_name",
+        "phone",
+        "date_of_birth",
+        "address",
+        "zip",
+        "state",
     }
 
 
