@@ -402,3 +402,26 @@ def test_model_failure_before_any_save_can_be_retried(tmp_path: Path) -> None:
     with pytest.raises(TimeoutError):
         call.turn("call_flaky", "Hi again.", webhook_id="wh_flaky")
     assert call.turn("call_flaky", "Hi again.", webhook_id="wh_flaky") == {"text": "Happy to help."}
+
+
+def test_ten_month_request_survives_fragments_and_cannot_save_four_months(tmp_path: Path) -> None:
+    wrong = tool_call(
+        "offer_payment_plan", down_cents="25000", installments="4", frequency="monthly"
+    )
+    call = Call(
+        tmp_path,
+        [
+            "What schedule suits you?",
+            "How much upfront?",
+            tool_reply(wrong),
+            "Let me check the requested terms.",
+        ],
+    )
+    to_discuss(call, "call_preference")
+    assert (
+        call.turn("call_preference", "Can I spread this out?")["text"] == "What schedule suits you?"
+    )
+    assert call.turn("call_preference", "Over ten months please.")["text"] == "How much upfront?"
+    call.turn("call_preference", "I can do 250 down.")
+    assert not call.store.rows
+    assert "caller requested 10 months" in call.tool_results()[-1]

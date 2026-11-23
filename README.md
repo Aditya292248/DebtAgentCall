@@ -686,6 +686,7 @@ The dry run prints who would be called and why each of the others is blocked, an
 | `uv run demo part-10`     | No             | Plays a call through the webhook; each reply shows how much of the call the model saw |
 | `uv run accept part-11`   | Yes            | Runs the earlier checks, then the sentence filter on sample sentences |
 | `uv run demo part-11`     | No             | Prints allow/block for sample sentences at each stage of a call |
+| `uv run latency-report --since 1h` | Local DB | Shows median and p95 time to the first substantive voice reply, grouped by fixed and model turns. The hold line is counted separately. |
 | `uv run serve`            | Yes            | Runs the webhook on `127.0.0.1:8000` for AgentPhone to call       |
 | `uv run accept part-12`   | Yes            | Runs the earlier checks, then the UI API's tests against the database |
 | `uv run demo part-12`     | No (needs DB)  | Prints the API's pre-call answers at two times, and the chain check |

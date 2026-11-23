@@ -134,6 +134,58 @@ export function localTimeZone(): string | undefined {
   }
 }
 
+const progressLabels: Record<string, string> = {
+  find_debtor: 'Finding matching people',
+  list_debtors: 'Checking the account list',
+  call_history: 'Checking call history',
+  call_status: 'Checking call status',
+  account_summary: 'Reading the account',
+  check_call: 'Checking calling rules',
+  next_allowed_call: 'Checking the next calling time',
+  place_call: 'Preparing call approval',
+  payment_history: 'Checking payment history',
+  portfolio_summary: 'Reading portfolio totals',
+  audit_for: 'Reading the compliance log',
+  on_time_report: 'Checking payment schedules',
+  record_payment: 'Preparing payment approval',
+  reverse_payment: 'Preparing reversal approval',
+  schedule_callback: 'Checking callback details',
+  add_note: 'Preparing the note',
+  record_stop: 'Recording the stop request',
+  read_bill: 'Reading the bill draft',
+}
+
+export async function streamChat(
+  sessionId: string, message: string, onProgress: (label: string) => void,
+): Promise<ChatTurn> {
+  const res = await fetch('/api/chat/stream', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId, message, tz: localTimeZone() }),
+  })
+  if (!res.ok || !res.body) throw new ApiError(res.status, 'Chat is unavailable')
+  const reader = res.body.pipeThrough(new TextDecoderStream()).getReader()
+  let buffer = ''
+  try {
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      buffer += value
+      let end: number
+      while ((end = buffer.indexOf('\n')) >= 0) {
+        const event = JSON.parse(buffer.slice(0, end))
+        buffer = buffer.slice(end + 1)
+        if (event.type === 'done') return event.turn
+        if (event.type === 'error') throw new Error(event.message)
+        if (event.type === 'progress') onProgress(progressLabels[event.tool] ?? 'Working on your request')
+      }
+    }
+    throw new Error('Connection ended before the answer arrived.')
+  } finally {
+    reader.releaseLock()
+  }
+}
+
 export function sendChat(sessionId: string, message: string): Promise<ChatTurn> {
   return postJson<ChatTurn>('/api/chat', { session_id: sessionId, message, tz: localTimeZone() })
 }

@@ -291,3 +291,34 @@ def _digit(w: str) -> str | None:
 def _at(words: Words, i: int) -> str:
     """``words[i]``, or "" past either end."""
     return words[i] if 0 <= i < len(words) else ""
+
+
+_COUNTS = _UNIT | _TEEN | _TENS
+_MONTH_COUNT = re.compile(
+    r"\b(?P<count>\d{1,2}|"
+    + "|".join(_COUNTS)
+    + r")(?:[- ](?P<unit>"
+    + "|".join(_UNIT)
+    + r"))? months?\b",
+    re.I,
+)
+
+
+def requested_months(text: str) -> int | None:
+    """A single monthly term the caller requests. Leave ambiguous phrasing to dialogue."""
+    text = text.lower()
+    if re.search(r"\b(no|not|less|more|than|ago|late|behind|instead of|hundred)\b|n't", text):
+        return None
+    matches = list(_MONTH_COUNT.finditer(text))
+    if len(matches) != 1:
+        return None
+    match = matches[0]
+    if text[: match.start()].strip() and not re.search(
+        r"\b(pay|payment|installments?|over|in|want|like|prefer)\b", text
+    ):
+        return None
+    token, unit = match.group("count", "unit")
+    if unit and token not in _TENS:
+        return None
+    count = int(token) if token.isdigit() else _COUNTS[token]
+    return (count + (_UNIT[unit] if unit else 0)) or None

@@ -123,6 +123,8 @@ def test_a_stop_turn_a_blocked_turn_and_a_hold_turn_are_marked(tmp_path: Path) -
     assert reply_texts(chunks)[0].startswith("One moment")
     assert rows[-1].hold_line is True and rows[-1].streamed is True
     assert rows[-1].first_line_ms is not None and rows[-1].first_line_ms >= 50
+    assert rows[-1].substantive_ms is not None
+    assert rows[-1].substantive_ms > rows[-1].first_line_ms + 100
 
 
 def test_a_retry_with_the_same_webhook_id_makes_no_second_row(tmp_path: Path) -> None:
@@ -202,7 +204,7 @@ def test_the_row_has_only_the_expected_numeric_and_id_fields() -> None:
     assert {f.name for f in dataclasses.fields(TurnRecord)} == {
         "call_id", "kind", "total_ms", "turn_seq", "stage", "verified_ms", "triage_ms",
         "first_line_ms", "model_ms", "model_calls", "model_first_ms", "tool_ms", "tool_calls",
-        "tools", "hold_line", "streamed",
+        "tools", "hold_line", "streamed", "substantive_ms",
     }  # fmt: skip
 
 
@@ -248,3 +250,13 @@ def test_timing_is_off_unless_a_writer_is_given(tmp_path: Path) -> None:
     app = build_app(None, tmp_path)
     assert reply_texts(turn(app, "call_off", "Hello?"))[0]
     assert create_app(secret=SECRET) is not None
+
+
+def test_busy_verified_caller_uses_the_streaming_model(tmp_path: Path) -> None:
+    rows: list[TurnRecord] = []
+    app = build_app(rows.append, tmp_path, say_model("When would suit you?"))
+    to_discuss(app, "call_busy")
+    chunks = turn(app, "call_busy", "The shop is opening and I need to go.")
+    assert "".join(reply_texts(chunks)) == "When would suit you?"
+    assert rows[-1].kind == "model" and rows[-1].model_calls == 1
+    assert rows[-1].substantive_ms is not None

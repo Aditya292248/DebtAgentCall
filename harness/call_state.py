@@ -86,6 +86,9 @@ class CallState:
     # not given yet). Only the yes/no is kept, never what the caller said.
     dob_ok: bool | None = None
     zip_ok: bool | None = None
+    verification_prompts: int = 0
+    requested_months: int | None = None
+    plan_discussion: bool = False
     ended: bool = False  # set when the call's end was recorded (phone/call_end.py)
 
     @classmethod
@@ -108,6 +111,9 @@ class CallState:
             turns=int(data.get("turns", 0)),
             dob_ok=data.get("dob_ok"),
             zip_ok=data.get("zip_ok"),
+            verification_prompts=int(data.get("verification_prompts", 0)),
+            requested_months=data.get("requested_months"),
+            plan_discussion=bool(data.get("plan_discussion", False)),
             ended=bool(data.get("ended", False)),
         )
 

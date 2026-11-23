@@ -151,8 +151,8 @@ SUPERVISOR_ENV = "SUPERVISOR_NUMBER"  # set: escalate_to_human transfers the cal
 # In each saved state record: the webhook that turn answered and the reply sent,
 # so a retry is answered from here instead of running the turn again.
 REPLAY_KEY = "webhook"
-DIDNT_CATCH = "Sorry, I didn't catch that. Could you say it again?"
-SAFE_LINE = "Sorry, could you say that again?"  # when every sentence was blocked
+DIDNT_CATCH = "I’m here. Go ahead when you’re ready."
+SAFE_LINE = "I can’t confirm that detail. Would you like to speak with a specialist?"
 CANT_CONTINUE = "Sorry, I can't continue this call right now. Goodbye."
 # Sent first if nothing safe is ready to say by HOLD_AFTER seconds into a turn.
 HOLD_LINE = "One moment while I check that."
@@ -421,6 +421,7 @@ def _json(body: dict, timer: timing.TurnTimer | None) -> JSONResponse:
     if timer is None:
         return JSONResponse(body)
     timer.first_line()
+    timer.speech(body.get("text", ""))
     timer.finish()
     return JSONResponse(body, background=BackgroundTask(timer.write))
 
@@ -518,6 +519,8 @@ class _Live:
     ) -> AsyncIterator[bytes]:
         if timer is not None:
             timer.first_line()
+            if not timer.hold:
+                timer.speech(lead)
         yield ndjson_line(interim(lead))
         while True:
             _, value = await self._events.get()
@@ -525,6 +528,7 @@ class _Live:
                 if webhook_id:
                     seen.remember(webhook_id, value.whole)
                 if timer is not None:
+                    timer.speech(value.last.get("text", ""))
                     timer.finish()
                 yield ndjson_line(value.last)
                 return
@@ -532,10 +536,13 @@ class _Live:
                 # Lines were already spoken, so a 500 is too late: close the turn safely.
                 log.error("a turn failed after it started speaking", exc_info=value)
                 if timer is not None:
+                    timer.speech(SAFE_LINE)
                     timer.kind = "failure"
                     timer.finish()
                 yield ndjson_line(say(SAFE_LINE))
                 return
+            if timer is not None:
+                timer.speech(str(value))
             yield ndjson_line(interim(str(value)))
 
 
@@ -617,29 +624,33 @@ def _staged_reply(
     with _CALL_LOCKS[zlib.crc32(call_id.encode()) % len(_CALL_LOCKS)]:
         # A webhook we already answered (a retry, maybe after a restart) gets the
         # same reply again: no model, no tools, nothing saved twice.
-        if webhook_id and (earlier := _earlier_reply(turn, call_id, webhook_id)) is not None:
-            timing.set_kind("replay")
-            return earlier
-        # Stop triggers come first: the model never sees a turn that must end the call.
         with timing.span():
             hits = detect(transcript)
+        try:
+            session = turn.open_session(call_id)
+            data = session.last_state() or {}
+        except Exception:
+            if hits:
+                return _stop_turn(turn, call_id, debtor, phone, transcript, hits, webhook_id)
+            raise
+        if webhook_id and (earlier := _earlier_reply(data, call_id, webhook_id)) is not None:
+            timing.set_kind("replay")
+            return earlier
         if hits:
             return _stop_turn(turn, call_id, debtor, phone, transcript, hits, webhook_id)
-        return _locked_turn(turn, call_id, debtor, phone, transcript, webhook_id, emit)
+        state = CallState.from_dict(data) if data else CallState.new(call_id, debtor)
+        return _locked_turn(
+            turn, session, state, call_id, debtor, phone, transcript, webhook_id, emit
+        )
 
 
-def _earlier_reply(turn: _Turn, call_id: str, webhook_id: str) -> dict | None:
+def _earlier_reply(data: dict, call_id: str, webhook_id: str) -> dict | None:
     """The saved reply if this webhook was handled before, else None.
 
     If an earlier try of it saved a tool's row and then died before replying,
     there is no reply to repeat and running it again could save the row twice:
     fixed line and hang up, for a person to check.
     """
-    try:
-        data = turn.open_session(call_id).last_state() or {}
-    except Exception:
-        log.exception("call %s: could not check webhook %s for a repeat", call_id, webhook_id)
-        return None  # the turn itself will read the session again, and fail there
     seen = data.get(REPLAY_KEY)
     if not isinstance(seen, dict) or seen.get("id") != webhook_id:
         return None
@@ -721,6 +732,8 @@ def _pick(hits: list[Trigger], verified: bool) -> Trigger:
 
 def _locked_turn(
     turn: _Turn,
+    session: Session,
+    state: CallState,
     call_id: str,
     debtor: Debtor,
     phone: str,
@@ -728,8 +741,6 @@ def _locked_turn(
     webhook_id: str | None = None,
     emit: Emit = lambda text: None,
 ) -> dict | _Said:
-    session = turn.open_session(call_id)
-    state = load_state(session) or CallState.new(call_id, debtor)
     if state.debt_id != debtor.debt_id:
         return say_and_hangup(CANT_CONTINUE)  # the saved call is about another debt
 
@@ -749,6 +760,21 @@ def _locked_turn(
     agent = turn.make_agent(session)
     agent.stage_prompt_path = instructions_path(state.stage)
     agent.extra_context = _earlier_calls(turn, state, call_id)
+    if state.stage == Stage.VERIFY:
+        missing = [
+            name
+            for name, value in (("date of birth", state.dob_ok), ("ZIP code", state.zip_ok))
+            if value is None
+        ]
+        agent.extra_context = (
+            f"Identity fields still needed: {', '.join(missing)}. "
+            f"Turns since the last usable identity detail: {state.verification_prompts}."
+        )
+    elif state.stage == Stage.DISCUSS and state.requested_months is not None:
+        agent.extra_context += (
+            f"\nLast explicit monthly term recorded: {state.requested_months} months."
+        )
+
     # The call tools and nothing else: no subagents, no fan-out, no lookup by name.
     # Built from the saved state, so only the server can say who is verified.
     # Before a tool's first row is saved, mark this webhook as started, so a retry
@@ -880,6 +906,10 @@ def _add_purpose(
             debtor.debt_id,
         )
         state = replace(state, stage=Stage.WRAP)
+    state = replace(
+        state,
+        plan_discussion=bool(row and not ends and row.status == "active" and row.balance_cents > 0),
+    )
     return state, f"{disclosure} {line}"
 
 

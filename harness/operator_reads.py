@@ -281,8 +281,11 @@ def list_debtors(
 
 
 ATTEMPTS_SQL = """
-    select id::text, placed_at, outcome, connected, conversation_with_debtor
-    from public.call_attempt where debt_id = %s order by placed_at desc
+    select id::text, placed_at, outcome, connected, conversation_with_debtor,
+           exists (select 1 from public.call_message m where m.call_id = a.agentphone_call_id
+                   and m.kind = 'message' and m.body->'message'->>'role' = 'assistant'
+                   and length(trim(m.body->'message'->>'content')) > 0)
+    from public.call_attempt a where debt_id = %s order by placed_at desc
 """
 
 
@@ -300,8 +303,8 @@ def call_history(conn: psycopg.Connection, debtor_id: str, now: datetime) -> dic
         "debtor_id": r["debtor_id"],
         "name": r["name"],
         "attempts_total": len(rows),
-        "outcomes": dict(Counter(o for _, _, o, _, _ in rows)),
-        "calls_last_7_days": sum(week < placed <= now for _, placed, _, _, _ in rows),
+        "outcomes": dict(Counter(o for _, _, o, _, _, _ in rows)),
+        "calls_last_7_days": sum(week < placed <= now for _, placed, _, _, _, _ in rows),
         "seven_in_seven": {"allow": rule.allow, "reason": mask_in(rule.reason)},
         "attempts": [
             {
@@ -310,8 +313,9 @@ def call_history(conn: psycopg.Connection, debtor_id: str, now: datetime) -> dic
                 "outcome": outcome,
                 "connected": connected,
                 "talked_with_debtor": talked,
+                "agent_reply_recorded": replied,
             }
-            for i, placed, outcome, connected, talked in rows[:MAX_HISTORY]
+            for i, placed, outcome, connected, talked, replied in rows[:MAX_HISTORY]
         ],
         "truncated": len(rows) > MAX_HISTORY,
     }

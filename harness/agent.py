@@ -146,6 +146,7 @@ class Agent:
         # Optional timing hooks (phone/timing.py): (seconds in one streamed model call,
         # seconds to its first output) and (tool name, seconds in that tool). Numbers only.
         self.on_model_call: Callable[[float, float], None] | None = None
+        self.on_tool_start: Callable[[str], None] | None = None
         self.on_tool_time: Callable[[str, float], None] | None = None
         self._aborted = threading.Event()
         self.compactions = 0
@@ -407,6 +408,8 @@ class Agent:
             if held is not None:
                 result = ToolResult(held, "")
             else:
+                if self.on_tool_start is not None:
+                    self.on_tool_start(name)
                 began = time.perf_counter()
                 result = run_tool_result(tools, name, fn.get("arguments"))
                 if self.on_tool_time is not None:

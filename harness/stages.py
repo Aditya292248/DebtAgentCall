@@ -7,9 +7,8 @@ answer, with this stage's instructions".
 
     GREETING     First turn: ask for the person by full name, nothing else.
                  "Yes, speaking" -> VERIFY. "He's not here" -> THIRD_PARTY.
-                 "Wrong number" -> WRAP. A question ("Who is this?") goes to
-                 the model; anything else, such as a cut-off "Yeah. This is",
-                 gets a fixed re-ask and no model call.
+                 "Wrong number" -> WRAP. For questions and fragments, the model
+                 responds in the current stage.
     VERIFY       Ask for date of birth and ZIP and compare them with the
                  database here, in code (FDCPA 805(b): no debt talk with anyone
                  but the debtor). They may come in one turn or two. A match
@@ -17,8 +16,7 @@ answer, with this stage's instructions".
                  polite close and nothing about a debt. Answers may be spoken
                  in words ("the fifteenth of January nineteen ninety", "zero
                  two one one five"). A turn with no answer in it is not an
-                 attempt: a question goes to the model, anything else gets a
-                 fixed re-ask.
+                 attempt. The model responds using the remaining field names.
     DISCLOSE     Fixed text: recording notice, "automated assistant", and the
                  mini-Miranda (FDCPA 807(11)). Then DISCUSS. It never waits for
                  the caller, so it is said in the same turn the match happened.
@@ -47,7 +45,7 @@ from pathlib import Path
 
 from compliance.triggers import CLOSES
 from harness.call_state import CallState, Debtor, DebtRow, Stage, money
-from harness.spoken import find_dob, find_zip  # also imported from here by tests
+from harness.spoken import find_dob, find_zip, requested_months  # also imported from here by tests
 
 STAGES_DIR = Path(__file__).resolve().parent.parent / "instructions" / "stages"
 MAX_VERIFY_ATTEMPTS = 2
@@ -66,12 +64,6 @@ VERIFY_RETRY = (
 )
 ASK_DOB = "Thanks. And your date of birth?"
 ASK_ZIP = "Thanks. And your ZIP code?"
-# Said when a turn has nothing code can use (speech-to-text often sends half a
-# sentence as its own turn). None of them says anything was checked.
-GREETING_REASK = "Sorry, I didn't catch that. Am I speaking with {full_name}?"
-VERIFY_REASK = "Sorry, I didn't catch that. Could you tell me your date of birth and ZIP code?"
-REASK_DOB = "Sorry, I didn't catch that. Could you tell me your date of birth?"
-REASK_ZIP = "Sorry, I didn't catch that. Could you tell me your ZIP code?"
 VERIFY_FAILED = (
     "I'm sorry, I wasn't able to confirm who I'm speaking with, so I can't go any further "
     "today. Thank you for your time. Goodbye."
@@ -167,23 +159,18 @@ def next_stage(state: CallState, caller_text: str, debtor: Debtor) -> tuple[Call
             return replace(state, stage=Stage.WRAP), WRONG_NUMBER_CLOSE
         if _NOT_HERE.search(text):
             return replace(state, stage=Stage.THIRD_PARTY), LOCATION_ASK.format(**names)
-        if _CUT_OFF.search(text):
-            return state, GREETING_REASK.format(**names)  # "Yeah. This is": half a sentence
-        if said_yes(text, debtor):
+        if not _CUT_OFF.search(text) and said_yes(text, debtor):
             return replace(state, stage=Stage.VERIFY), VERIFY_ASK
-        if _QUESTION.search(text):
-            return state, None  # "Who is this?": the model answers, still in GREETING
-        return state, GREETING_REASK.format(**names)  # "could": nothing to go on
+        return state, None
 
     if state.stage == Stage.VERIFY:
         dob, rest = find_dob(text)
         zip_code = find_zip(rest)
         if dob is None and zip_code is None:  # no answer, so not an attempt either
-            if _QUESTION.search(text) and not _CUT_OFF.search(text):
-                return state, None  # "Why do you need that?": the model answers
-            return state, _verify_reask(state)  # "zero two one", "hold on": ask again
+            return replace(state, verification_prompts=state.verification_prompts + 1), None
         # Keep only whether each answer matched (never the answer itself), so the
         # caller can give the two in separate turns.
+        state = replace(state, verification_prompts=0)
         if dob is not None:
             state = replace(state, dob_ok=dob == debtor.dob)
         if zip_code is not None:
@@ -208,16 +195,18 @@ def next_stage(state: CallState, caller_text: str, debtor: Debtor) -> tuple[Call
             return state, None  # "Who's calling?": the model answers, no debt talk allowed
         return replace(state, stage=Stage.WRAP), THIRD_PARTY_CLOSE
 
+    if (
+        state.stage == Stage.DISCUSS
+        and state.verified
+        and state.disclosed
+        and state.plan_discussion
+    ):
+        months = requested_months(text)
+        if months is not None:
+            # Remember an explicit numeric constraint for the payment tool. The model
+            # chooses what to say using the conversation, even on the first request.
+            state = replace(state, requested_months=months)
     return state, None  # DISCUSS and WRAP: the model answers
-
-
-def _verify_reask(state: CallState) -> str:
-    """Ask again for whatever is still missing, with no word on what was said before."""
-    if state.dob_ok is not None and state.zip_ok is None:
-        return REASK_ZIP
-    if state.zip_ok is not None and state.dob_ok is None:
-        return REASK_DOB
-    return VERIFY_REASK
 
 
 def _disclose(state: CallState, names: dict[str, str]) -> tuple[CallState, str]:
