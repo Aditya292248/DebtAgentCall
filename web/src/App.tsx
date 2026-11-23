@@ -1,9 +1,10 @@
-import { ChartColumn, Clock, Moon, Radio, ScrollText, Sun } from 'lucide-react'
+import { ChartColumn, Moon, Radio, ScrollText, Sun } from 'lucide-react'
 import { useState } from 'react'
 
 import { AddPersonDialog } from '@/components/AddPersonDialog'
 import { AuditLog } from '@/components/AuditLog'
 import { ChatPanel } from '@/components/ChatPanel'
+import { GettingStarted } from '@/components/GettingStarted'
 import { DebtorDetail } from '@/components/DebtorDetail'
 import { DebtorList } from '@/components/DebtorList'
 import { LiveCall } from '@/components/LiveCall'
@@ -18,41 +19,26 @@ import { applyTheme, loadTheme, type Theme } from '@/lib/theme'
 /** What the side sheet shows, if it is open. */
 type Panel = 'debtor' | 'overview' | 'log' | 'call'
 
-/** The value a datetime-local input wants, for a Date in the browser's own zone. */
-function toLocalInput(date: Date): string {
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return (
-    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
-    `T${pad(date.getHours())}:${pad(date.getMinutes())}`
-  )
-}
-
 export default function App() {
   const [theme, setTheme] = useState<Theme>(() => {
     const t = loadTheme()
     applyTheme(t)
     return t
   })
-  // Empty means "now"; otherwise a datetime-local value in the browser's zone.
-  const [at, setAt] = useState('')
   const [selected, setSelected] = useState<string | null>(null)
   const [panel, setPanel] = useState<Panel | null>(null)
   // The call the live view shows; null means the most recent one.
   const [callId, setCallId] = useState<string | null>(null)
 
-  const atIso = at ? new Date(at).toISOString() : null
-  const { debts, archived, dbError, apiError, reload } = useDebts(atIso)
+  // Calls are always checked for right now.
+  const { debts, archived, dbError, apiError, loaded, reload } = useDebts(null)
   const [adding, setAdding] = useState(false)
   const selectedDebt = [...debts, ...archived].find((d) => d.account === selected)
   const accounts = new Map([...debts, ...archived].map((d) => [d.id, d.name]))
-  const atLabel = at
-    ? `Checked for ${new Date(at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}`
-    : 'Checked for right now'
+  const atLabel = 'Checked for right now'
 
-  // The list's own check, but only when it is for right now: a check for some
-  // other chosen time says nothing about a call approved now.
+  // The list's own check, which is for right now.
   const precallCheck = (debtorId: string): CheckView | null => {
-    if (at) return null
     const debt = debts.find((d) => d.account === debtorId)
     if (!debt?.check) return null
     return {
@@ -91,21 +77,6 @@ export default function App() {
         </span>
         <span className="text-sm font-semibold">DebtAgentCall</span>
         <div className="ml-auto flex items-center gap-1.5">
-          <label className="flex items-center gap-2 text-sm text-muted-foreground">
-            <Clock className="size-4" />
-            <span className="hidden lg:inline">Check at</span>
-            <input
-              type="datetime-local"
-              aria-label="Check the calls at this time"
-              value={at || toLocalInput(new Date())}
-              onChange={(e) => setAt(e.target.value)}
-              className="h-8 rounded-lg border border-input bg-card px-2 text-sm text-foreground tabular-nums"
-            />
-          </label>
-          <Button variant="outline" onClick={() => setAt('')} disabled={!at}>
-            Now
-          </Button>
-          <span aria-hidden className="mx-2 h-5 w-px bg-border" />
           <Button variant="ghost" onClick={() => setPanel('call')}>
             <Radio /> Live call
           </Button>
@@ -129,6 +100,7 @@ export default function App() {
         <aside className="min-h-0 border-r bg-sidebar">
           <DebtorList
             debts={debts}
+            loaded={loaded}
             archived={archived}
             onAdd={() => setAdding(true)}
             selected={selected}
@@ -140,6 +112,9 @@ export default function App() {
         <main className="min-h-0 min-w-0">
           <ChatPanel
             precallCheck={precallCheck}
+            emptyIntro={loaded && debts.length === 0 && archived.length === 0 && !dbError ? (
+              <GettingStarted onAdd={() => setAdding(true)} />
+            ) : undefined}
             onOpenCall={(id) => {
               setCallId(id)
               setPanel('call')

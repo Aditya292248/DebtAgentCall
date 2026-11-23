@@ -1068,7 +1068,7 @@ _PART13_LEAKY = "Sure. Your balance with Northwind Furniture is $1,250.00. Anyth
 
 
 def _part13_debtors() -> dict:
-    """Sam and Jordan as supabase/seed.sql has them, so the demo needs no database."""
+    """Sam and Jordan as supabase/demo_seed.sql has them, so the demo needs no database."""
     from datetime import date
 
     from harness.call_state import Debtor
@@ -1568,7 +1568,7 @@ def _demo_part24() -> None:
     print(f"chat history: {root}")
     print(
         "\nTo use it:\n"
-        "  1. npx supabase start, with the synthetic seed loaded (debtors, phones)\n"
+        "  1. npx supabase start, then uv run seed-demo (a fresh database has no people)\n"
         "  2. this terminal: uv run demo part-24   (serves /api on "
         f"http://127.0.0.1:{port})\n"
         "  3. another one: cd web && npm run dev, then open http://localhost:5173\n"
@@ -2860,3 +2860,57 @@ def _demo_add_person() -> None:
 
 ACCEPTANCE["add-person-by-chat"] = _add_person_run
 DEMOS["add-person-by-chat"] = _demo_add_person
+
+
+# ----------------------------------------------------------------------------
+# per-turn timing: what a turn costs on our side, from a simulated run
+# ----------------------------------------------------------------------------
+
+
+def _simulated_rows(calls: int) -> list[dict]:
+    import dataclasses
+
+    from tasks.latency_sim import simulate
+
+    return [dataclasses.asdict(r) for r in simulate(calls)]
+
+
+def _accept_latency() -> bool:
+    import json
+
+    rows = _simulated_rows(3)
+    kinds = {r["kind"] for r in rows}
+    stored = json.dumps(rows)
+    ok = (
+        len(rows) == 21  # 7 turns a call
+        and {"fixed", "model"} <= kinds
+        and all(r["model_calls"] == 0 for r in rows if r["kind"] == "fixed")
+        and all(r["model_calls"] >= 1 for r in rows if r["kind"] == "model")
+        and all(
+            r["first_line_ms"] is not None and r["first_line_ms"] <= r["total_ms"] for r in rows
+        )
+        and "Sam" not in stored
+        and "Northwind" not in stored
+    )
+    print(f"  {len(rows)} simulated turns, kinds {sorted(kinds)}")
+    return ok
+
+
+def _demo_latency() -> None:
+    from tasks.latency_report import render, slowest, summarize
+    from tasks.latency_sim import paired_overhead
+
+    calls = 100
+    rows = _simulated_rows(calls)
+    print(f"simulated, server overhead only, no model network time: {calls} calls\n")
+    print(render(summarize(rows), slowest(rows, full_ids=False)))
+    off, on = paired_overhead(calls)
+    off.sort()
+    on.sort()
+    mid = len(off) // 2
+    print(f"\nreply left the app, timing off vs on ({len(off)} turns each), p50 ms: "
+          f"{off[mid] * 1000:.2f} vs {on[mid] * 1000:.2f}")  # fmt: skip
+
+
+ACCEPTANCE["latency"] = _accept_latency
+DEMOS["latency"] = _demo_latency

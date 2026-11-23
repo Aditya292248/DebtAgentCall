@@ -26,8 +26,8 @@ call (``phone/webhook.py``). Like ``compliance.audit.record`` they take an open
 connection and leave committing to the caller, so the flag and its audit row
 commit together.
 
-The tables and seed data live in ``supabase/``. Run ``supabase start`` to get a
-local database, and ``supabase db reset`` to reload the seed.
+The tables live in ``supabase/migrations/``. Run ``supabase start`` to get an
+empty local database; ``uv run seed-demo`` adds made-up people to it on request.
 """
 
 from __future__ import annotations

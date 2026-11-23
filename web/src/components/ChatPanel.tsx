@@ -1,5 +1,5 @@
 import { LoaderCircle, SendHorizontal } from 'lucide-react'
-import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react'
 
 import {
   AddPersonApprovalCard,
@@ -36,9 +36,11 @@ type Props = {
   precallCheck: (debtorId: string) => CheckView | null
   /** Open the live view for a call that was just placed. */
   onOpenCall: (callId: string) => void
+  /** Shown instead of the usual greeting, for a database with nobody in it. */
+  emptyIntro?: ReactNode
 }
 
-export function ChatPanel({ precallCheck, onOpenCall }: Props) {
+export function ChatPanel({ precallCheck, onOpenCall, emptyIntro }: Props) {
   const [sessionId] = useState(chatSessionId)
   const [items, setItems] = useState<Item[]>([])
   const [pending, setPending] = useState<Approval[]>([])
@@ -121,7 +123,8 @@ export function ChatPanel({ precallCheck, onOpenCall }: Props) {
     <div className="flex h-full flex-col">
       <ScrollArea className="min-h-0 flex-1">
         <div className="mx-auto max-w-3xl space-y-6 px-6 py-8">
-          {items.length === 0 && (
+          {items.length === 0 && emptyIntro}
+          {items.length === 0 && !emptyIntro && (
             <div className="rounded-xl border border-dashed px-6 py-8 text-center">
               <h2 className="text-base font-semibold">Ask the agent</h2>
               <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-muted-foreground">
