@@ -180,6 +180,15 @@ class PostgresSession(Session):
         session._start()
         return session
 
+    def _start(self) -> None:
+        with self._connect() as conn:
+            exists = conn.execute(
+                "select 1 from public.call_message where call_id = %s limit 1", (self.call_id,)
+            ).fetchone()
+        if not exists:
+            created = datetime.now(UTC).isoformat(timespec="seconds")
+            self._write("session", {"type": "session", "id": self.call_id, "created": created})
+
     def _write(self, kind: str, record: dict) -> None:
         from psycopg.types.json import Jsonb
 
@@ -188,6 +197,15 @@ class PostgresSession(Session):
                 "insert into public.call_message (call_id, kind, body) values (%s, %s, %s)",
                 (self.call_id, kind, Jsonb(record)),
             )
+
+    def last_state(self) -> dict | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "select body -> 'state' from public.call_message "
+                "where call_id = %s and kind = 'state' order by seq desc limit 1",
+                (self.call_id,),
+            ).fetchone()
+        return row[0] if row else None
 
     def _records(self) -> list[dict]:
         with self._connect() as conn:

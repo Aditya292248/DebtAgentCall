@@ -93,6 +93,7 @@ def build_app(
         ),
         supervisor_number="",
         read_debt=debt_as_found,
+        load_earlier=lambda debt, call: [],
         on_call_ended=lambda ended: None,  # type: ignore[arg-type,return-value]
         record_timing=record_timing,
         hold_after=hold_after,

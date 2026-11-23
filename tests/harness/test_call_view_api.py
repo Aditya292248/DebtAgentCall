@@ -212,3 +212,17 @@ def test_a_calls_transcript_never_includes_another_calls_messages(sam_with_phone
     assert "second call words" not in json.dumps(one)
     assert "first call words" not in json.dumps(two)
     assert {e["seq"] for e in one["audit_events"]}.isdisjoint(e["seq"] for e in two["audit_events"])
+
+
+def test_live_transcript_uses_saved_reply_in_place_of_blocked_draft():
+    from harness.call_view import transcript
+
+    receipt = {"id": "turn-1", "reply": {"text": "Would you like a callback?"}}
+    rows = [
+        (1, None, {"message": {"role": "user", "content": "Ten months please."}}),
+        (2, None, {"message": {"role": "assistant", "content": "Incorrect offer. Would"}}),
+        (3, None, {"state": {"webhook": receipt}}),
+        (4, None, {"state": {"webhook": receipt}}),
+    ]
+    turns, _ = transcript(rows)
+    assert [t["text"] for t in turns] == ["Ten months please.", "Would you like a callback?"]

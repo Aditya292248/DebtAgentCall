@@ -15,7 +15,7 @@ import {
   chatSessionId,
   decideApproval,
   decideFailure,
-  sendChat,
+  streamChat,
   type Approval,
   type ChatTurn,
   type Dial,
@@ -44,6 +44,8 @@ export function ChatPanel({ precallCheck, onOpenCall }: Props) {
   const [checks, setChecks] = useState<Map<string, CheckView>>(() => new Map())
   const [draft, setDraft] = useState('')
   const [busy, setBusy] = useState(false)
+  const [progress, setProgress] = useState('')
+  const follow = useRef(true)
   const bottom = useRef<HTMLDivElement>(null)
   // The time the approval cards judge a check's age by, at most 15 s behind.
   // A check that just came in is newer than it, so it reads as fresh.
@@ -55,8 +57,8 @@ export function ChatPanel({ precallCheck, onOpenCall }: Props) {
   }, [])
 
   useEffect(() => {
-    bottom.current?.scrollIntoView({ block: 'end' })
-  }, [items, pending])
+    if (follow.current) bottom.current?.scrollIntoView({ block: 'end' })
+  }, [items, pending, progress])
 
   const take = (turn: ChatTurn) => {
     setItems((xs) => [
@@ -77,11 +79,13 @@ export function ChatPanel({ precallCheck, onOpenCall }: Props) {
     e?.preventDefault()
     const message = draft.trim()
     if (!message || busy) return
+    follow.current = true
+    setProgress('Reading your request')
     setDraft('')
     setItems((xs) => [...xs, { kind: 'user', text: message }])
     setBusy(true)
     try {
-      take(await sendChat(sessionId, message))
+      take(await streamChat(sessionId, message, setProgress))
     } catch (err) {
       fail('The agent didn’t answer. Try again shortly.', err)
     } finally {
@@ -91,6 +95,7 @@ export function ChatPanel({ precallCheck, onOpenCall }: Props) {
 
   const decide = async (approval: Approval, approve: boolean) => {
     if (busy) return
+    setProgress(approve ? 'Processing approval' : 'Dismissing request')
     setBusy(true)
     try {
       take(await decideApproval(sessionId, approval.id, approve))
@@ -105,6 +110,7 @@ export function ChatPanel({ precallCheck, onOpenCall }: Props) {
   }
 
   const onKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       void send()
@@ -118,7 +124,12 @@ export function ChatPanel({ precallCheck, onOpenCall }: Props) {
 
   return (
     <div className="flex h-full flex-col">
-      <ScrollArea className="min-h-0 flex-1">
+      <ScrollArea className="min-h-0 flex-1" onScrollCapture={(event) => {
+        const view = event.target as HTMLElement
+        if (view.dataset.slot === 'scroll-area-viewport') {
+          follow.current = view.scrollHeight - view.clientHeight - view.scrollTop < 40
+        }
+      }}>
         <div className="mx-auto max-w-3xl space-y-6 px-6 py-8">
           {items.length === 0 && (
             <div className="rounded-xl border border-dashed px-6 py-8 text-center">
@@ -160,8 +171,8 @@ export function ChatPanel({ precallCheck, onOpenCall }: Props) {
             ),
           )}
           {busy && (
-            <p className="flex items-center gap-2 text-sm text-muted-foreground">
-              <LoaderCircle className="size-4 animate-spin" /> Working
+            <p role="status" className="flex items-center gap-2 text-sm text-muted-foreground">
+              <LoaderCircle className="size-4 animate-spin" /> {progress}
             </p>
           )}
           <div ref={bottom} />

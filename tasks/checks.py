@@ -1774,7 +1774,7 @@ def _part28_call(lines: list[str]) -> tuple[list[str], dict]:
 
 
 def _accept_part28() -> bool:
-    from harness.stages import VERIFY_REASK, VERIFY_RETRY
+    from harness.stages import VERIFY_RETRY
 
     yes = "Yes, speaking."
     _, right = _part28_call([yes, "fifteenth January nineteen ninety", "oh two one one five"])
@@ -1786,7 +1786,7 @@ def _accept_part28() -> bool:
         and not wrong["verified"]
         and wrong["verify_attempts"] == 1
         and said[-1] == VERIFY_RETRY
-        and cut[-2:] == [VERIFY_REASK, VERIFY_REASK]
+        and cut[-2:] == ["(the model answers)"] * 2
         and frag["verify_attempts"] == 0
     )
     print("spoken right answer verified:", right["verified"])

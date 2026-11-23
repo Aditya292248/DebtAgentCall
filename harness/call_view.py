@@ -112,11 +112,29 @@ def transcript(rows: list[tuple[int, Any, dict]]) -> tuple[list[dict], list[dict
             )
     turns: list[dict] = []
     tools: list[dict] = []
+    # A model message may contain draft text removed by the sentence filter.
+    # Signed live calls save the complete outgoing reply in their turn state.
+    has_replies = any("webhook" in (body.get("state") or {}) for _, _, body in rows)
+    replied: set[str] = set()
     for seq, at, body in rows:
+        receipt = (body.get("state") or {}).get("webhook") or {}
+        reply = receipt.get("reply") or {}
+        if receipt.get("id") and reply and receipt["id"] not in replied:
+            replied.add(receipt["id"])
+            if reply.get("text"):
+                turns.append(
+                    {
+                        "seq": seq,
+                        "at": _iso(at),
+                        "speaker": "agent",
+                        "text": scrub_text(reply["text"]),
+                    }
+                )
         message = body.get("message") or {}
         role = message.get("role")
         content = message.get("content")
-        if role in ("user", "assistant") and isinstance(content, str) and content.strip():
+        visible = role == "user" or (role == "assistant" and not has_replies)
+        if visible and isinstance(content, str) and content.strip():
             turns.append(
                 {
                     "seq": seq,
@@ -179,7 +197,8 @@ DEBT_SQL = """
 MESSAGES_SQL = """
     select seq, created_at, body from (
         select seq, created_at, body from public.call_message
-        where call_id = %s and kind = 'message' order by seq desc limit %s
+        where call_id = %s and (kind = 'message' or body->'state' ? 'webhook')
+        order by seq desc limit %s
     ) newest order by seq
 """
 
@@ -304,6 +323,12 @@ def _summary(row: tuple | None) -> dict | None:
     if row is None:
         return None
     outcome, facts_text, narrative, created = row
+    if "A payment plan was saved as approved:" in facts_text:
+        # Older summaries can describe a policy decision as a caller agreement.
+        facts_text += (
+            " Approval reflects the plan policy. Caller acceptance was not recorded separately."
+        )
+        narrative = None
     return {
         "outcome": outcome,
         "facts": scrub_text(facts_text),

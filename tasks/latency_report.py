@@ -2,7 +2,7 @@
 
 Reads ``public.turn_timing`` (written by the webhook after each reply, numbers only)
 and prints, for all turns and by kind of turn, the count and the p50, p95 and max of
-the time to the first line and of the whole turn, the share of turns that used the
+the time to the first substantive line and of the whole turn, the share of turns that used the
 hold line, and the time spent in the model and in tools.
 
 Percentiles use linear interpolation between the nearest ranks (the same as
@@ -14,7 +14,7 @@ a p95 that is little more than its max; read it as such.
   --json        the same numbers as JSON
 
 Call ids are shown as a short prefix unless ``--call`` is given. Server time only:
-see docs/latency.md for what is and is not measured.
+telephony transcription and playback are outside this measurement.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ PREFIX = 10
 EMPTY = "no turns recorded yet"
 COLUMNS = (
     "call_id, turn_seq, stage, kind, total_ms, first_line_ms, model_ms, model_calls, "
-    "tool_ms, tool_calls, hold_line"
+    "tool_ms, tool_calls, hold_line, substantive_ms"
 )
 GROUPS: tuple[tuple[str, Callable[[dict], bool]], ...] = (
     ("all turns", lambda r: True),
@@ -79,6 +79,9 @@ def summarize(rows: list[dict]) -> dict[str, Any]:
                 "group": name,
                 "turns": len(part),
                 "first_line_ms": _stats(firsts),
+                "substantive_ms": _stats(
+                    [r["substantive_ms"] for r in part if r.get("substantive_ms") is not None]
+                ),
                 "total_ms": _stats([r["total_ms"] for r in part]),
                 "hold_line_share": (sum(1 for r in part if r["hold_line"]) / len(part))
                 if part
@@ -119,7 +122,7 @@ def render(summary: dict[str, Any], worst: list[dict]) -> str:
     lines = [f"{summary['turns']} turns (milliseconds, our server only)"]
     lines.append("  by kind: " + ", ".join(f"{k} {v}" for k, v in sorted(summary["kinds"].items())))
     head = (
-        f"{'':<24}{'turns':>6} | {'first line':^23} | {'whole turn':^23} | {'hold':>5} | "
+        f"{'':<24}{'turns':>6} | {'first answer':^23} | {'whole turn':^23} | {'hold':>5} | "
         f"{'model p50/p95':>14} | {'tools p50/p95':>14}"
     )
     sub = (
@@ -128,7 +131,7 @@ def render(summary: dict[str, Any], worst: list[dict]) -> str:
     )
     lines += ["", head, sub, "-" * len(head)]
     for g in summary["groups"]:
-        f, t = g["first_line_ms"], g["total_ms"]
+        f, t = g["substantive_ms"], g["total_ms"]
         share = "-" if g["hold_line_share"] is None else f"{g['hold_line_share'] * 100:.0f}%"
         model = f"{_fmt(g['model_ms']['p50'])}/{_fmt(g['model_ms']['p95'])}"
         tools = f"{_fmt(g['tool_ms']['p50'])}/{_fmt(g['tool_ms']['p95'])}"

@@ -46,6 +46,7 @@ class TurnRecord:
     verified_ms: float | None = None  # request received to signature checked
     triage_ms: float | None = None  # stop triggers plus the stage step
     first_line_ms: float | None = None  # request received to first line handed over
+    substantive_ms: float | None = None
     model_ms: float = 0.0
     model_calls: int = 0
     model_first_ms: float | None = None  # first model call: wait for its first output
@@ -71,6 +72,7 @@ class TurnTimer:
         self.verified_at: float | None = None
         self.triage = 0.0
         self.first_line_at: float | None = None
+        self.substantive_ms: float | None = None
         self.end_at: float | None = None
         self.model = 0.0
         self.model_calls = 0
@@ -87,6 +89,10 @@ class TurnTimer:
     def first_line(self) -> None:
         if self.first_line_at is None:
             self.first_line_at = time.perf_counter()
+
+    def speech(self, text: str) -> None:
+        if text and self.substantive_ms is None:
+            self.substantive_ms = _ms(time.perf_counter() - self.t0)
 
     def finish(self) -> None:
         """The last line has been handed to the server."""
@@ -122,6 +128,7 @@ class TurnTimer:
             stage=self.stage,
             verified_ms=None if self.verified_at is None else _ms(self.verified_at - self.t0),
             triage_ms=_ms(self.triage),
+            substantive_ms=self.substantive_ms,
             first_line_ms=None if self.first_line_at is None else _ms(self.first_line_at - self.t0),
             model_ms=_ms(self.model),
             model_calls=self.model_calls,
@@ -202,8 +209,9 @@ def attach(agent: Any) -> None:
 INSERT_SQL = (
     "insert into public.turn_timing (call_id, turn_seq, stage, kind, total_ms, verified_ms,"
     " triage_ms, first_line_ms, model_ms, model_calls, model_first_ms, tool_ms, tool_calls,"
-    " tools, hold_line, streamed) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,"
-    " %s, %s, %s, %s)"
+    " tools, hold_line, streamed, substantive_ms)"
+    " values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,"
+    " %s, %s, %s, %s, %s)"
 )
 
 
@@ -220,6 +228,6 @@ def record_in_db(row: TurnRecord) -> None:
                 row.call_id, row.turn_seq, row.stage, row.kind, row.total_ms, row.verified_ms,
                 row.triage_ms, row.first_line_ms, row.model_ms, row.model_calls,
                 row.model_first_ms, row.tool_ms, row.tool_calls, Jsonb(row.tools),
-                row.hold_line, row.streamed,
+                row.hold_line, row.streamed, row.substantive_ms,
             ),
         )  # fmt: skip

@@ -272,6 +272,10 @@ class LiveTools:
         tools = self._open()
         if tools is None or self.failure is not None:  # after a failure, nothing more runs
             return "error: the call tools are unavailable; promise nothing"
+        if name == "offer_payment_plan" and self.state.requested_months is not None:
+            months = self.state.requested_months
+            if str(args.get("installments")) != str(months) or args.get("frequency") != "monthly":
+                return f"error: caller requested {months} months; ask before changing their terms"
         try:
             result = getattr(tools, name)(**args)
         except Exception as exc:

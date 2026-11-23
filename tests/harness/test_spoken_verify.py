@@ -12,7 +12,7 @@ What it checks:
     only spoken of after that.
   - The negative cases: a spoken wrong date of birth does not verify and counts
     as one attempt; a spoken wrong ZIP does not verify; a fragment in GREETING
-    or VERIFY gets a fixed re-ask with no model call and no attempt counted; the
+    or VERIFY reaches the model without consuming a verification attempt; the
     model saying "you're verified" changes nothing.
 All offline, with the fake model. Only made-up people, dates and ZIP codes.
 """
@@ -27,20 +27,15 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from compliance import SpeechState, check_sentence
 from harness import Agent
 from harness.call_state import CallState, Debtor, Stage
 from harness.stages import (
     ASK_ZIP,
     DISCLOSURE,
     GREETING,
-    GREETING_REASK,
     PURPOSE,
-    REASK_DOB,
-    REASK_ZIP,
     VERIFY_ASK,
     VERIFY_FAILED,
-    VERIFY_REASK,
     VERIFY_RETRY,
     find_dob,
     find_zip,
@@ -65,7 +60,6 @@ ALEX = Debtor(
 NAMES = {"full_name": "Alex Rivera", "first_name": "Alex"}
 CLAIM = "Great, you're verified now. Your balance is $420.00."
 TO_VERIFY = ["Hello?", "Yes, speaking."]
-FIXED_REASKS = [GREETING_REASK.format(**NAMES), VERIFY_REASK, REASK_DOB, REASK_ZIP]
 
 
 class Call:
@@ -276,10 +270,10 @@ def test_a_half_answer_then_a_fragment_asks_only_for_the_rest() -> None:
     state, fixed = next_stage(_verifying(), "January fifteenth nineteen ninety", ALEX)
     assert fixed == ASK_ZIP
     state, fixed = next_stage(state, "zero two one", ALEX)  # cut off mid-ZIP
-    assert (fixed, state.verify_attempts) == (REASK_ZIP, 0)
+    assert (fixed, state.verify_attempts) == (None, 0)
     state, fixed = next_stage(_verifying(), "zero two one one five", ALEX)
     state, fixed = next_stage(state, "um", ALEX)
-    assert (fixed, state.verify_attempts) == (REASK_DOB, 0)
+    assert (fixed, state.verify_attempts) == (None, 0)
 
 
 def test_questions_still_go_to_the_model() -> None:
@@ -296,13 +290,6 @@ def test_a_finished_yes_is_not_taken_for_a_fragment(said: str) -> None:
         CallState(call_id="c", debtor_id="d", debt_id="x", stage=Stage.VERIFY, turns=2),
         VERIFY_ASK,
     )
-
-
-def test_reask_lines_claim_nothing_and_pass_the_filter() -> None:
-    strict = SpeechState(creditor=ALEX.creditor, known_amounts_cents={ALEX.balance_cents})
-    for line in FIXED_REASKS:
-        assert "verif" not in line.lower() and "confirm" not in line.lower()
-        assert check_sentence(line, strict).allow, line
 
 
 # --- over the signed simulator ---------------------------------------------------
@@ -343,35 +330,49 @@ def test_spoken_wrong_zip_does_not_verify(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("fragment", ["yeah this is", "Yeah. This is", "could", "um"])
-def test_fragment_in_greeting_gets_a_fixed_reask(tmp_path: Path, fragment: str) -> None:
-    call = Call(tmp_path)
+def test_fragment_in_greeting_uses_model(tmp_path: Path, fragment: str) -> None:
+    call = Call(tmp_path, reply="You can finish your thought.")
     replies = call.play("Hello?", fragment)
-    assert replies[-1] == GREETING_REASK.format(**NAMES)
+    assert replies[-1] == "You can finish your thought."
     assert call.last()["stage"] == "GREETING"
-    assert call.responder.calls == []
+    assert call.responder.calls
 
 
 @pytest.mark.parametrize(
     "fragment", ["yeah this is", "could", "zero two one", "one fifteen nineteen ninety", "hold on"]
 )
-def test_fragment_in_verify_gets_a_fixed_reask_and_is_no_attempt(
-    tmp_path: Path, fragment: str
-) -> None:
-    call = Call(tmp_path)
+def test_fragment_in_verify_uses_model_and_is_no_attempt(tmp_path: Path, fragment: str) -> None:
+    call = Call(tmp_path, reply="You can finish your thought.")
     replies = call.play(*TO_VERIFY, fragment, fragment)
-    assert replies[-2:] == [VERIFY_REASK, VERIFY_REASK]
+    assert replies[-2:] == ["You can finish your thought."] * 2
     state = call.last()
     assert (state["stage"], state["verified"], state["verify_attempts"]) == ("VERIFY", False, 0)
-    assert call.responder.calls == []
+    assert call.responder.calls
 
 
 def test_model_saying_verified_changes_nothing(tmp_path: Path) -> None:
     call = Call(tmp_path, reply=CLAIM)
     replies = call.play(*TO_VERIFY, "Why do you need that?", "Who is this?", "yeah this is")
-    assert len(call.responder.calls) == 2  # only the two questions reached the model
+    assert len(call.responder.calls) == 3
     for reply in replies:
         assert "$420" not in reply
-    assert replies[-1] == VERIFY_REASK
     state = call.last()
     assert (state["stage"], state["verified"], state["disclosed"]) == ("VERIFY", False, False)
     assert state["verify_attempts"] == 0
+
+
+def test_verification_fragment_then_split_answer():
+    state, line = next_stage(_verifying(), "Yeah. You're talking to", ALEX)
+    assert line is None
+    state, line = next_stage(state, "January fifteenth nineteen ninety", ALEX)
+    assert line == ASK_ZIP
+    state, line = next_stage(state, "zero two one one five", ALEX)
+    assert state.verified
+
+
+def test_repeated_fragments_keep_identity_unverified():
+    state = _verifying()
+    for count in range(1, 4):
+        state, line = next_stage(state, "um", ALEX)
+        assert line is None and state.verification_prompts == count
+        assert state.stage == Stage.VERIFY and not state.verified

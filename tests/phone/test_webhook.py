@@ -133,7 +133,7 @@ def test_empty_transcript_asks_again_without_the_model(client, responder) -> Non
     body = _message("   ")
     resp = _post(client, body, _headers(body))
     assert resp.status_code == 200
-    assert "didn't catch" in resp.json()["text"]
+    assert "Go ahead" in resp.json()["text"]
     assert responder.calls == []
 
 

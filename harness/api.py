@@ -35,17 +35,21 @@ forwards ``/api`` to it.
 
 from __future__ import annotations
 
+import asyncio
+import json
+import logging
 import os
 import re
 import threading
 from collections import defaultdict
+from collections.abc import AsyncIterator
 from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import Any
 
 import psycopg
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from compliance import check_before_call, may_call
@@ -195,6 +199,44 @@ def chat(body: ChatIn) -> dict[str, Any]:
     tz = _checked_tz(body.tz)
     with _chat_lock(body.session_id):
         return _turn_json(make_operator(body.session_id, tz).chat(body.message))
+
+
+@app.post("/api/chat/stream")
+async def stream_chat(body: ChatIn) -> StreamingResponse:
+    """Report tool starts and deliver the completed reply and approvals in one event."""
+    if not body.message.strip():
+        raise HTTPException(400, "message is empty")
+    tz = _checked_tz(body.tz)
+    lock = _chat_lock(body.session_id)
+    loop = asyncio.get_running_loop()
+    events: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+    def publish(event: dict[str, Any]) -> None:
+        loop.call_soon_threadsafe(events.put_nowait, event)
+
+    def run() -> None:
+        try:
+            with lock:
+                operator = make_operator(body.session_id, tz)
+                operator.agent.on_tool_start = lambda name: publish(
+                    {"type": "progress", "tool": name}
+                )
+                turn = operator.chat(body.message)
+                publish({"type": "done", "turn": _turn_json(turn)})
+        except Exception:
+            logging.getLogger(__name__).exception("Operator chat failed")
+            publish({"type": "error", "message": "Could not complete this request."})
+
+    async def lines() -> AsyncIterator[str]:
+        worker = loop.run_in_executor(None, run)
+        while True:
+            event = await events.get()
+            yield json.dumps(event) + "\n"
+            if event["type"] != "progress":
+                await worker
+                return
+
+    return StreamingResponse(lines(), media_type="application/x-ndjson")
 
 
 @app.post("/api/chat/approve")

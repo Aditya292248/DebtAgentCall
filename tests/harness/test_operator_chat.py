@@ -251,6 +251,18 @@ def test_chat_endpoint_returns_the_pending_approval_and_dials_nobody(api):
     assert phone.calls == []
 
 
+def test_stream_reports_dispatched_tool_and_one_final_approval(api):
+    client, phone, scripts = api
+    scripts.append(asks_to_call())
+    response = client.post("/api/chat/stream", json={"session_id": "s1", "message": "call Sam"})
+    progress, final = [json.loads(line) for line in response.iter_lines()]
+    assert progress == {"type": "progress", "tool": "place_call"}
+    assert final["type"] == "done"
+    assert final["turn"]["reply"] == "Waiting for your approval."
+    assert len(final["turn"]["pending_approvals"]) == 1
+    assert phone.calls == []
+
+
 def test_approve_endpoint_denies_and_rejects_unknown_ids(api):
     client, phone, scripts = api
     scripts.append(asks_to_call())
