@@ -47,41 +47,19 @@ ARGUMENTS = (
     "consent_note",
     "line_type",
 )
-# What to ask for, in the order a person would answer: who and what is owed, then the
-# contact details, then consent last.
-ASK_ORDER = (
-    "first_name",
-    "last_name",
-    "phone",
-    "creditor",
-    "amount",
-    "date_of_birth",
-    "address",
-    "zip",
-    "state",
-    "consent_source",
-    "consent_date",
+REQUIRED_FIELDS = frozenset(
+    {
+        "first_name",
+        "last_name",
+        "phone",
+        "creditor",
+        "amount",
+        "date_of_birth",
+        "address",
+        "zip",
+        "state",
+    }
 )
-# Fields that are best asked together, so the operator answers once.
-GROUPS = (
-    ("first_name", "last_name"),
-    ("address", "zip", "state"),
-    ("consent_source", "consent_date"),
-)
-PLAIN = {
-    "first_name": "first name",
-    "last_name": "last name",
-    "phone": "phone number",
-    "creditor": "who the debt is owed to",
-    "amount": "how much they owe",
-    "date_of_birth": "date of birth",
-    "address": "street address",
-    "zip": "ZIP code",
-    "state": "state",
-    "consent_source": "whether they have permission to call this number, and how it was given",
-    "consent_date": "roughly when they gave that permission (a date)",
-}
-MAX_ASK_GROUPS = 2
 NO_CONSENT = frozenset({"none", "no", "no consent", "unknown", "unsure", "not sure", "n/a", "na"})
 # Names a form field would have, so a problem found by check_person is told in the
 # tool's own words.
@@ -277,27 +255,6 @@ class Intake:
         return hashlib.sha256(blob.encode()).hexdigest()[:24]
 
 
-def _group_ask(missing: list[str]) -> list[dict[str, Any]]:
-    """At most two things to ask now, related fields together, in the order to ask."""
-    out: list[dict[str, Any]] = []
-    done: set[str] = set()
-    for name in ASK_ORDER:
-        if name not in missing or name in done:
-            continue
-        group = next((g for g in GROUPS if name in g), (name,))
-        fields = [f for f in group if f in missing]
-        done.update(fields)
-        out.append({"fields": fields, "about": [PLAIN[f] for f in fields]})
-        if len(out) == MAX_ASK_GROUPS:
-            break
-    return out
-
-
-def ask_next(intake: Intake) -> list[dict[str, Any]]:
-    """What to ask the operator for next: at most two groups, in plain words."""
-    return _group_ask(intake.missing)
-
-
 def intake(args: dict[str, str], today: date | None = None) -> Intake:
     """Read every field the operator has given; say what is missing and what is wrong."""
     today = today or datetime.now(UTC).date()
@@ -386,13 +343,9 @@ def intake(args: dict[str, str], today: date | None = None) -> Intake:
 
     _consent(out, got, today, given)
 
-    for name in ASK_ORDER:
-        if name == "consent_date" or name == "consent_source":
-            continue
-        if name not in given:
-            missing.append(name)
+    missing.extend(REQUIRED_FIELDS.difference(given))
     _consent_missing(out)
-    missing.sort(key=ASK_ORDER.index)
+    missing.sort()  # Stable tool output; the model chooses the next question.
 
     # The shared check, on what has been given so far, for problems this module
     # does not look for itself (lengths, a real state code, half a consent record).

@@ -9,7 +9,7 @@ The model talks. Code decides.
 - The model calls one tool, `add_person`, with everything it knows so far, every time. Nothing is remembered between calls: no half-built record lives in the model or in a table.
 - Code reads the fields (`harness/person_intake.py`): a phone like "617 555 0123" becomes `+16175550123`, a date of birth like "March 3 85" becomes `1985-03-03`, "1.2k" becomes 120000 cents, and a ZIP gives the state when the state was left out and the ZIP maps to one state. A date that could be read two ways ("3/4/85") is refused, never guessed.
 - The tool answers with a `status`:
-  - `needs_more`: lists what is `missing` and `ask_next`, at most two related things at a time (address, ZIP and state travel together).
+  - `needs_more`: lists all missing facts. The model uses the conversation to choose a short follow-up. The operator can provide details or correct an earlier answer in any order.
   - `needs_fix`: lists each problem in plain words, such as a date of birth in the future.
   - `ready`: opens an approval card. Nothing is saved yet.
 - Only `decide(approval_id, approve)` writes, through `harness.people.add_person`, the check and writer the web form uses. It reads the fields again from the tool call the card came from and refuses if they no longer match the card. A duplicate phone or account number is refused, and nothing is partly saved. The audit row says the person came from the operator chat and names the approval.

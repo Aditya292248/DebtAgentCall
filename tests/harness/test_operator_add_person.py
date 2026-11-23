@@ -135,7 +135,6 @@ def test_a_missing_date_of_birth_is_needs_more_and_opens_nothing(tmp_path):
     body = result(turn)
     assert body["status"] == "needs_more"
     assert body["missing"] == ["date_of_birth"]
-    assert body["ask_next"] == [{"fields": ["date_of_birth"], "about": ["date of birth"]}]
     assert turn.pending_approvals == []
     assert "Nothing has been saved" in body["note"]
 
@@ -191,7 +190,7 @@ def test_with_almost_nothing_it_still_answers(tmp_path):
     body = result(op.chat("add someone"))
     assert body["status"] == "needs_more"
     assert "first_name" in body["missing"]
-    assert len(body["ask_next"]) <= 2
+    assert "ask_next" not in body
 
 
 # --- against the database --------------------------------------------------------------
@@ -424,8 +423,13 @@ def test_a_conversation_from_missing_details_to_a_saved_person(tmp_path, people_
 
     one = op.chat("add Sam Lee, owes Acme Credit $480, phone " + p.typed)
     assert result(one)["status"] == "needs_more"
-    assert result(one)["missing"] == ["date_of_birth", "address", "zip", "state", "consent_source"]
-    assert result(one)["ask_next"][0]["fields"] == ["date_of_birth"]
+    assert set(result(one)["missing"]) == {
+        "date_of_birth",
+        "address",
+        "zip",
+        "state",
+        "consent_source",
+    }
     assert one.pending_approvals == []
 
     two = op.chat("born March 3 85, lives at 12 Elm Street, 02115")

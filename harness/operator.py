@@ -110,7 +110,7 @@ from harness.agent import Agent
 from harness.bills import BillDb
 from harness.memory import Session
 from harness.person_intake import ARGUMENTS as PERSON_ARGUMENTS
-from harness.person_intake import Intake, ask_next, intake, money
+from harness.person_intake import Intake, intake, money
 from harness.tool_outcome import ToolError, ToolOutcome, outcome_of, tool_body
 from harness.tools import Tool, ToolRegistry
 from model import Provider
@@ -956,7 +956,6 @@ class Operator:
             "have": self._have(found),
             "missing": found.missing,
             "problems": [{"field": f, "reason": r} for f, r in problems.items()],
-            "ask_next": ask_next(found),
             "notes": found.notes,
         }
         if body["status"] != "ready":

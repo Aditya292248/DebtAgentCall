@@ -15,7 +15,7 @@ from datetime import date
 
 import pytest
 
-from harness.person_intake import ask_next, intake, parse_amount, parse_date, parse_phone
+from harness.person_intake import intake, parse_amount, parse_date, parse_phone
 
 TODAY = date(2026, 11, 5)
 FULL = {
@@ -124,7 +124,7 @@ def test_a_stated_state_is_never_replaced_by_the_zip():
 def test_an_unknown_zip_leaves_the_state_to_ask_about():
     got = intake({**FULL, "zip": "09999"}, TODAY)  # military range
     assert "state" in got.missing
-    assert ask_next(got)[0]["fields"] == ["state"]
+    assert set(got.missing) == {"state", "consent_source"}
 
 
 def test_the_three_consent_states():
@@ -190,22 +190,11 @@ def test_a_wrong_value_is_not_also_listed_as_missing():
     assert "date_of_birth" not in got.missing
 
 
-def test_with_almost_nothing_it_asks_for_at_most_two_things_grouped():
-    got = intake({"first_name": "Sam", "last_name": "Lee", "amount": "480"}, TODAY)
-    assert got.status == "needs_more"
-    ask = ask_next(got)
-    assert len(ask) <= 2
-    assert ask[0]["fields"] == ["phone"]
-    # address, ZIP and state travel together
-    later = intake({**FULL, "address": "", "zip": "", "date_of_birth": ""}, TODAY)
-    groups = [g["fields"] for g in ask_next(later)]
-    assert ["address", "zip", "state"] in groups
-
-
-def test_what_was_given_is_never_asked_for_again():
-    got = intake(FULL, TODAY)
-    asked = {f for g in ask_next(got) for f in g["fields"]}
-    assert asked.isdisjoint(FULL)
+def test_missing_facts_include_only_information_still_needed():
+    got = intake({"creditor": "Acme", "amount": "125", "consent_source": "none"}, TODAY)
+    assert set(got.missing) == {
+        "first_name", "last_name", "phone", "date_of_birth", "address", "zip", "state",
+    }
 
 
 def test_a_made_up_field_cannot_slip_through_as_blank():
