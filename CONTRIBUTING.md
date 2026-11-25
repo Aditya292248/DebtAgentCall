@@ -27,7 +27,7 @@ npx supabase start
 npx supabase migration up
 ```
 
-The first start also loads `supabase/seed.sql`. `npx supabase db reset` wipes the local database and loads the seed again. Never run migrations against a hosted project that holds real data.
+A fresh start is an empty database. `uv run seed-demo` loads made-up people from `supabase/demo_seed.sql` when you want them (it refuses a database that holds anyone else). `npx supabase db reset` rebuilds the local database empty and **deletes everything in it**, so run it only on a database you can lose. Tests never use this database: they create and use their own `debtagentcall_test` and abort unless the name ends in `_test`. Never run migrations against a hosted project that holds real data.
 
 ## Check your work
 

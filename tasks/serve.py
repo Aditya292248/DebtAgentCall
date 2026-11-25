@@ -21,7 +21,7 @@ def main(argv: list[str] | None = None) -> int:
     if not os.environ.get(SECRET_ENV):
         print(f"warning: {SECRET_ENV} is not set, so every webhook will get a 401")
     print(f"webhook: http://{args.host}:{args.port}{WEBHOOK_PATH}")
-    uvicorn.run("phone.webhook:create_app", factory=True, host=args.host, port=args.port)
+    uvicorn.run("phone.webhook:create_served_app", factory=True, host=args.host, port=args.port)
     return 0
 
 

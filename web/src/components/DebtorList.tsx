@@ -14,6 +14,8 @@ type Filter = 'all' | 'ready' | 'blocked' | 'archived'
 
 type Props = {
   debts: DebtView[]
+  /** True once the people have been read, so "no people" is never shown while loading. */
+  loaded: boolean
   archived: DebtView[]
   onAdd: () => void
   selected: string | null
@@ -22,13 +24,25 @@ type Props = {
   apiError: string | null
 }
 
-export function DebtorList({ debts, archived, onAdd, selected, onSelect, dbError, apiError }: Props) {
+export function DebtorList({
+  debts,
+  archived,
+  loaded,
+  onAdd,
+  selected,
+  onSelect,
+  dbError,
+  apiError,
+}: Props) {
   const [filter, setFilter] = useState<Filter>('all')
   const [query, setQuery] = useState('')
 
+  const nobody = loaded && debts.length === 0 && archived.length === 0
   const ready = debts.filter((d) => d.check?.may_call)
   const blocked = debts.filter((d) => d.check && !d.check.may_call)
-  const byFilter = { all: debts, ready, blocked, archived }[filter]
+  // The Archived tab only exists while someone is archived; fall back to All if it empties.
+  const active = filter === 'archived' && archived.length === 0 ? 'all' : filter
+  const byFilter = { all: debts, ready, blocked, archived }[active]
   const q = query.trim().toLowerCase()
   const shown = q
     ? byFilter.filter((d) =>
@@ -45,6 +59,8 @@ export function DebtorList({ debts, archived, onAdd, selected, onSelect, dbError
             <Plus /> Add person
           </Button>
         </div>
+        {!nobody && (
+        <>
         <div className="relative">
           <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
           <Input
@@ -55,23 +71,26 @@ export function DebtorList({ debts, archived, onAdd, selected, onSelect, dbError
             className="h-9 bg-background pl-9"
           />
         </div>
-        <Tabs value={filter} onValueChange={(v) => setFilter(v as Filter)}>
+        <Tabs value={active} onValueChange={(v) => setFilter(v as Filter)}>
           <TabsList className="w-full">
             <TabsTrigger value="all" className="text-xs">
-              All <span className="text-muted-foreground tabular-nums">{debts.length}</span>
+              All
             </TabsTrigger>
             <TabsTrigger value="ready" className="text-xs">
-              Ready <span className="text-muted-foreground tabular-nums">{ready.length}</span>
+              Ready
             </TabsTrigger>
             <TabsTrigger value="blocked" className="text-xs">
-              Can&apos;t call <span className="text-muted-foreground tabular-nums">{blocked.length}</span>
+              Can&apos;t call
             </TabsTrigger>
-            <TabsTrigger value="archived" className="text-xs">
-              Archived{' '}
-              <span className="text-muted-foreground tabular-nums">{archived.length}</span>
-            </TabsTrigger>
+            {archived.length > 0 && (
+              <TabsTrigger value="archived" className="text-xs">
+                Archived
+              </TabsTrigger>
+            )}
           </TabsList>
         </Tabs>
+        </>
+        )}
         {apiError && (
           <Notice message="Can't check who may be called right now. Try again shortly." detail={apiError} />
         )}
@@ -106,9 +125,17 @@ export function DebtorList({ debts, archived, onAdd, selected, onSelect, dbError
               </button>
             </li>
           ))}
-          {shown.length === 0 && !dbError && (
+          {debts.length === 0 && archived.length === 0 && loaded && !dbError && (
+            <li className="p-6 text-center">
+              <p className="text-sm font-medium">No people yet</p>
+              <p className="mt-1 text-sm text-muted-foreground">
+                Nobody has been added. People you add will show up here.
+              </p>
+            </li>
+          )}
+          {shown.length === 0 && (debts.length > 0 || archived.length > 0) && !dbError && (
             <li className="p-6 text-center text-sm text-muted-foreground">
-              {filter === 'archived' ? 'No archived people.' : 'No debts match.'}
+              {active === 'archived' ? 'No archived people.' : 'No debts match.'}
             </li>
           )}
         </ul>

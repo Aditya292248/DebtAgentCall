@@ -6,6 +6,7 @@ import {
   Phone,
   NotebookPen,
   Receipt,
+  UserPlus,
   Wrench,
 } from 'lucide-react'
 
@@ -284,6 +285,63 @@ export function NoteApprovalCard({ approval, busy, onDecide }: PaymentApprovalPr
           {note
             ? 'Notes are kept and can’t be edited.'
             : 'The server checks calling hours and stops again before it saves.'}
+        </p>
+      </div>
+    </div>
+  )
+}
+
+/** An add_person waiting on the person: the exact person, masked phone, debt and
+ *  consent the server will save. Nothing is saved until Approve. Without consent
+ *  the person is saved and calls stay blocked, and the card says so. */
+export function AddPersonApprovalCard({ approval, busy, onDecide }: PaymentApprovalProps) {
+  const d = approval.details
+  return (
+    <div
+      className="space-y-4 rounded-xl border border-primary/40 bg-card p-5 shadow-sm ring-4 ring-primary-soft"
+      data-approval={approval.id}
+    >
+      <div className="flex items-center gap-2.5">
+        <span className="flex size-7 items-center justify-center rounded-full bg-primary-soft text-primary">
+          <UserPlus className="size-3.5" />
+        </span>
+        <span className="text-sm font-semibold">New person waiting for your approval</span>
+      </div>
+      <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-2 text-sm">
+        <dt className="text-muted-foreground">Name</dt>
+        <dd className="font-medium">{approval.name}</dd>
+        <dt className="text-muted-foreground">Phone</dt>
+        <dd className="tabular-nums">{approval.phone ?? 'unknown'}</dd>
+        <dt className="text-muted-foreground">Owes</dt>
+        <dd className="font-medium tabular-nums">
+          {d.amount ?? 'unknown'}{' '}
+          <span className="font-normal text-muted-foreground">to {d.creditor ?? 'unknown'}</span>
+        </dd>
+        <dt className="text-muted-foreground">Account</dt>
+        <dd>
+          {d.account_number ?? approval.debtor_id}
+          {d.account_generated && (
+            <span className="text-xs text-muted-foreground"> (made for you)</span>
+          )}
+        </dd>
+        <dt className="text-muted-foreground">Consent</dt>
+        <dd className={d.consent_recorded ? undefined : 'font-medium'}>{d.consent_line ?? 'unknown'}</dd>
+      </dl>
+      <div className="flex flex-wrap items-center gap-2 border-t pt-4">
+        <Button size="lg" className="px-4" disabled={busy} onClick={() => onDecide(true)}>
+          Approve
+        </Button>
+        <Button
+          size="lg"
+          variant="outline"
+          className="px-4"
+          disabled={busy}
+          onClick={() => onDecide(false)}
+        >
+          Deny
+        </Button>
+        <p className="ml-auto text-xs text-muted-foreground">
+          Nothing is saved until you approve. The server checks for a duplicate number first.
         </p>
       </div>
     </div>

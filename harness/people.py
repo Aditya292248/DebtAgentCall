@@ -28,6 +28,7 @@ so the two paths share one set of checks and one writer.
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Any
@@ -263,9 +264,16 @@ def _audit(conn: psycopg.Connection, rule: str, reason: str, debt_id: str, **evi
 
 
 def add_person(
-    fields: dict[str, Any], connect: Callable[[], psycopg.Connection] | None = None
+    fields: dict[str, Any],
+    connect: Callable[[], AbstractContextManager[psycopg.Connection]] | None = None,
+    *,
+    via: str = "the web UI",
+    evidence: dict[str, Any] | None = None,
 ) -> PersonRef:
-    """Validate, then save the person, phone and debt and one audit row, or nothing."""
+    """Validate, then save the person, phone and debt and one audit row, or nothing.
+
+    ``via`` says where the request came from in the audit reason, and ``evidence``
+    adds to the audit row (the operator chat adds its approval id)."""
     problems = check_person(fields)
     if problems:
         raise InvalidPerson(problems)
@@ -279,11 +287,12 @@ def add_person(
         _audit(
             conn,
             "person_added",
-            f"added {account} from the web UI",
+            f"added {account} from {via}",
             debt_id,
             account_number=account,
             phone_last4=fields["phone"][-4:],
             consent_recorded=consent,
+            **(evidence or {}),
         )
     return PersonRef(
         account_number=account,

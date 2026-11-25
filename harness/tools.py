@@ -35,12 +35,14 @@ from harness.tool_outcome import Denied, ToolError, ToolOutcome, ToolResult
 class Tool:
     name: str
     description: str
-    params: dict[str, str]  # argument name -> description; all are required strings
+    params: dict[str, str]  # argument name -> description; all are strings
     fn: Callable[..., str]  # fn(**arguments) -> result text
     # Repeating it is harmless: only pure reads. Anything that writes or dials stays False,
     # so a crash or timeout in the middle of it is "unknown" and never run again.
     safe_to_retry: bool = False
     timeout_seconds: float | None = None  # stop waiting after this long; None: no limit
+    # Arguments the model may leave out; ``fn`` must give each a default.
+    optional: tuple[str, ...] = ()
 
     def schema(self) -> dict:
         return {
@@ -53,7 +55,7 @@ class Tool:
                     "properties": {
                         p: {"type": "string", "description": d} for p, d in self.params.items()
                     },
-                    "required": list(self.params),
+                    "required": [p for p in self.params if p not in self.optional],
                     "additionalProperties": False,
                 },
             },
@@ -151,7 +153,7 @@ def run_tool_result(registry: ToolRegistry, name: str, arguments: str | dict | N
         if not isinstance(args, dict):
             return _error(f"error: arguments for {name} must be a JSON object")
 
-    missing = [p for p in tool.params if p not in args]
+    missing = [p for p in tool.params if p not in args and p not in tool.optional]
     if missing:
         return _error(f"error: {name} is missing argument(s): {', '.join(missing)}")
     extra = [a for a in args if a not in tool.params]

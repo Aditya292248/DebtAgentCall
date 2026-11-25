@@ -39,10 +39,16 @@
     open an approval like ``place_call``; nothing is written before it. A
     callback the pre-call checks would block at that moment is refused, both
     when it is asked for and again when it is approved.
+  - ``add_person(...)``: every field the operator has given so far, all optional,
+    on every call (``harness.person_intake``). It never writes. It answers
+    ``needs_more`` (with what is missing and what to ask next), ``needs_fix`` (with
+    each problem in plain words) or ``ready``, which opens an approval showing the
+    exact person, masked phone, debt and consent. Consent is never assumed: it is
+    asked about, and a person with none is saved with calls blocked.
   - ``record_stop(debtor_id, kind)``: cease or dispute.
     It writes at once, with an audit row, and needs no approval, because a stop
-    can only ever mean fewer calls. No tool removes a stop, records consent,
-    edits a balance or deletes anything.
+    can only ever mean fewer calls. No tool removes a stop, records consent for an
+    existing number, edits a balance or deletes anything.
 
 Given ``bills`` (a ``harness.bills.BillDb``), it also gets
 ``read_bill(draft_id)``: one bill draft as read off an uploaded bill, with its
@@ -50,14 +56,17 @@ flagged fields and the phone masked, so the chat can talk about it. It only
 reads. Saving a bill is ``POST /api/bills/{id}/confirm``, called by the
 person's form, never by the model.
 
-Only ``decide(approval_id, approve)`` dials or writes a payment, note or
-callback, and only for an approval that is still pending. It is called by code
+Only ``decide(approval_id, approve)`` dials or writes a payment, note, callback or
+new person, and only for an approval that is still pending. It is called by code
 (``POST /api/chat/approve``), never by the model. A payment approval runs every
 check again against the balance as it is then, inside one transaction with the
 debt locked, and writes the payment row and its audit event together; a check
 that fails then writes nothing but the refusal in the audit log. Notes and
-callbacks work the same way. For a call, it first makes sure AgentPhone is set
-up, so a missing key fails
+callbacks work the same way. An approved person is written by
+``harness.people.add_person`` (the check and writer the web form uses): the fields
+are read again from the tool call the card came from and must still match the card,
+a duplicate phone or account number is refused, and nothing is partly saved. For a
+call, it first makes sure AgentPhone is set up, so a missing key fails
 before any attempt is recorded (and leaves the approval pending). Then the
 decision is written to the history, so a second
 click on the same approval finds nothing pending. Then it goes through
@@ -68,7 +77,9 @@ call is allowed: the person approves, the checks allow.
 
 Pending approvals are not kept anywhere new: they are read back from the chat
 history in the session store. A ``place_call``, ``record_payment``,
-``reverse_payment``, ``add_note`` or ``schedule_callback`` result opens one; a message
+``reverse_payment``, ``add_note``, ``schedule_callback`` or ready ``add_person``
+result opens one (a newer ``add_person`` approval replaces an older undecided one:
+one person at a time); a message
 that starts with ``[approval <id>]`` closes it. Only code writes tool results,
 so only code can open one. Anyone (the model, or text typed in the box) could
 write a closing marker, but closing one only ever means fewer calls.
@@ -94,10 +105,13 @@ from compliance import Decision
 from compliance.audit import record as audit_record
 from harness import operator_reads as reads
 from harness import payments as pay
+from harness import people
 from harness.agent import Agent
 from harness.bills import BillDb
 from harness.memory import Session
-from harness.tool_outcome import ToolOutcome, outcome_of, tool_body
+from harness.person_intake import ARGUMENTS as PERSON_ARGUMENTS
+from harness.person_intake import Intake, intake, money
+from harness.tool_outcome import ToolError, ToolOutcome, outcome_of, tool_body
 from harness.tools import Tool, ToolRegistry
 from model import Provider
 from phone.client import PhoneClient
@@ -113,8 +127,10 @@ RECORD_PAYMENT = "record_payment"
 REVERSE_PAYMENT = "reverse_payment"
 ADD_NOTE = "add_note"
 SCHEDULE_CALLBACK = "schedule_callback"
+ADD_PERSON = "add_person"
+READY = "ready"  # add_person's status when it has opened an approval
 PAYMENT_ACTIONS = (RECORD_PAYMENT, REVERSE_PAYMENT)
-ACTIONS = (PLACE_CALL, *PAYMENT_ACTIONS, ADD_NOTE, SCHEDULE_CALLBACK)
+ACTIONS = (PLACE_CALL, *PAYMENT_ACTIONS, ADD_NOTE, SCHEDULE_CALLBACK, ADD_PERSON)
 DEFAULT_OPERATOR_TZ = "America/New_York"
 MAX_MATCHES = 10
 _ACCOUNT = re.compile(r"[A-Za-z0-9-]{1,40}")
@@ -209,6 +225,7 @@ def pending_approvals(messages: list[dict]) -> list[Approval]:
             if match := _MARKER.match(m["content"]):
                 closed.add(match.group(1))
     opened: list[Approval] = []
+    people_ids: list[str] = []  # every add_person approval ever opened, oldest first
     for m in messages:
         if m.get("role") != "tool":
             continue
@@ -216,9 +233,9 @@ def pending_approvals(messages: list[dict]) -> list[Approval]:
             body = json.loads(tool_body(m.get("content")))
         except (TypeError, ValueError):
             continue
-        if isinstance(body, dict) and body.get("status") == NEEDS_APPROVAL:
+        if isinstance(body, dict) and body.get("status") in (NEEDS_APPROVAL, READY):
             action = body.get("action", PLACE_CALL)
-            if action not in ACTIONS:
+            if action not in ACTIONS or (body["status"] == READY) != (action == ADD_PERSON):
                 continue
             approval = Approval(
                 id=str(body.get("approval_id")),
@@ -229,9 +246,14 @@ def pending_approvals(messages: list[dict]) -> list[Approval]:
                 action=action,
                 details=dict(body.get("details") or {}),
             )
+            if action == ADD_PERSON:
+                people_ids.append(approval.id)
             if approval.id not in closed:
                 opened.append(approval)
-    return opened
+    # One person at a time: a newer add_person approval (a correction, or the next
+    # person) replaces an older one that was never decided.
+    newest = people_ids[-1] if people_ids else None
+    return [a for a in opened if a.action != ADD_PERSON or a.id == newest]
 
 
 def _tool_calls_since(messages: list[dict], start: int) -> list[dict[str, Any]]:
@@ -484,6 +506,38 @@ class Operator:
                     self.schedule_callback,
                 ),
                 Tool(
+                    "add_person",
+                    "Add a new person (debtor, phone and debt). Pass every field you know "
+                    "from the conversation so far, every time; leave out what you don't "
+                    "know and never guess a value. It does not save anything. It tells "
+                    "you what is missing (needs_more), what is wrong (needs_fix), or "
+                    "opens an approval for the operator (ready).",
+                    {
+                        "first_name": "First name.",
+                        "last_name": "Last name.",
+                        "date_of_birth": "As the operator wrote it, e.g. 'March 3 85'.",
+                        "address": "Street address, e.g. '12 Elm St'.",
+                        "zip": "ZIP code.",
+                        "state": "State name or two-letter code.",
+                        "phone": "As the operator wrote it, e.g. '617 555 0123'.",
+                        "creditor": "Who the debt is owed to.",
+                        "account_number": "Only if the operator gave one; else leave out "
+                        "and a readable one is made.",
+                        "amount": "Dollars as written, e.g. '$480' or '1.2k'.",
+                        "consent_source": "How the person gave permission to be called, "
+                        "in the operator's words. 'none' if the operator says they have "
+                        "no permission or aren't sure. Leave out until the operator has "
+                        "been asked. Never invent it.",
+                        "consent_date": "When that permission was given, as written. Only "
+                        "with a real consent_source. Never invent it.",
+                        "consent_note": "Optional detail about the consent.",
+                        "line_type": "cell or landline, only if the operator said.",
+                    },
+                    self.add_person,
+                    safe_to_retry=True,  # it only reads; the approval it opens writes nothing
+                    optional=PERSON_ARGUMENTS,
+                ),
+                Tool(
                     "record_stop",
                     "Record that a debtor asked us to stop (cease) or disputes the debt. "
                     "Takes effect at once; "
@@ -541,6 +595,10 @@ class Operator:
             {"id": account, "name": name, "phone": mask_phone(e164)} for account, name, e164 in rows
         ]
         if not matches:
+            with self._connect() as conn:
+                anyone = conn.execute("select 1 from public.debtor limit 1").fetchone()
+            if not anyone:
+                return f"error: {reads.NO_PEOPLE}"
             return f"error: no debtor matches {query!r}"
         return json.dumps({"matches": matches})
 
@@ -878,6 +936,194 @@ class Operator:
             {"when": local.isoformat(), "shown": f"{local:%Y-%m-%d %H:%M} {self.tz.key}"},
         )
 
+    # --- adding a person -----------------------------------------------------------
+
+    def add_person(self, **given: str) -> str:
+        """Read the fields so far and answer with what is missing, wrong, or ready.
+
+        Stateless: nothing is kept between calls, and nothing is written. A ready
+        answer opens an approval; the full phone number, date of birth and address
+        stay in the tool call's arguments and never in this result.
+        """
+        found = intake(given, self._today())
+        problems = dict(found.problems)
+        if found.status == "ready":
+            try:
+                with self._connect() as conn:
+                    self._choose_account(conn, found, problems)
+            except psycopg.Error as exc:
+                raise ToolError(f"could not check for duplicates ({type(exc).__name__})") from exc
+            if not problems:
+                problems.update(people.check_person(found.form, self._today()))
+        body: dict[str, Any] = {
+            "status": "needs_fix" if problems else found.status,
+            "have": self._have(found),
+            "missing": found.missing,
+            "problems": [{"field": f, "reason": r} for f, r in problems.items()],
+            "notes": found.notes,
+        }
+        if body["status"] != "ready":
+            body["note"] = "Nothing has been saved and no approval is open."
+            return json.dumps(body)
+        form = found.form
+        body.update(
+            {
+                "action": ADD_PERSON,
+                "approval_id": "apr_" + secrets.token_hex(8),
+                "debtor_id": form["account_number"],
+                "name": f"{form['first_name']} {form['last_name']}",
+                "phone": mask_phone(form["phone"]),
+                "details": {
+                    "creditor": form["creditor"],
+                    "amount": money(form["balance_cents"]),
+                    "amount_cents": form["balance_cents"],
+                    "account_number": form["account_number"],
+                    "account_generated": not found.account_given,
+                    "state": form["state"],
+                    "line_type": form["line_type"],
+                    "consent_recorded": found.consent == "given",
+                    "consent_line": self._consent_line(found),
+                    "fingerprint": found.fingerprint(),
+                },
+                "note": "Nothing has been saved. The operator must approve this person; "
+                "the checks run again before it is written.",
+            }
+        )
+        return json.dumps(body)
+
+    @staticmethod
+    def _consent_line(found: Intake) -> str:
+        if found.consent == "given":
+            return f"{found.form['consent_source']}, given {found.form['consent_date']}"
+        return "No consent recorded. Calls to this number stay blocked until consent is recorded."
+
+    @staticmethod
+    def _have(found: Intake) -> dict[str, Any]:
+        f = found.form
+        out: dict[str, Any] = {}
+        for name, key in (
+            ("first_name", "first_name"),
+            ("last_name", "last_name"),
+            ("date_of_birth", "dob"),
+            ("address", "address"),
+            ("zip", "zip"),
+            ("state", "state"),
+            ("creditor", "creditor"),
+            ("account_number", "account_number"),
+            ("consent_source", "consent_source"),
+            ("consent_date", "consent_date"),
+        ):
+            if key in f:
+                out[name] = f[key]
+        if "phone" in f:
+            out["phone"] = mask_phone(f["phone"])
+        if "balance_cents" in f:
+            out["amount"] = money(f["balance_cents"])
+        if found.consent == "none":
+            out["consent"] = "none: saved without consent, calls stay blocked"
+        return out
+
+    @staticmethod
+    def _choose_account(conn: psycopg.Connection, found: Intake, problems: dict[str, str]) -> None:
+        """Refuse a phone or account number already on file; make an account number if none."""
+        form = found.form
+        row = conn.execute(people.ACCOUNT_OF_PHONE_SQL, (form["phone"],)).fetchone()
+        if row:
+            problems["phone"] = f"that phone number is already on file under account {row[0]}"
+        if found.account_given:
+            if conn.execute(people.ACCOUNT_TAKEN_SQL, (form["account_number"],)).fetchone():
+                problems["account_number"] = (
+                    f"account number {form['account_number']} is already on file"
+                )
+            return
+        for _ in range(20):
+            account = "ACC-" + secrets.token_hex(3).upper()
+            if not conn.execute(people.ACCOUNT_TAKEN_SQL, (account,)).fetchone():
+                form["account_number"] = account
+                return
+        raise ToolError("could not make an unused account number")
+
+    def _person_fields(self, approval: Approval) -> dict[str, Any]:
+        """The fields to write: the tool call the card came from, read again and held
+        to the card. Raises ``ValueError`` when it can't be confirmed."""
+        args: Any = None
+        for m in self.agent.messages:
+            for call in m.get("tool_calls") or []:
+                if call.get("id") == approval.tool_call_id:
+                    args = json.loads((call.get("function") or {}).get("arguments") or "{}")
+        if not isinstance(args, dict):
+            raise ValueError("the request this approval came from is no longer in the chat")
+        found = intake({k: v for k, v in args.items() if isinstance(v, str)}, self._today())
+        found.form["account_number"] = approval.details["account_number"]
+        if found.status != "ready" or found.fingerprint() != approval.details.get("fingerprint"):
+            raise ValueError("the details no longer match the approval")
+        return found.form
+
+    def _write_person(self, approval: Approval) -> dict[str, Any]:
+        try:
+            fields = self._person_fields(approval)
+            ref = people.add_person(
+                fields,
+                self._connect,
+                via="the operator chat",
+                evidence={
+                    "approval_id": approval.id,
+                    "outcome": ToolOutcome.SUCCESS.value,
+                    "recorded_by": self._recorded_by(),
+                },
+            )
+        except (ValueError, KeyError, people.InvalidPerson) as exc:
+            return self._person_refused(approval, str(exc))
+        except people.PhoneTaken as exc:
+            return self._person_refused(
+                approval, f"that phone number is already on file under account {exc}"
+            )
+        except people.AccountTaken as exc:
+            return self._person_refused(approval, f"account number {exc} is already on file")
+        return {"written": True, "reason": "", "account": ref.account_number}
+
+    def _person_refused(self, approval: Approval, reason: str) -> dict[str, Any]:
+        with self._connect() as conn, conn.transaction():
+            audit_record(
+                conn,
+                Decision(
+                    False,
+                    ADD_PERSON,
+                    reason,
+                    {"approval_id": approval.id, "outcome": ToolOutcome.DENIED.value},
+                ),
+                kind="operator",
+                call_id=self.session.call_id,
+                debt_id=None,
+            )
+        return {"written": False, "reason": reason}
+
+    def _decide_person(self, approval: Approval, approve: bool, marker: str) -> ChatTurn:
+        d = approval.details
+        what = f"{approval.name} ({d.get('amount')} to {d.get('creditor')})"
+        if not approve:
+            reply = f"{marker} Not saved: you denied adding {what}."
+        else:
+            done = self._attempt(approval, self._write_person)
+            if done.get("unknown"):
+                reply = f"{marker} {self._not_confirmed(what, done)}"
+            elif done["written"]:
+                tail = (
+                    f"Consent recorded: {d.get('consent_line')}."
+                    if d.get("consent_recorded")
+                    else "No consent is on file, so calls to this number stay blocked "
+                    "until consent is recorded."
+                )
+                made = " (made by the system)" if d.get("account_generated") else ""
+                reply = (
+                    f"{marker} Saved {what}, phone {approval.phone}, account "
+                    f"{done['account']}{made}. {tail}"
+                )
+            else:
+                reply = f"{marker} Not saved: {what} failed a check ({done['reason']})."
+        self.agent._add({"role": "assistant", "content": reply})
+        return ChatTurn(reply=reply, pending_approvals=self.pending())
+
     def record_stop(self, debtor_id: str, kind: str) -> str:
         kind = " ".join(kind.lower().split())
         if kind not in reads.STOP_KINDS:
@@ -1001,6 +1247,8 @@ class Operator:
         )
         if approval.action in PAYMENT_ACTIONS:
             return self._decide_payment(approval, approve, marker)
+        if approval.action == ADD_PERSON:
+            return self._decide_person(approval, approve, marker)
         if approval.action != PLACE_CALL:
             return self._decide_other(approval, approve, marker)
         if not approve:

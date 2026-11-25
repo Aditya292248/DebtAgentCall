@@ -1,8 +1,12 @@
 """``uv run dialer``: place the queued calls, or show who would be called.
 
     uv run dialer --dry-run                  every active debt, checked now
-    uv run dialer --dry-run --when 2026-11-05T19:00:00+00:00 ACC-1001 ACC-1003
+    uv run dialer --dry-run --when 2026-11-05T19:00:00+00:00 <account> <account>
     uv run dialer --confirm                  places real calls
+
+With no accounts in the database there is nothing to dial: it says so and exits 0.
+A fresh database is empty; add people in the app, or load sample people into a
+throwaway database with ``uv run seed-demo``.
 
 ``--dry-run`` writes nothing and dials nobody: it prints who would be called
 and why each of the others is blocked.
@@ -22,6 +26,12 @@ from datetime import UTC, datetime
 
 from dialer.service import DialResult, active_accounts, dial_queue, plan_queue
 from model.provider import _load_dotenv
+
+NOTHING_TO_DIAL = (
+    "nothing to dial: there are no active accounts in this database yet.\n"
+    "Add people in the app first. (To try the dialer on made-up people, point "
+    "DATABASE_URL at a throwaway database and run `uv run seed-demo`.)"
+)
 
 
 def _parse_when(text: str | None) -> datetime:
@@ -87,6 +97,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     with connect() as conn:
         accounts = args.accounts or active_accounts(conn)
         conn.commit()
+        if not accounts:
+            print(NOTHING_TO_DIAL)
+            return 0
         print(f"dialer at {when.isoformat()}, {len(accounts)} debts")
         if args.dry_run:
             result = plan_queue(accounts, when, conn)

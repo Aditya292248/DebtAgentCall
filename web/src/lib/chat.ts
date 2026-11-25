@@ -17,6 +17,7 @@ export type ApprovalAction =
   | 'reverse_payment'
   | 'add_note'
   | 'schedule_callback'
+  | 'add_person'
 
 /** Written by the server for a payment, reversal, note or callback; shown as it is. */
 export type PaymentDetails = {
@@ -32,6 +33,14 @@ export type PaymentDetails = {
   time_zone?: string
   payment_id?: string
   reason?: string
+  /** add_person: what is shown on the card; the phone is in `Approval.phone`, masked. */
+  creditor?: string
+  amount_cents?: number
+  account_number?: string
+  account_generated?: boolean
+  state?: string
+  consent_recorded?: boolean
+  consent_line?: string
 }
 
 export type Approval = {
