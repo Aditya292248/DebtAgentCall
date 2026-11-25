@@ -1,6 +1,6 @@
 # Architecture
 
-DebtAgentCall is a voice agent that phones people about debts, built so that the model talks and the code decides. A person at a text box (the operator) asks for a call; plain Python checks decide whether the call may be placed; AgentPhone does the speech-to-text and text-to-speech; and on every turn of the call, code, not the model, decides what stage the call is in, whether a sentence may be spoken, and whether a tool may run. The model writes the words in the one stage where it is allowed to talk, and every sentence it writes is checked before the caller hears it. Everything is stored in Postgres (a local Supabase), and every compliance decision is written to an append-only, hash-chained audit log. All data in the repository is made up.
+DebtAgentCall is a collection agent that phones people about unpaid accounts, built so that the model talks and the code decides. A person at a text box (the operator) asks for a call; plain Python checks decide whether the call may be placed; AgentPhone does the speech-to-text and text-to-speech; and on every turn of the call, code, not the model, decides what stage the call is in, whether a sentence may be spoken, and whether a tool may run. The model writes the words in the one stage where it is allowed to talk, and every sentence it writes is checked before the caller hears it. Everything is stored in Postgres (a local Supabase), and every compliance decision is written to an append-only, hash-chained audit log. All data in the repository is made up.
 
 This page describes what the code does today. For the rule-by-rule list and the limits of each rule, see [compliance.md](compliance.md). Nothing here is legal advice.
 
@@ -64,7 +64,7 @@ flowchart LR
 | `dialer/` | `service.py` (`dial_one`, `dial_queue`, `plan_queue`), `cli.py` (`uv run dialer`), `reconcile.py` (`uv run reconcile`). The only code that asks AgentPhone to place a call. No model. |
 | `model/` | `chat()` and `chat_stream()` over any OpenAI-compatible endpoint (`openai_compatible.py`), `provider.py` (settings from `.env`), and `fake.py` (a scripted model for tests and demos). |
 | `sim/` | A fake AgentPhone: `agentphone_sim.py` plays a scripted caller (YAML in `sim/scripts/`) against the webhook, with real signatures. |
-| `supabase/migrations/` | The schema, one file per feature, plus `supabase/seed.sql` (nine made-up debtors and call history that trip one check each). |
+| `supabase/migrations/` | The schema, one file per feature. Next to it, `supabase/local_dev.sql` (loaded on a local start: read access for the web app, no people) and `supabase/demo_seed.sql` (nine made-up debtors and call history that trip one check each, loaded only by `uv run seed-demo`). |
 | `web/` | The React app: debtor list with "Ready to call" or "Can't call", the operator chat with approval cards, the audit log with a chain check. It never decides anything itself: badges come from `/api/precall`. |
 | `tasks/` | The `uv run` commands: `verify`, `demo`, `accept`, `serve`, `audit-verify`. `checks.py` holds the demos and acceptance checks. |
 | `instructions/`, `skills/` | The model's prompts (system, one per stage, operator, subagent) and five short playbooks (hardship, angry caller, and so on). Plain Markdown, re-read every turn. |
@@ -175,7 +175,7 @@ After every turn the webhook saves the `CallState` (stage, verified, disclosed, 
 
 ## Data model
 
-Tables are in `supabase/migrations/`. Row level security is on for every table; the server connects as the database owner, and the web app reads with the anon key only from the five tables the end of `supabase/seed.sql` opens up for local development (`debtor`, `phone`, `debt`, `audit_event` and `payment`, which the balance function reads).
+Tables are in `supabase/migrations/`. Row level security is on for every table; the server connects as the database owner, and the web app reads with the anon key only from the five tables `supabase/local_dev.sql` opens up for local development (`debtor`, `phone`, `debt`, `audit_event` and `payment`, which the balance function reads).
 
 | Table | Holds | Written by |
 | --- | --- | --- |

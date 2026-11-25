@@ -1,4 +1,4 @@
-"""Call tools: what the voice agent may ask for during a call, and who says yes.
+"""Call tools: what the collection agent may ask for during a call, and who says yes.
 
 These tools are built on ``harness/tools.py`` (``Tool``, ``ToolRegistry``,
 ``run_tool``), so a failure always comes back as an ``error: ...`` string and

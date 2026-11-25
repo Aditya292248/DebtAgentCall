@@ -6,14 +6,14 @@ This is not legal advice, and the demo does not show legal compliance. Say so up
 
 ## Before the audience arrives
 
-The one-command start the owner uses is a local script that is not in this repository. These are the manual steps it replaces. Do them once, then rehearse.
+The one-command start the owner uses is a local script that is not in this repository. These are the manual steps it replaces. Do them once, then rehearse. The [README's local demo](../README.md#try-the-local-demo) is the same setup with more detail on each step; run all commands from the repository root unless a step says `web/`.
 
-You need [uv](https://docs.astral.sh/uv/), Node.js, and Docker Desktop running.
+You need [uv](https://docs.astral.sh/uv/), Node.js 20.19 or newer, and Docker Desktop running.
 
 1. Install the Python dependencies.
 
    ```bash
-   uv sync
+   uv sync --locked
    ```
 
 2. Create the settings file and open it.
@@ -22,18 +22,26 @@ You need [uv](https://docs.astral.sh/uv/), Node.js, and Docker Desktop running.
    cp .env.example .env
    ```
 
-   On Windows PowerShell use `Copy-Item .env.example .env`. Set `AGENTPHONE_WEBHOOK_SECRET` to any string (the simulator in step 5 and the server must use the same one). For the chat with a real model, also set `LLM_BASE_URL`, `LLM_MODEL` and `LLM_API_KEY` (the defaults point at LM Studio on `localhost:1234`). To approve a call at any hour in step 3, set `TEST_NUMBERS=+12135550101`, which is Sam Doe's made-up number from the seed; see "What to say if asked" for what that list can and cannot skip. Do not commit `.env`.
+   On Windows PowerShell use `Copy-Item .env.example .env`. Set `AGENTPHONE_WEBHOOK_SECRET` to any string (the simulator in step 5 of the script and the server must use the same one). The file sets `LLM_BASE_URL` to LM Studio on `localhost:1234`; with no model server running, comment that line out, or `uv run demo part-24` will try to use it instead of its scripted model. For the chat with a real model, set `LLM_BASE_URL`, `LLM_MODEL` and `LLM_API_KEY` instead. To approve a call at any hour in step 3, set `TEST_NUMBERS=+12135550101`, which is Sam Doe's made-up number from the sample data; see "What to say if asked" for what that list can and cannot skip. Do not commit `.env`.
 
-3. Start the local database. The first start applies `supabase/migrations/` and loads `supabase/seed.sql` (nine made-up debtors, each built to trip one pre-call check).
+3. Start the local database and load the sample people. The first start applies `supabase/migrations/` and loads only `supabase/local_dev.sql`, which lets the web app read the tables and adds no people. `uv run seed-demo` then loads `supabase/demo_seed.sql`: nine made-up debtors, two who may be called and seven built to trip one pre-call check each.
 
    ```bash
    npx supabase start
    ```
 
-   To get back to a clean seed at any time (this wipes the local database, including the audit log):
+   ```bash
+   uv run seed-demo
+   ```
+
+   To get back to clean sample data at any time (this wipes the local database, including the audit log and anyone you added), reset and load them again:
 
    ```bash
    npx supabase db reset
+   ```
+
+   ```bash
+   uv run seed-demo
    ```
 
 4. Start the chat API for the web app, in its own terminal. It serves `/api` on port 8000, which is where the web dev server forwards.
@@ -50,10 +58,12 @@ You need [uv](https://docs.astral.sh/uv/), Node.js, and Docker Desktop running.
 
    (`uv run api` with a real model needs `AGENTPHONE_API_KEY`, `AGENTPHONE_AGENT_ID` and `AGENTPHONE_FROM_NUMBER_ID` before it will dial anything; without them, approving a call returns "AgentPhone is not set up" and nothing is recorded.)
 
-5. Start the web app, in its own terminal. First copy `web/.env.example` to `web/.env.local` and paste in the anon key that `npx supabase status` prints.
+5. Start the web app, in its own terminal, in `web/`. First copy `web/.env.example` to `web/.env.local` and paste in the `ANON_KEY` value that `npx supabase status -o env` prints.
 
    ```bash
-   cd web && npm install && npm run dev
+   cd web
+   npm ci
+   npm run dev
    ```
 
    Open http://localhost:5173.
@@ -72,7 +82,7 @@ Check that the offline tests pass on your machine before the demo:
 uv run verify
 ```
 
-The `db`-marked tests need the local database from step 3 and a clean seed, so run this right after `npx supabase db reset`.
+The `db`-marked tests make and use their own `debtagentcall_test` database on the local server from step 3, so they need the server running but never touch the demo data. Without the server they are skipped.
 
 ## The script
 
@@ -80,7 +90,7 @@ Times add up to about 6.5 minutes. Say the quoted lines in your own words.
 
 ### 1. The debtor list (0:00 to 0:45)
 
-Show the web app. Say: "Twelve made-up people. Each badge, Ready to call or Can't call, comes from the Python rules, not from the browser."
+Show the web app. Say: "Nine made-up people. Each badge, Ready to call or Can't call, comes from the Python rules, not from the browser."
 
 **See:** the debtor list with a status dot per row; hover a "Can't call" to read the blocking rule and reason.
 
@@ -96,7 +106,7 @@ In a terminal, run the dialer's dry run at the fixed time the seed was built aro
 uv run dialer --dry-run --when 2026-11-05T19:00:00+00:00
 ```
 
-**See** (on a clean seed): two debts that would be called and seven blocked, each with a rule and a reason:
+**See** (on freshly loaded sample data): two debts that would be called and seven blocked, each with a rule and a reason:
 
 ```text
   blocked  ACC-1005  tcpa_consent: consent revoked on 2026-10-28
@@ -119,7 +129,7 @@ In the web app's chat, type `call Sam Doe`.
 
 **See:** collapsed tool lines (`find_debtor`, `check_call`, `place_call`), then an approval card that shows the person's name and a masked phone number, and the message "Nothing has been dialed". Open the `check_call` line to show every rule and its result. Click Approve.
 
-**Why it matters:** `place_call` does not dial. Only the approve button does, and approving runs every check again inside one transaction before a single dial attempt. If a check fails at that moment, the card cannot be approved, and the model has no way around it. Then try `call Morgan Patel`, who asked us to stop: `check_call` shows the `cease` rule blocking, and the card has only Deny. (Do not use Casey Morgan: the seed's call history is dated early November, so that person's call limit has long expired.)
+**Why it matters:** `place_call` does not dial. Only the approve button does, and approving runs every check again inside one transaction before a single dial attempt. If a check fails at that moment, the card cannot be approved, and the model has no way around it. Then try `call Morgan Patel`, who asked us to stop: `check_call` shows the `cease` rule blocking, and the card has only Deny. (Do not use Casey Morgan: the sample call history is dated early November 2026, so that person's call limit expired on 2026-11-12.)
 
 If the card shows only Deny for everyone, it is outside calling hours; set `TEST_NUMBERS` as described above, or use "Check at".
 
@@ -175,7 +185,7 @@ uv run dialer --dry-run --when 2026-11-05T19:00:00+00:00
 
 **Why it matters:** a stop request is caught by a pattern in `compliance/triggers.py` before the model sees the turn. Code saves the flag, revokes consent for the number, writes an audit row and hangs up, all in one transaction. Even if saving failed, the call would still end. And because the pre-call checks read the same flags, the person is not called again.
 
-Reset afterwards with `npx supabase db reset`.
+Reset afterwards with `npx supabase db reset` and then `uv run seed-demo` (the reset wipes everything in the local database).
 
 ### 6. The audit log (5:30 to 6:30)
 
@@ -205,20 +215,19 @@ docker exec supabase_db_DebtAgentCall psql -U postgres -c "update public.audit_e
 
 Say: "The model writes the words. Code decides whether a call is placed, whether the call must end, what stage it is in, whether a sentence is spoken and whether a tool runs. None of this is reviewed by a lawyer yet, and the compliance page says exactly what is not covered."
 
-## Not on main yet
+## Not in this script
 
-Check `gh pr list` before the demo. When this was written:
+These are on main but left out to keep the script to time:
 
-- **Live call view** (open pull request 39): a screen in the web app that follows a call as it happens. Skip this part of any demo until it has merged.
-- **Add and archive people from the web UI** (open pull request 40): not on main. The rule underneath already is: no tool deletes anything. Do not demo the screen until it has merged.
-
-The bill upload that is on main is an API only (`/api/bills`); the web app has no screen for it, so it is not part of this script.
+- **Live call view:** a screen in the web app that follows a call as it happens ("Watch live" after a dial). It needs a call that sends turns, so the fake phone in this script has nothing to show.
+- **Adding and archiving people:** "Add person" in the web app, or by chat (see [adding-people-by-chat.md](adding-people-by-chat.md)). Archiving keeps the person's records and blocks calls to them; nothing deletes a person.
+- **Bill upload:** an API only (`/api/bills`); the web app has no screen for it.
 
 ## What to say if asked
 
 **Why regex, and what about a classifier?** Stop triggers and the sentence filter are regular expressions on purpose: they are deterministic, readable, and testable line by line (`tests/compliance/test_stop_triggers.py`, `tests/compliance/test_utterance_filter.py`), and a reviewer or lawyer can read the exact words that fire. They are eager: a false alarm ends a call politely, a miss could break the law, so "please don't call me at work" ends the call too. Their weakness is language they do not list and negation they do not understand. A second layer, a small classifier, is planned but does not exist yet: `compliance/triggers.py: combine` already merges its hits with the regex hits (either one firing stops the call), but only the merge function exists. A classifier would only ever add stops, never remove one.
 
-**Why archive instead of delete?** Compliance records are evidence. `audit_event`, `payment` and `debt_note` refuse update, delete and truncate in the database, and a debt that has payments or notes cannot be deleted. A mistake is corrected with a new row. The people screen that archives instead of deleting is in an open pull request and not on main yet.
+**Why archive instead of delete?** Compliance records are evidence. `audit_event`, `payment` and `debt_note` refuse update, delete and truncate in the database, and a debt that has payments or notes cannot be deleted. A mistake is corrected with a new row. The same goes for people: the web app archives a person instead of deleting them, and an archived person cannot be called (`archived` rule).
 
 **How does fail-closed work?** When the code cannot tell, it says no. A few examples you can point at: no webhook secret refuses every webhook; a missing phone record, call history or flag list blocks the pre-call check; an unknown ZIP and area code blocks the call; an unreadable debt row ends the call after the disclosure with no amount; a failed save on a stop still hangs up; a failed tool save replaces the model's reply with a fixed line and hangs up; a dispute whose status cannot be read is treated as a dispute. Each has a test.
 
