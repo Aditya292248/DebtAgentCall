@@ -16,7 +16,7 @@ Include what you found, how to reproduce it using made-up data, and what you thi
 
 - The webhook signature check: any way to get the webhook to accept a request that AgentPhone did not sign, or to accept one when no secret is set.
 - The compliance gates in `compliance/`: any way to place, or let a call continue, when a rule should have blocked it, including a rule that fails open when a fact is missing.
-- The audit log: any way to edit, delete or reorder rows without `uv run audit-verify` noticing, beyond the limits the README already states.
+- The audit log: any way to edit, delete or reorder rows without `uv run audit-verify` noticing, beyond the limits already stated in [docs/reference.md](docs/reference.md#the-audit-log).
 - Approvals: any way to record a payment or another approved action without a person's approval.
 - Secrets handling: keys, tokens or webhook secrets leaking into the repository, logs, the web UI or API responses.
 

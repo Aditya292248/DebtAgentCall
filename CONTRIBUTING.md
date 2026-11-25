@@ -54,7 +54,7 @@ npm test
 npm run build
 ```
 
-Other commands (`uv run serve`, `uv run api`, `uv run dialer --dry-run`, `uv run audit-verify`, `uv run demo ...`) are described in [README.md](README.md). Commands that call a real model say so there; use them only when you need them.
+Other commands (`uv run serve`, `uv run api`, `uv run dialer --dry-run`, `uv run audit-verify`, `uv run demo ...`) are described in [docs/reference.md](docs/reference.md#commands). Commands that call a real model say so there; use them only when you need them.
 
 ### Windows notes
 

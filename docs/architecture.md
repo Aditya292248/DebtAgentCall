@@ -64,7 +64,7 @@ flowchart LR
 | `dialer/` | `service.py` (`dial_one`, `dial_queue`, `plan_queue`), `cli.py` (`uv run dialer`), `reconcile.py` (`uv run reconcile`). The only code that asks AgentPhone to place a call. No model. |
 | `model/` | `chat()` and `chat_stream()` over any OpenAI-compatible endpoint (`openai_compatible.py`), `provider.py` (settings from `.env`), and `fake.py` (a scripted model for tests and demos). |
 | `sim/` | A fake AgentPhone: `agentphone_sim.py` plays a scripted caller (YAML in `sim/scripts/`) against the webhook, with real signatures. |
-| `supabase/migrations/` | The schema, one file per feature, plus `supabase/seed.sql` (nine made-up debtors and call history that trip one check each). |
+| `supabase/migrations/` | The schema, one file per feature. Next to it, `supabase/local_dev.sql` (loaded on a local start: read access for the web app, no people) and `supabase/demo_seed.sql` (nine made-up debtors and call history that trip one check each, loaded only by `uv run seed-demo`). |
 | `web/` | The React app: debtor list with "Ready to call" or "Can't call", the operator chat with approval cards, the audit log with a chain check. It never decides anything itself: badges come from `/api/precall`. |
 | `tasks/` | The `uv run` commands: `verify`, `demo`, `accept`, `serve`, `audit-verify`. `checks.py` holds the demos and acceptance checks. |
 | `instructions/`, `skills/` | The model's prompts (system, one per stage, operator, subagent) and five short playbooks (hardship, angry caller, and so on). Plain Markdown, re-read every turn. |
@@ -175,7 +175,7 @@ After every turn the webhook saves the `CallState` (stage, verified, disclosed, 
 
 ## Data model
 
-Tables are in `supabase/migrations/`. Row level security is on for every table; the server connects as the database owner, and the web app reads with the anon key only from the five tables the end of `supabase/seed.sql` opens up for local development (`debtor`, `phone`, `debt`, `audit_event` and `payment`, which the balance function reads).
+Tables are in `supabase/migrations/`. Row level security is on for every table; the server connects as the database owner, and the web app reads with the anon key only from the five tables `supabase/local_dev.sql` opens up for local development (`debtor`, `phone`, `debt`, `audit_event` and `payment`, which the balance function reads).
 
 | Table | Holds | Written by |
 | --- | --- | --- |
